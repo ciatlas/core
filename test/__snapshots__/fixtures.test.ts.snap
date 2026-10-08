@@ -1,0 +1,72 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`fixture repositories > broken: findings snapshot 1`] = `
+[
+  "error WFC502 .github/workflows/expressions.yml:10:25 Invalid expression "inputs.mode = 'release'": Unexpected symbol: '='",
+  "error WFC502 .github/workflows/expressions.yml:13:49 Invalid expression "inputs.mode == 'release' &&": Unexpected end of expression: '&&'",
+  "error WFC503 .github/workflows/schema.yml:6:5 Unexpected value 'stepz'",
+  "error WFC503 .github/workflows/schema.yml:8:22 Unexpected value 'soon'",
+  "error WFC504 .github/workflows/yaml-error.yml:8:9 Implicit map keys need to be followed by map values",
+  "error WFC504 .github/workflows/yaml-error.yml:10:1 Flow sequence in block collection must be sufficiently indented and end with a ]",
+]
+`;
+
+exports[`fixture repositories > clean: findings snapshot 1`] = `[]`;
+
+exports[`fixture repositories > composite-actions: findings snapshot 1`] = `
+[
+  "warning WFC104 .github/actions/install-tools/action.yml:10:3 Input "token" of .github/actions/install-tools is never read",
+  "warning WFC303 .github/actions/install-tools/action.yml:17:3 Output "cache_key" of .github/actions/install-tools is not read by any of its 1 user",
+  "error WFC301 .github/workflows/build.yml:9:30 Step "tools" runs after this step, so its outputs are not available yet",
+  "error WFC101 .github/workflows/build.yml:11:15 Step tools uses .github/actions/install-tools without required input "versions-file" — GitHub will run it with an empty value",
+  "error WFC102 .github/workflows/build.yml:13:11 .github/actions/install-tools has no input "version-file" — did you mean "versions-file"?",
+  "error WFC301 .github/workflows/build.yml:15:34 .github/actions/install-tools has no output "cache-key" — did you mean "cache_key"?",
+]
+`;
+
+exports[`fixture repositories > contracts-drift: findings snapshot 1`] = `
+[
+  "warning WFC104 .github/workflows/deploy.yml:15:7 Input "legacy-flag" of .github/workflows/deploy.yml is never read",
+]
+`;
+
+exports[`fixture repositories > cycles: findings snapshot 1`] = `
+[
+  "error WFC601 .github/workflows/c.yml:5:11 Call cycle: .github/workflows/b.yml → .github/workflows/c.yml → .github/workflows/b.yml",
+  "error WFC606 .github/workflows/main.yml:8:11 Workflow ".github/workflows/does-not-exist.yml" does not exist",
+  "info WFC603 .github/workflows/main.yml:10:11 jobs.remote calls remote workflow octo-org/shared/.github/workflows/lint.yml@v2; its interface is not verified",
+  "error WFC608 .github/workflows/main.yml:12:22 jobs.report needs "linting", which is not a job in .github/workflows/main.yml (jobs: stage-b, missing, remote, report)",
+]
+`;
+
+exports[`fixture repositories > deep-nesting: findings snapshot 1`] = `
+[
+  "warning WFC104 .github/workflows/build.yml:11:7 Input "verbose" of .github/workflows/build.yml is never read (yet 1 caller passes it)",
+  "warning WFC303 .github/workflows/build.yml:22:7 Output "checksum" of jobs.compile is never read",
+  "warning WFC304 .github/workflows/build.yml:22:21 Step "sum" never writes output "sha" (it writes sha256) — did you mean "sha256"?",
+  "error WFC101 .github/workflows/build.yml:29:11 jobs.package calls .github/workflows/package.yml without required input "channel"",
+  "error WFC201 .github/workflows/build.yml:29:11 jobs.package calls .github/workflows/package.yml without required secret "signing-key"",
+  "warning WFC203 .github/workflows/package.yml:17:7 Secret "signing-key" of .github/workflows/package.yml is never read",
+  "warning WFC104 .github/workflows/pipeline.yml:15:7 Input "legacy-flag" of .github/workflows/pipeline.yml is never read",
+  "warning WFC107 .github/workflows/pipeline.yml:24:18 Required input "notes" of .github/workflows/build.yml is fed from optional input "release-notes" without a default",
+  "info WFC106 .github/workflows/pipeline.yml:25:7 jobs.build passes "verbose" to .github/workflows/build.yml, which never reads it",
+  "info WFC204 .github/workflows/pipeline.yml:26:5 jobs.build inherits all secrets; .github/workflows/build.yml and its callees read REGISTRY_TOKEN",
+  "error WFC301 .github/workflows/pipeline.yml:33:73 jobs.build has no output "image-digest"",
+  "error WFC302 .github/workflows/pipeline.yml:39:33 jobs.notify reads needs.build but does not list "build" under needs",
+  "warning WFC501 .github/workflows/publish.yml:34:36 env.TARGET_URL is not defined in this scope",
+]
+`;
+
+exports[`fixture repositories > dynamic-matrix: findings snapshot 1`] = `
+[
+  "info WFC403 .github/workflows/matrix.yml:17:7 jobs.dynamic has a runtime-computed matrix; reads of matrix.os, matrix.config cannot be verified",
+  "warning WFC402 .github/workflows/matrix.yml:33:64 matrix.shard is undefined in 2 of 3 combinations of jobs.sharded",
+  "error WFC404 .github/workflows/matrix.yml:36:24 matrix.sute is not defined in any combination of jobs.sharded (keys: suite, shard, experimental)",
+]
+`;
+
+exports[`fixture repositories > incident-matrix: findings snapshot 1`] = `
+[
+  "error WFC401 .github/workflows/tests.yml:23:19 Input "config" for .github/workflows/run-suite.yml is empty in 1 of 3 matrix combinations — matrix.config is not defined there",
+]
+`;

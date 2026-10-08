@@ -1,0 +1,28 @@
+{
+  "name": "@wfc/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Workflow data-flow engine: IR, expression analysis, matrix expansion, graph and rules.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --clean --target node22",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@actions/expressions": "^0.3.61",
+    "@actions/workflow-parser": "^0.3.61",
+    "diff": "^9.0.0",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1"
+  }
+}
