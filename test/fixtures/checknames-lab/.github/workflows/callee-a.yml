@@ -1,0 +1,31 @@
+name: Callee A
+on:
+  workflow_call:
+    inputs:
+      label:
+        type: string
+        default: none
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: [{ run: 'true' }]
+
+  named-callee:
+    name: Callee Named
+    runs-on: ubuntu-latest
+    steps: [{ run: 'true' }]
+
+  mx-callee:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        k: [1, 2]
+    steps: [{ run: 'true' }]
+
+  input-name:
+    name: In ${{ inputs.label }}
+    runs-on: ubuntu-latest
+    steps: [{ run: 'true' }]

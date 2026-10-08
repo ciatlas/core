@@ -8,6 +8,8 @@ export type SiteField =
   | 'workflow.other'
   | 'input.default'
   | 'job.if'
+  /** `jobs.<id>.name`, when it contains an expression (it decides the job's check-run name). */
+  | 'job.name'
   | 'job.with'
   | 'job.secrets'
   | 'job.env'
@@ -146,10 +148,19 @@ export interface StepDecl {
   writesEnv: { names: string[]; dynamic: boolean };
 }
 
+/** `permissions:` of a workflow or job: a shorthand, or a scope → level map (`{}` grants nothing). */
+export type PermissionsDecl = 'read-all' | 'write-all' | Record<string, 'read' | 'write' | 'none'>;
+
 export interface JobDecl {
   id: string;
   loc: Loc;
   name?: string;
+  /** The `name:` scalar when it contains `${{ }}` (evaluated per matrix combination for check-run names). */
+  nameSite?: ExprSite;
+  nameLoc?: Loc;
+  permissions?: PermissionsDecl;
+  /** `if:` written as a YAML boolean (`if: false`), which has no expression site. */
+  ifValue?: boolean;
   needs: { id: string; loc: Loc }[];
   ifSite?: ExprSite;
   uses?: UsesRef;
@@ -193,6 +204,7 @@ export interface WorkflowDecl extends BaseDecl {
   };
   dispatch?: { loc: Loc; inputs: Record<string, InputDecl> };
   env: Record<string, Binding>;
+  permissions?: PermissionsDecl;
   jobs: Record<string, JobDecl>;
 }
 

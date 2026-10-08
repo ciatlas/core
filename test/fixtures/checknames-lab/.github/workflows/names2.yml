@@ -1,0 +1,105 @@
+name: Names 2
+on:
+  push:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  lone-matrix:
+    name: ${{ matrix.os }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu, windows]
+    steps: [{ run: 'true' }]
+
+  lone-blank:
+    name: ${{ '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu]
+    steps: [{ run: 'true' }]
+
+  lone-spaced:
+    name: '  ${{ ''Padded'' }}  '
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu]
+    steps: [{ run: 'true' }]
+
+  empty-name:
+    name: ''
+    runs-on: ubuntu-latest
+    steps: [{ run: 'true' }]
+
+  include-mixed:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        a: [x]
+        include:
+          - a: x
+            extra: 1
+          - a: y
+            extra: 2
+          - other: 3
+    steps: [{ run: 'true' }]
+
+  include-overwrite:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        a: [x]
+        b: [one, two]
+        include:
+          - b: two
+            c: added
+    steps: [{ run: 'true' }]
+
+  numbers:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        n: [1.0, 0.5, -2, 12345678901234567890, 1e-7, 0x10, 017, 'true', 3.0e2]
+    steps: [{ run: 'true' }]
+
+  key-order:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        z: [last]
+        a: [first]
+        include:
+          - z: last
+            a: first
+            m: middle
+    steps: [{ run: 'true' }]
+
+  exclude-then-name:
+    name: Ex
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        a: [1, 2]
+        b: [x, y]
+        exclude:
+          - a: 1
+            b: y
+    steps: [{ run: 'true' }]
+
+  call-lone-expr:
+    name: ${{ 'Lone' }}
+    strategy:
+      matrix:
+        x: [p]
+    uses: ./.github/workflows/callee-c.yml
+
+  call-named-matrix:
+    name: Named Caller
+    strategy:
+      matrix:
+        x: [p, q]
+    uses: ./.github/workflows/callee-c.yml

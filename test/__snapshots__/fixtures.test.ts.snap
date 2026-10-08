@@ -11,6 +11,8 @@ exports[`fixture repositories > broken: findings snapshot 1`] = `
 ]
 `;
 
+exports[`fixture repositories > checknames-lab: findings snapshot 1`] = `[]`;
+
 exports[`fixture repositories > clean: findings snapshot 1`] = `[]`;
 
 exports[`fixture repositories > composite-actions: findings snapshot 1`] = `

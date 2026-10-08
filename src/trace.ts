@@ -36,6 +36,7 @@ export interface TraceOptions {
 
 const ROLE: Partial<Record<SiteField, string>> = {
   'job.if': 'job condition',
+  'job.name': 'job name',
   'step.if': 'step condition',
   'action.runs-if': 'pre/post condition',
   'step.run': 'run script',

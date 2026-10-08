@@ -1,5 +1,6 @@
 import { contractRules } from './contracts';
 import { expressionRules } from './expressions';
+import { impactRules } from './impact';
 import { inputRules } from './inputs';
 import { matrixRules } from './matrix';
 import { outputRules } from './outputs';
@@ -17,6 +18,7 @@ export const builtinRules: RuleDefinition[] = [
   ...expressionRules,
   ...structureRules,
   ...contractRules,
+  ...impactRules,
   ...overrideRules,
 ];
 
@@ -27,5 +29,6 @@ export function createRegistry(): RuleRegistry {
   return registry;
 }
 
+export { IMPACT_CODES } from './impact';
 export * from './registry';
 export * from './types';

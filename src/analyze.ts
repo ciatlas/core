@@ -16,11 +16,12 @@ import {
   scopePlan,
 } from './contracts';
 import { type Project, ProjectIndex } from './graph';
+import { computeImpact, type DeclaredInput, type ImpactPolicy, type ImpactResult } from './impact';
 import type { JobDecl, UnitDecl } from './ir';
 import { type Logger, silentLogger } from './logger';
 import { declaredMatrix, expandMatrix, type MatrixExpansion } from './matrix';
 import { detectRepository, type FileSystem, loadProject, nodeFileSystem } from './project';
-import { createRegistry } from './rules/index';
+import { createRegistry, IMPACT_CODES } from './rules/index';
 import type { RuleRegistry } from './rules/registry';
 import type {
   Finding,
@@ -48,6 +49,18 @@ export interface AnalyzeOptions {
   repository?: string;
   /** Only run these rules (codes or names). */
   only?: string[];
+  /**
+   * Impact mode: the baseline's project (analysed from git), where it came from, what the pull request declares and
+   * the policy (read from the baseline's config, so a pull request cannot relax its own check).
+   */
+  impact?: {
+    base: ProjectIndex;
+    baseline: ImpactResult['baseline'];
+    declared: DeclaredInput;
+    policy: ImpactPolicy;
+    /** Files of the units the baseline published; their head versions are loaded even when nothing uses them. */
+    publishedFiles?: string[];
+  };
   /** Compare against the contracts in `.github/flowpact/` (`flowpact check`). */
   checkContracts?: boolean;
   /** Clock for override expiry; defaults to the current time. */
@@ -98,6 +111,8 @@ export interface AnalysisResult {
   contracts?: ContractPlan;
   /** The config file, for code frames of FP9xx findings. */
   configSource?: SourceFile;
+  /** Impact mode's changes and verdict, when it ran. */
+  impact?: ImpactResult;
   /**
    * With plugins skipped: config entries naming rules that are not loaded (presumably plugin rules). They are ignored
    * for this run; the caller should show them as warnings.
@@ -167,6 +182,14 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
   const started = performance.now();
   const logger = opts.logger ?? silentLogger;
   const config = opts.config ?? defaultConfig();
+  // Units to load even when nothing here uses them: what the config (and, in impact mode, the baseline) publishes.
+  const publishPatterns = [
+    ...new Set([
+      ...(config.impact.publish ?? []),
+      ...(opts.impact?.policy.publish ?? []),
+      ...(opts.impact?.publishedFiles ?? []),
+    ]),
+  ];
   const registry = opts.registry ?? createRegistry();
   const repository = opts.repository ?? config.repository ?? detectRepository(opts.root);
   logger.debug('config resolved', {
@@ -180,6 +203,7 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
       root: opts.root,
       ...(opts.fs ? { fs: opts.fs } : {}),
       ...(opts.paths ? { paths: opts.paths } : {}),
+      ...(publishPatterns.length ? { publish: publishPatterns } : {}),
       ...(repository ? { repository } : {}),
       validateSchema: opts.validateSchema ?? true,
       logger,
@@ -266,6 +290,18 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
     ...legacyContracts.slice(0, 1),
   ];
 
+  const impact = opts.impact
+    ? logger.time('impact', () =>
+        computeImpact(
+          opts.impact!.base,
+          index,
+          opts.impact!.baseline,
+          opts.impact!.declared,
+          opts.impact!.policy,
+        ),
+      )
+    : undefined;
+
   const runRules = (phase: 'main' | 'post', extra: Partial<RuleContext>): Finding[] => {
     const out: Finding[] = [];
     for (const rule of registry.all()) {
@@ -284,6 +320,7 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
         ...(opts.configFile ? { configFile: opts.configFile } : {}),
         ...(contracts ? { contracts } : {}),
         ...(legacyFiles.length ? { legacyFiles } : {}),
+        ...(impact ? { impact } : {}),
         ...extra,
         report: (input) => out.push(toFinding(rule, severity, input, registry)),
       };
@@ -321,7 +358,11 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
     const rule = registry.get(code);
     // Contract rules only run in check mode; under `lint` their overrides cannot be judged. Rules of skipped plugins
     // never run at all.
-    const notRun = !rule || (rule.category === 'contracts' && !opts.checkContracts);
+    const notRun =
+      !rule ||
+      (IMPACT_CODES.includes(rule.code)
+        ? !opts.impact
+        : rule.category === 'contracts' && !opts.checkContracts);
     if (severity === 'off' || (only && !only.includes(code)) || notRun) u.inactive = true;
   }
   // The contract of a targeted workflow belongs to it (e.g. a conflicted contract, FP805), and so do the contracts
@@ -387,6 +428,7 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
     suppressed,
     ...(contracts ? { contracts } : {}),
     ...(unloaded.length ? { unloadedRules: unloaded } : {}),
+    ...(impact ? { impact } : {}),
     ...(opts.configFile && opts.configText !== undefined
       ? { configSource: new SourceFile(opts.configFile, opts.configText) }
       : {}),

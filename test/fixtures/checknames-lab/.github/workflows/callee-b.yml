@@ -1,0 +1,12 @@
+name: Callee B
+on: workflow_call
+
+permissions: {}
+
+jobs:
+  middle:
+    name: Middle
+    uses: ./.github/workflows/callee-c.yml
+
+  middle-plain:
+    uses: ./.github/workflows/callee-c.yml

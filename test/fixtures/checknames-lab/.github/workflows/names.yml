@@ -1,0 +1,166 @@
+name: Names
+on:
+  push:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  plain:
+    runs-on: ubuntu-latest
+    steps: [{ run: 'true' }]
+
+  named:
+    name: Literal name
+    runs-on: ubuntu-latest
+    steps: [{ run: 'true' }]
+
+  spaced:
+    name: '  Spaced  name  '
+    runs-on: ubuntu-latest
+    steps: [{ run: 'true' }]
+
+  blank-expr:
+    name: ${{ '' }}
+    runs-on: ubuntu-latest
+    steps: [{ run: 'true' }]
+
+  mx:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu]
+        py: ['3.10', 3.10]
+        flag: [true, false]
+        num: [1, 1e15]
+    steps: [{ run: 'true' }]
+
+  mx-named:
+    name: Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        a: [x, y]
+        b: [one]
+        include:
+          - a: x
+            extra: added
+          - a: z
+            b: two
+    steps: [{ run: 'true' }]
+
+  mx-objects:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        cfg:
+          - { os: linux, v: 1 }
+        arr:
+          - [1, 2]
+    steps: [{ run: 'true' }]
+
+  mx-odd:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        a: ['x, y', 'p)q', '']
+    steps: [{ run: 'true' }]
+
+  mx-null:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - a: null
+            b: kept
+    steps: [{ run: 'true' }]
+
+  mx-include-only:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { k: first }
+          - { k: second, extra: e }
+    steps: [{ run: 'true' }]
+
+  expr-matrix:
+    name: Build ${{ matrix.os }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu, windows]
+    steps: [{ run: 'true' }]
+
+  expr-literal:
+    name: Lit ${{ 'X' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        a: [1, 2]
+    steps: [{ run: 'true' }]
+
+  expr-only-literal:
+    name: ${{ 'Only' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        a: [1, 2]
+    steps: [{ run: 'true' }]
+
+  expr-github:
+    name: Ref ${{ github.event_name }}
+    runs-on: ubuntu-latest
+    steps: [{ run: 'true' }]
+
+  skipped-plain:
+    if: false
+    runs-on: ubuntu-latest
+    steps: [{ run: 'true' }]
+
+  skipped-mx:
+    if: false
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [a, b]
+    steps: [{ run: 'true' }]
+
+  skipped-mx-named:
+    name: Skip ${{ matrix.os }}
+    if: false
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [a, b]
+    steps: [{ run: 'true' }]
+
+  skipped-mx-literal:
+    name: Skipped literal
+    if: false
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [a, b]
+    steps: [{ run: 'true' }]
+
+  boom:
+    runs-on: ubuntu-latest
+    steps: [{ run: 'exit 1' }]
+
+  after-boom:
+    needs: boom
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [a, b]
+    steps: [{ run: 'true' }]
+
+  dup:
+    name: Duplicate
+    runs-on: ubuntu-latest
+    steps: [{ run: 'true' }]
+
+  Case-Job:
+    runs-on: ubuntu-latest
+    steps: [{ run: 'true' }]

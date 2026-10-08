@@ -1,0 +1,14 @@
+name: Callee C
+on: workflow_call
+
+permissions: {}
+
+jobs:
+  leaf:
+    name: Leaf
+    runs-on: ubuntu-latest
+    steps: [{ run: 'true' }]
+
+  leaf-plain:
+    runs-on: ubuntu-latest
+    steps: [{ run: 'true' }]

@@ -21,6 +21,11 @@ describe('config', () => {
       overrides: [],
       matrixShapes: {},
       plugins: [],
+      impact: {
+        labels: { major: 'semver:major', minor: 'semver:minor', patch: 'semver:patch', none: 'semver:none' },
+        types: { feat: 'minor', fix: 'patch', perf: 'patch' },
+        uncertain: 'warn',
+      },
     });
   });
 

@@ -25,6 +25,7 @@ import type {
   MatrixDim,
   MatrixEntry,
   OutputDecl,
+  PermissionsDecl,
   SecretDecl,
   SiteField,
   StepDecl,
@@ -114,6 +115,7 @@ function classify(
       }
       const f = p[2];
       if (f === 'if' && p.length === 3) return { field: 'job.if', job, cond: true };
+      if (f === 'name' && p.length === 3) return { field: 'job.name', job, cond: false };
       if (f === 'with' && typeof p[3] === 'string') return { field: 'job.with', job, key: p[3], cond: false };
       if (f === 'secrets' && typeof p[3] === 'string')
         return { field: 'job.secrets', job, key: p[3], cond: false };
@@ -547,12 +549,21 @@ function jobs(unit: Unit, node: unknown, ctx: ParseContext): Record<string, JobD
     const secretsInherit = isScalar(secretsPair?.value) && String(secretsPair.value.value) === 'inherit';
     const ifSite = unit.siteByPath.get(pathKey([...p, 'if']));
     const name = str(get(j, 'name'));
+    const nameSite = unit.siteByPath.get(pathKey([...p, 'name']));
+    const namePair = getPair(j, 'name');
+    const perms = permissions(get(j, 'permissions'));
+    const ifNode = get(j, 'if');
+    const ifValue = isScalar(ifNode) && typeof ifNode.value === 'boolean' ? ifNode.value : undefined;
     const strategy = get(j, 'strategy');
     const m = matrix(unit, strategy, [...p, 'strategy']);
     out[id] = {
       id,
       loc: nodeLoc(unit.source, pair.key),
-      ...(name ? { name } : {}),
+      ...(name !== undefined ? { name } : {}),
+      ...(nameSite ? { nameSite } : {}),
+      ...(namePair?.value ? { nameLoc: nodeLoc(unit.source, namePair.value as Node) } : {}),
+      ...(perms ? { permissions: perms } : {}),
+      ...(ifValue !== undefined ? { ifValue } : {}),
       needs,
       ...(ifSite ? { ifSite } : {}),
       ...(usesRaw ? { uses: classifyUses(usesRaw, 'job', nodeLoc(unit.source, usesNode), ctx) } : {}),
@@ -565,6 +576,22 @@ function jobs(unit: Unit, node: unknown, ctx: ParseContext): Record<string, JobD
       ...(m ? { matrix: m } : {}),
       steps: steps(unit, get(j, 'steps'), [...p, 'steps'], 'workflow', ctx),
     };
+  }
+  return out;
+}
+
+/** `permissions:` as written: `read-all` / `write-all`, or a map of scopes (unknown values are skipped). */
+function permissions(node: unknown): PermissionsDecl | undefined {
+  if (isScalar(node)) {
+    const v = String(node.value);
+    return v === 'read-all' || v === 'write-all' ? v : undefined;
+  }
+  if (!isMap(node)) return undefined;
+  const out: Record<string, 'read' | 'write' | 'none'> = {};
+  for (const pair of node.items) {
+    const key = isScalar(pair.key) ? String(pair.key.value) : undefined;
+    const value = isScalar(pair.value) ? String(pair.value.value) : undefined;
+    if (key && (value === 'read' || value === 'write' || value === 'none')) out[key] = value;
   }
   return out;
 }
@@ -660,6 +687,7 @@ export function parseWorkflowFile(path: string, text: string, ctx: ParseContext)
       }
     : undefined;
   const name = str(get(root, 'name'));
+  const workflowPermissions = permissions(get(root, 'permissions'));
   return {
     kind: 'workflow',
     path,
@@ -673,6 +701,7 @@ export function parseWorkflowFile(path: string, text: string, ctx: ParseContext)
     ...(call ? { call } : {}),
     ...(dispatch ? { dispatch } : {}),
     env: bindings(unit, get(root, 'env'), ['env']),
+    ...(workflowPermissions ? { permissions: workflowPermissions } : {}),
     jobs: jobs(unit, get(root, 'jobs'), ctx),
   };
 }

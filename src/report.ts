@@ -85,6 +85,30 @@ export const reportSchema = z.object({
       ),
     })
     .optional(),
+  impact: z
+    .object({
+      baseline: z.object({ kind: z.enum(['ref', 'release']), ref: z.string(), commit: z.string() }),
+      required: z.enum(['none', 'patch', 'minor', 'major']),
+      declared: z
+        .object({
+          kind: z.enum(['explicit', 'title', 'labels', 'version']),
+          value: z.string(),
+          level: z.enum(['none', 'patch', 'minor', 'major']),
+        })
+        .optional(),
+      ok: z.boolean(),
+      changes: z.array(
+        z.object({
+          unit: z.string(),
+          kind: z.string(),
+          level: z.enum(['none', 'patch', 'minor', 'major']),
+          certain: z.boolean(),
+          message: z.string(),
+          loc: locSchema,
+        }),
+      ),
+    })
+    .optional(),
   rules: z.array(
     z.object({ code: z.string(), name: z.string(), severity: z.enum(['error', 'warning', 'info', 'off']) }),
   ),
@@ -129,6 +153,17 @@ export function toJsonReport(result: AnalysisResult, opts: { includeGraph?: bool
             counts: result.contracts.counts,
             // File contents are omitted; use `flowpact generate --dry-run` or the patch for those.
             entries: result.contracts.entries.map(({ before: _b, after: _a, ...e }) => e),
+          },
+        }
+      : {}),
+    ...(result.impact
+      ? {
+          impact: {
+            baseline: result.impact.baseline,
+            required: result.impact.verdict.required,
+            ...(result.impact.verdict.declared ? { declared: result.impact.verdict.declared } : {}),
+            ok: result.impact.verdict.ok,
+            changes: result.impact.changes,
           },
         }
       : {}),

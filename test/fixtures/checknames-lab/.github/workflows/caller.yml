@@ -1,0 +1,52 @@
+name: Caller
+on:
+  push:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  call-plain:
+    uses: ./.github/workflows/callee-a.yml
+    with:
+      label: plain
+
+  call-named:
+    name: Caller Named
+    uses: ./.github/workflows/callee-a.yml
+    with:
+      label: named
+
+  call-mx:
+    strategy:
+      matrix:
+        x: [p, q]
+    uses: ./.github/workflows/callee-a.yml
+    with:
+      label: ${{ matrix.x }}
+
+  call-mx-expr:
+    name: C ${{ matrix.x }}
+    strategy:
+      matrix:
+        x: [p]
+    uses: ./.github/workflows/callee-a.yml
+
+  call-nested:
+    uses: ./.github/workflows/callee-b.yml
+
+  call-skip:
+    if: false
+    uses: ./.github/workflows/callee-a.yml
+
+  call-skip-mx:
+    if: false
+    strategy:
+      matrix:
+        x: [p, q]
+    uses: ./.github/workflows/callee-a.yml
+
+  dup:
+    name: Duplicate
+    runs-on: ubuntu-latest
+    steps: [{ run: 'true' }]

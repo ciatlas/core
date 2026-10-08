@@ -1,6 +1,7 @@
 import type { Override, WfcConfig } from '../config';
 import type { ContractPlan } from '../contracts';
 import type { ProjectIndex } from '../graph';
+import type { ImpactResult } from '../impact';
 import type { JobDecl, UnitDecl } from '../ir';
 import type { Logger } from '../logger';
 import type { MatrixExpansion } from '../matrix';
@@ -97,6 +98,8 @@ export interface RuleContext {
   readonly contracts?: ContractPlan;
   /** Files at the pre-0.2.0 location (`.github/workflow-contracts/`) that flowpact still reads. */
   readonly legacyFiles?: string[];
+  /** Impact mode: graded changes of published units and the verdict; only present when impact mode runs. */
+  readonly impact?: ImpactResult;
   /** Override usage; only present for post-phase rules. */
   readonly overrides?: OverrideUsage[];
   /** Cached matrix expansion of a job. */

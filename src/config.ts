@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { isMap, isSeq, LineCounter, parseDocument } from 'yaml';
 import { z } from 'zod';
+import { matchesPattern } from './glob';
 import { insideRepository } from './project';
 import type { Loc } from './source';
 import { SCHEMA_VERSIONS, schemaUrl } from './version';
@@ -103,6 +104,55 @@ export const configSchema = z
       .describe(
         'Repo-relative JavaScript modules (.js/.mjs) exporting extra rules (default export: rule or array of rules).',
       ),
+    impact: z
+      .object({
+        publish: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'Files or globs of the units other repositories use. Default: every workflow with `workflow_call` and every action outside `.github/`.',
+          ),
+        declaredBy: z
+          .enum(['explicit', 'title', 'labels'])
+          .optional()
+          .describe(
+            'The authoritative source of the declared impact; others are advisory. Default: `explicit` when given, else `title`.',
+          ),
+        labels: z
+          .object({
+            major: z.string().default('semver:major'),
+            minor: z.string().default('semver:minor'),
+            patch: z.string().default('semver:patch'),
+            none: z.string().default('semver:none'),
+          })
+          .strict()
+          .default({
+            major: 'semver:major',
+            minor: 'semver:minor',
+            patch: 'semver:patch',
+            none: 'semver:none',
+          })
+          .describe('Pull request labels that declare each impact level.'),
+        types: z
+          .record(z.string(), z.enum(['none', 'patch', 'minor', 'major']))
+          .default({ feat: 'minor', fix: 'patch', perf: 'patch' })
+          .describe(
+            'Conventional Commits types and the impact they declare; other types declare `none`, `!` declares `major`.',
+          ),
+        uncertain: z
+          .enum(['warn', 'fail'])
+          .default('warn')
+          .describe(
+            'Changes flowpact cannot fully resolve: only warn (default), or count them towards the required impact.',
+          ),
+      })
+      .strict()
+      .default({
+        labels: { major: 'semver:major', minor: 'semver:minor', patch: 'semver:patch', none: 'semver:none' },
+        types: { feat: 'minor', fix: 'patch', perf: 'patch' },
+        uncertain: 'warn',
+      })
+      .describe('Impact mode: which units are published and how pull requests declare their release impact.'),
   })
   .strict();
 
@@ -216,17 +266,4 @@ export function configJsonSchema(): Record<string, unknown> {
   };
 }
 
-/** Minimal glob: `*` matches within a segment, `**` across segments; plain strings match as path prefixes. */
-export function matchesPattern(path: string, pattern: string): boolean {
-  if (!pattern.includes('*'))
-    return path === pattern || path.startsWith(pattern.endsWith('/') ? pattern : `${pattern}/`);
-  const re = new RegExp(
-    `^${pattern
-      .split('**')
-      .map((part) => part.split('*').map(escapeRe).join('[^/]*'))
-      .join('.*')}$`,
-  );
-  return re.test(path);
-}
-
-const escapeRe = (s: string) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+export { matchesPattern };

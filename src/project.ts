@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { matchesPattern } from './glob';
 import type { Project } from './graph';
 import type { ActionDecl, UnitDecl, UsesRef, WorkflowDecl } from './ir';
 import type { Logger } from './logger';
@@ -90,9 +91,12 @@ export function nodeFileSystem(root: string): FileSystem {
     },
     walk: (dir) => {
       if (!inside(dir) || !statSync(abs(dir)).isDirectory()) return [];
-      return (readdirSync(abs(dir), { recursive: true, withFileTypes: true }) as import('node:fs').Dirent[])
-        .map((e) => toPosix(relative(root, join(e.parentPath, e.name))))
-        .filter((f) => isFile(f));
+      return (
+        (readdirSync(abs(dir), { recursive: true, withFileTypes: true }) as import('node:fs').Dirent[])
+          .map((e) => toPosix(relative(root, join(e.parentPath, e.name))))
+          // Dependencies and git internals never hold workflows or published actions.
+          .filter((f) => !/(^|\/)(node_modules|\.git)\//.test(f) && isFile(f))
+      );
     },
     isDir: (p) => inside(p) && statSync(abs(p)).isDirectory(),
   };
@@ -106,7 +110,7 @@ export function memoryFileSystem(files: Record<string, string>): FileSystem {
   return {
     read: (p) => norm[toPosix(p)],
     list: (dir) => keys.filter((k) => k.startsWith(`${dir}/`) && !k.slice(dir.length + 1).includes('/')),
-    walk: (dir) => keys.filter((k) => k.startsWith(`${dir}/`)),
+    walk: (dir) => (dir === '.' || dir === '' ? [...keys] : keys.filter((k) => k.startsWith(`${dir}/`))),
     isDir: (p) => keys.some((k) => k.startsWith(`${toPosix(p).replace(/\/$/, '')}/`)),
   };
 }
@@ -119,6 +123,8 @@ export interface LoadProjectOptions {
   repository?: string;
   validateSchema?: boolean;
   logger?: Logger;
+  /** Globs of published units (`impact.publish`): matching actions are loaded even when nothing here uses them. */
+  publish?: string[];
 }
 
 const isYaml = (p: string) => /\.ya?ml$/i.test(p);
@@ -182,6 +188,25 @@ export function loadProject(opts: LoadProjectOptions): Project {
 
   const discovered = fs.list(WORKFLOWS_DIR).filter(isYaml).sort();
   const actionFiles = fs.walk(ACTIONS_DIR).filter(isActionFile).sort();
+  // The repository's own action (what `uses: owner/repo@ref` runs) is part of the project even when no workflow here
+  // uses it, and so are the actions `impact.publish` lists.
+  if (['action.yml', 'action.yaml'].some((f) => fs.read(f) !== undefined)) actionFiles.push('action.yml');
+  for (const pattern of opts.publish ?? []) {
+    // An exact file is loaded directly; a glob walks the directory before its first wildcard.
+    if (!/[*?[]/.test(pattern)) {
+      const file = isActionFile(pattern) ? pattern : `${pattern.replace(/\/$/, '')}/action.yml`;
+      if (isActionFile(file) && !file.startsWith('.github/actions/') && fs.read(file) !== undefined)
+        actionFiles.push(file);
+      continue;
+    }
+    const literal = pattern.split(/[*?[]/)[0]!;
+    const dir = literal.includes('/') ? literal.slice(0, literal.lastIndexOf('/')) : '';
+    for (const f of dir ? fs.walk(dir) : fs.walk('.')) {
+      if (!isActionFile(f) || f.startsWith('.github/actions/')) continue;
+      const unitDir = f.replace(/\/?action\.ya?ml$/i, '') || '.';
+      if (matchesPattern(f, pattern) || matchesPattern(unitDir, pattern)) actionFiles.push(f);
+    }
+  }
   logger.info(`discovered ${discovered.length} workflow(s) and ${actionFiles.length} local action(s)`);
   logger.debug('files', { workflows: discovered, actions: actionFiles });
 
@@ -221,7 +246,7 @@ export function loadProject(opts: LoadProjectOptions): Project {
   }
 
   for (const f of discovered) loadWorkflow(f);
-  for (const f of actionFiles) loadAction(f.replace(/\/action\.ya?ml$/i, ''));
+  for (const f of actionFiles) loadAction(f.replace(/\/?action\.ya?ml$/i, '') || '.');
 
   // Follow local references until closure (actions outside .github/actions, workflows passed by path).
   const resolveRefs = (unit: UnitDecl) => {
