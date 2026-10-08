@@ -177,10 +177,15 @@ export interface JobDecl {
 export interface Diagnostic {
   message: string;
   loc: Loc;
-  /** `context`: a known context or function used where GitHub does not allow it. */
-  kind?: 'context';
+  /**
+   * `context`: a known context or function used where GitHub does not allow it.
+   * `ignored`: a key GitHub accepts but ignores, so the file runs without the setting.
+   */
+  kind?: 'context' | 'ignored';
   /** Start of the YAML scalar as GitHub's parser reports it (1-based). */
   at?: { line: number; column: number };
+  /** How to fix this instance, when it is more specific than the rule's advice. */
+  fix?: string;
 }
 
 interface BaseDecl {

@@ -411,10 +411,12 @@ function toFinding(
   input: ReportInput,
   registry: RuleRegistry,
 ): Finding {
+  // A finding can ask for less than its rule's severity, never more: configuration stays the ceiling.
+  const lowered = input.severity && SEVERITY_ORDER[input.severity] > SEVERITY_ORDER[severity as Severity];
   return {
     code: rule.code,
     name: rule.name,
-    severity: severity as Severity,
+    severity: lowered ? input.severity! : (severity as Severity),
     category: rule.category,
     message: escapeControl(input.message),
     loc: input.loc,

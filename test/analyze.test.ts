@@ -1,4 +1,13 @@
-import { ConfigError, exitCodeFor, fingerprint } from '@flowpact/core';
+import {
+  analyze,
+  ConfigError,
+  createRegistry,
+  defineRule,
+  exitCodeFor,
+  fingerprint,
+  memoryFileSystem,
+  parseConfig,
+} from '@flowpact/core';
 import { describe, expect, it } from 'vitest';
 import { codes, lint, WF } from './helpers';
 
@@ -91,6 +100,49 @@ describe('analyze', () => {
       keys: ['a'],
     });
     expect(r.summary.matrixCombinations).toBe(2);
+  });
+
+  it('lets a finding report below its rule’s severity, never above the configured one', () => {
+    const registry = createRegistry().register(
+      defineRule({
+        code: 'ACME101',
+        name: 'acme-levels',
+        category: 'inputs',
+        defaultSeverity: 'warning',
+        docs: { summary: 's', why: 'w', fix: 'f' },
+        docsUrl: 'https://example.com/acme101',
+        check(ctx) {
+          const wf = [...ctx.index.project.workflows.values()][0]!;
+          for (const severity of [undefined, 'info', 'error'] as const)
+            ctx.report({
+              message: `asked ${severity ?? 'nothing'}`,
+              loc: wf.source.loc(0),
+              ...(severity ? { severity } : {}),
+            });
+        },
+      }),
+    );
+    const levels = (rules: Record<string, string> = {}) =>
+      analyze({
+        root: '/virtual/repo',
+        fs: memoryFileSystem(files),
+        config: parseConfig({ rules }),
+        registry,
+        only: ['ACME101'],
+      })
+        .findings.map((f) => `${f.message}: ${f.severity}`)
+        .sort();
+    expect(levels()).toEqual(['asked error: warning', 'asked info: info', 'asked nothing: warning']);
+    expect(levels({ ACME101: 'error' })).toEqual([
+      'asked error: error',
+      'asked info: info',
+      'asked nothing: error',
+    ]);
+    expect(levels({ ACME101: 'info' })).toEqual([
+      'asked error: info',
+      'asked info: info',
+      'asked nothing: info',
+    ]);
   });
 });
 

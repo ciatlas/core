@@ -73,6 +73,11 @@ export interface ReportInput {
    * such as identifiers parsed from expressions; otherwise newlines are shown as `\n`.
    */
   fixMultiline?: boolean;
+  /**
+   * Report this finding below the rule's severity (e.g. a key GitHub ignores, where the rule's other findings are keys
+   * it rejects). It only ever lowers: the finding gets the less severe of this and the rule's configured severity.
+   */
+  severity?: Severity;
 }
 
 /** How each configured override was used in this run (available to post-phase rules). */
