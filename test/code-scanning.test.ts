@@ -46,3 +46,15 @@ describe('linear on adversarial input (js/polynomial-redos)', () => {
     });
   });
 });
+
+describe('expression parse errors (js/polynomial-redos)', () => {
+  it('drops the position suffix in linear time', async () => {
+    const { parseExpression } = await import('@flowpact/core');
+    const bad = parseExpression("1 'x'");
+    expect(bad.error?.message).toBeTruthy();
+    expect(bad.error?.message).not.toContain('Located at position');
+    within(2_000, () => {
+      for (let i = 0; i < 5; i++) parseExpression(`${i} '${' '.repeat(20_000)}'`);
+    });
+  });
+});

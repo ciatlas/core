@@ -112,6 +112,20 @@ export function findTemplateSegments(text: string): TemplateSegment[] {
   return segments;
 }
 
+/**
+ * The parser's message without its trailing "Located at position N…" (and the period and spaces before it). Found
+ * with indexOf: the message repeats the offending token, and `/\.?\s*Located at position.*$/s` retried a long run of
+ * spaces from every position (CodeQL js/polynomial-redos).
+ */
+function withoutPosition(message: string): string {
+  const at = message.indexOf('Located at position');
+  if (at < 0) return message;
+  let end = at;
+  while (end > 0 && /\s/.test(message[end - 1]!)) end--;
+  if (message[end - 1] === '.') end--;
+  return message.slice(0, end);
+}
+
 /** Functions that exist only in some contexts; the parser treats them as extensions. */
 export const CONTEXT_FUNCTIONS = [
   { name: 'hashFiles', minArgs: 1, maxArgs: 255 },
@@ -143,7 +157,7 @@ export function parseExpression(source: string): ParsedExpression {
     result = {
       source,
       refs: [],
-      error: { message: message.replace(/\.?\s*Located at position.*$/s, ''), offset },
+      error: { message: withoutPosition(message), offset },
     };
   }
   exprCache.set(source, result);
