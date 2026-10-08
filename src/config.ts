@@ -107,7 +107,7 @@ export const configSchema = z
           .array(z.string())
           .optional()
           .describe(
-            'Files or globs of the units other repositories use. Default: every workflow with `workflow_call` and every action outside `.github/`.',
+            'Files or globs of the units other repositories use. Default: every workflow with `workflow_call` except `_`-prefixed files, and the root `action.yml`.',
           ),
         declaredBy: z
           .enum(['explicit', 'title', 'labels'])
