@@ -1,6 +1,6 @@
 /** Tool identity. `VERSION` is asserted against package.json by a test so it cannot drift. */
 export const TOOL_NAME = 'wfc';
-export const VERSION = '0.1.0'; // x-release-please-version
+export const VERSION = '0.1.1'; // x-release-please-version
 
 /** Versions of every on-disk / on-wire format wfc reads or writes. Bump on breaking changes. */
 export const SCHEMA_VERSIONS = {
