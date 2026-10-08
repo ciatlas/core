@@ -89,6 +89,29 @@ function base(index: ProjectIndex, symbol: string): TraceNode {
   };
 }
 
+// Symbols are split with indexOf rather than regexes like /^(.+)#secrets\.(.+)$/, which backtrack quadratically on
+// symbols that repeat the separator (CodeQL js/polynomial-redos).
+
+/** `<unit>#secrets.<name>` (see `sym.secret`); the last separator wins, as unit paths may contain it. */
+function secretSymbol(symbol: string): { unit: string; name: string } | undefined {
+  const sep = '#secrets.';
+  for (let i = symbol.lastIndexOf(sep); i > 0; i = symbol.lastIndexOf(sep, i - 1)) {
+    if (i + sep.length < symbol.length)
+      return { unit: symbol.slice(0, i), name: symbol.slice(i + sep.length) };
+  }
+  return undefined;
+}
+
+/** `<unit>#jobs.<job>.matrix.<key>` (see `sym.matrix`); job ids contain no dots, so the first `.matrix.` ends the id. */
+function matrixSymbol(symbol: string, unit: string): { job: string; key: string } | undefined {
+  const prefix = `${unit}#jobs.`;
+  if (!symbol.startsWith(prefix)) return undefined;
+  const rest = symbol.slice(prefix.length);
+  const at = rest.indexOf('.matrix.');
+  if (at <= 0 || at + '.matrix.'.length >= rest.length) return undefined;
+  return { job: rest.slice(0, at), key: rest.slice(at + '.matrix.'.length) };
+}
+
 function down(
   index: ProjectIndex,
   symbol: string,
@@ -123,10 +146,10 @@ function down(
     node.children.push(child);
   }
   // `secrets: inherit` forwards the secret under the same name, possibly through workflows that never read it.
-  const secret = /^(.+)#secrets\.(.+)$/.exec(symbol);
-  const wf = secret ? index.project.workflows.get(secret[1]!) : undefined;
+  const secret = secretSymbol(symbol);
+  const wf = secret ? index.project.workflows.get(secret.unit) : undefined;
   if (secret && wf) {
-    const name = secret[2]!;
+    const name = secret.name;
     for (const job of Object.values(wf.jobs)) {
       const callee = job.secretsInherit ? index.calleeOf(job) : undefined;
       if (!callee) continue;
@@ -173,10 +196,10 @@ function up(
     node.children.push(parent);
   }
   // A secret received through `secrets: inherit` comes from the caller's secret of the same name.
-  const secret = /^(.+)#secrets\.(.+)$/.exec(symbol);
+  const secret = secretSymbol(symbol);
   if (secret) {
-    const name = secret[2]!;
-    for (const c of index.callersOf(secret[1]!)) {
+    const name = secret.name;
+    for (const c of index.callersOf(secret.unit)) {
       if (!c.job.secretsInherit) continue;
       const callerName = (c.caller.call && lookup(c.caller.call.secrets, name)?.name) ?? name;
       const parent = up(index, sym.secret(c.caller.path, callerName), depth - 1, next, expanded);
@@ -187,11 +210,11 @@ function up(
   const n = index.nodes.get(symbol);
   // A matrix key's sources are the combinations themselves; show each value and flag where it is missing.
   if (n?.kind === 'matrix' && n.unit) {
-    const m = /#jobs\.(.+)\.matrix\.(.+)$/.exec(symbol);
+    const m = matrixSymbol(symbol, n.unit);
     const wf = index.project.workflows.get(n.unit);
-    const job = m && wf ? wf.jobs[m[1]!] : undefined;
+    const job = m && wf ? wf.jobs[m.job] : undefined;
     if (job?.matrix && m) {
-      const key = m[2]!;
+      const key = m.key;
       const exp = expandMatrix(job.matrix);
       if (exp.dynamic) {
         node.leaves.push({

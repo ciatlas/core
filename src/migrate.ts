@@ -59,8 +59,10 @@ export function migrateConfigText(text: string): { text: string; changes: string
     changes.push(`WFC${n} → FP${n}`);
     return `FP${n}`;
   });
-  if (out.includes(OLD_SCHEMA_BASE)) {
-    out = out.split(OLD_SCHEMA_BASE).join(NEW_SCHEMA_BASE);
+  // Plain text replacement (not URL validation): every occurrence of the old schema base moves to the new one.
+  const moved = out.split(OLD_SCHEMA_BASE).join(NEW_SCHEMA_BASE);
+  if (moved !== out) {
+    out = moved;
     changes.push('schema URL');
   }
   return { text: out, changes: [...new Set(changes)] };

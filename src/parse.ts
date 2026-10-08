@@ -33,6 +33,7 @@ import type {
   WorkflowDecl,
 } from './ir';
 import { type Loc, SourceFile } from './source';
+import { trimChar } from './text';
 
 export interface ParseContext {
   /** `owner/repo` of the analyzed repository, used to resolve same-repo `uses:` references. */
@@ -344,7 +345,7 @@ export function classifyUses(raw: string, at: 'job' | 'step', loc: Loc, ctx: Par
   if (value.startsWith('./')) {
     // `./` alone is an action in the repository root. Paths are normalized; anything escaping the
     // repository (`./../x`) keeps its `..` and is reported as missing instead of being read.
-    const target = posix.normalize(value.slice(2).replace(/\/+$/, '') || '.').replace(/\/+$/, '') || '.';
+    const target = trimChar(posix.normalize(trimChar(value.slice(2), '/') || '.'), '/') || '.';
     if (at === 'job') return { raw, loc, kind: 'local-workflow', target };
     return { raw, loc, kind: 'local-action', target };
   }

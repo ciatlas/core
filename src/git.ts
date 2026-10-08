@@ -6,6 +6,7 @@
 import { execFileSync } from 'node:child_process';
 import { posix } from 'node:path';
 import type { FileSystem } from './project';
+import { trimChar } from './text';
 
 export class GitError extends Error {}
 
@@ -92,13 +93,7 @@ export function gitFileSystem(root: string, commit: string): FileSystem & { comm
     }
   }
   const cache = new Map<string, string | undefined>();
-  // A loop, not /\/+$/: that pattern backtracks quadratically on long runs of slashes.
-  const norm = (p: string) => {
-    const s = p.startsWith('./') ? p.slice(2) : p;
-    let end = s.length;
-    while (end > 0 && s[end - 1] === '/') end--;
-    return s.slice(0, end);
-  };
+  const norm = (p: string) => trimChar(p.startsWith('./') ? p.slice(2) : p, '/');
   const under = (dir: string) => {
     const d = norm(dir);
     return d === '' || d === '.' ? '' : `${d}/`;

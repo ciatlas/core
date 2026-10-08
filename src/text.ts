@@ -19,3 +19,15 @@ export function escapeControl(s: string, keepNewlines = false): string {
 export function neutralizeWorkflowCommands(s: string): string {
   return s.replace(/^((?:\s|\u001b\[[\d;]*m)*):(?=:)/gm, '$1:​');
 }
+
+/**
+ * `s` without runs of `ch` at its end (and at its start with `start: true`). A loop rather than `/x+$/`, which
+ * backtracks quadratically on long runs that are not at the end (CodeQL js/polynomial-redos).
+ */
+export function trimChar(s: string, ch: string, { start = false } = {}): string {
+  let from = 0;
+  let to = s.length;
+  if (start) while (from < to && s[from] === ch) from++;
+  while (to > from && s[to - 1] === ch) to--;
+  return s.slice(from, to);
+}
