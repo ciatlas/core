@@ -8,6 +8,7 @@ export * from './graph';
 export * from './impact';
 export * from './impact-run';
 export * from './ir';
+export * from './locate';
 export * from './logger';
 export * from './matrix';
 export { classifyUses, createParseContext, parseActionFile, parseWorkflowFile, scanRunWrites } from './parse';

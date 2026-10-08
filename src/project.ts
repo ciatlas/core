@@ -115,6 +115,36 @@ export function memoryFileSystem(files: Record<string, string>): FileSystem {
   };
 }
 
+/**
+ * `base` with some files replaced or added by in-memory text, such as an editor's unsaved buffers. Keys are
+ * repo-relative paths; the caller decides which files may be overlaid (they bypass `base`'s checks).
+ */
+export function overlayFileSystem(base: FileSystem, files: ReadonlyMap<string, string>): FileSystem {
+  const norm = new Map([...files].map(([k, v]) => [toPosix(k).replace(/^\.\//, ''), v]));
+  const keys = [...norm.keys()];
+  const prefix = (dir: string) => {
+    const d = toPosix(dir)
+      .replace(/^\.(\/|$)/, '')
+      .replace(/\/$/, '');
+    return d ? `${d}/` : '';
+  };
+  const union = (a: string[], b: string[]) => [...new Set([...a, ...b])];
+  return {
+    read: (p) => norm.get(toPosix(p).replace(/^\.\//, '')) ?? base.read(p),
+    list: (dir) =>
+      union(
+        base.list(dir),
+        keys.filter((k) => k.startsWith(prefix(dir)) && !k.slice(prefix(dir).length).includes('/')),
+      ),
+    walk: (dir) =>
+      union(
+        base.walk(dir),
+        keys.filter((k) => k.startsWith(prefix(dir))),
+      ),
+    isDir: (p) => base.isDir(p) || (prefix(p) !== '' && keys.some((k) => k.startsWith(prefix(p)))),
+  };
+}
+
 export interface LoadProjectOptions {
   root: string;
   fs?: FileSystem;
