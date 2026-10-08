@@ -339,15 +339,27 @@ function outputDecls(unit: Unit, node: unknown, base: YPath, valueKey: boolean):
 
 const WORKFLOW_FILE = /^\.github\/workflows\/[^/]+\.ya?ml$/;
 
+/** `a/./b/` → `a/b`, `` → `.`. Anything escaping the root (`../x`) keeps its `..` and is never read. */
+export function normalizeRelative(path: string): string {
+  return trimChar(posix.normalize(trimChar(path, '/') || '.'), '/') || '.';
+}
+
 export function classifyUses(raw: string, at: 'job' | 'step', loc: Loc, ctx: ParseContext): UsesRef {
   const value = raw.trim();
   if (value.startsWith('docker://')) return { raw, loc, kind: 'docker' };
+  const kind = at === 'job' ? 'local-workflow' : 'local-action';
+  if (value.startsWith('$/')) {
+    // `$/path` is this repository at the running commit, wherever the workspace is. GitHub rejects an `@ref` suffix.
+    const refAt = value.indexOf('@');
+    const target = normalizeRelative(refAt < 0 ? value.slice(2) : value.slice(2, refAt));
+    return { raw, loc, kind, target, self: true, ...(refAt < 0 ? {} : { selfRef: value.slice(refAt + 1) }) };
+  }
   if (value.startsWith('./')) {
-    // `./` alone is an action in the repository root. Paths are normalized; anything escaping the
-    // repository (`./../x`) keeps its `..` and is reported as missing instead of being read.
-    const target = trimChar(posix.normalize(trimChar(value.slice(2), '/') || '.'), '/') || '.';
-    if (at === 'job') return { raw, loc, kind: 'local-workflow', target };
-    return { raw, loc, kind: 'local-action', target };
+    // `./` alone is an action in the repository root. A job's `./` is relative to the repository; a step's to the
+    // runner's workspace, which the loader maps through the job's checkouts (`target` assumes the repository root).
+    const target = normalizeRelative(value.slice(2));
+    if (at === 'job') return { raw, loc, kind, target };
+    return { raw, loc, kind, target, workspacePath: target };
   }
   const [path = '', ref] = value.split('@');
   const parts = path.split('/');

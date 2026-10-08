@@ -372,6 +372,35 @@ describe('review fixes', () => {
     ]);
   });
 
+  it('follows $/ calls, and does not count $/ or workspace paths as third-party actions', () => {
+    const reuse = `${wf('  call:\n    uses: $/.github/workflows/inner.yml\n')}`;
+    const inner = (p: string) => `on: workflow_call\npermissions: ${p}\njobs:\n${job('j')}`;
+    expect(
+      summary(
+        changes(
+          { [`${WF}/reuse.yml`]: reuse, [`${WF}/inner.yml`]: inner('{ contents: read }') },
+          { [`${WF}/reuse.yml`]: reuse, [`${WF}/inner.yml`]: inner('{ contents: read, id-token: write }') },
+          ['.github/workflows/reuse.yml'],
+        ),
+      ),
+    ).toEqual([
+      'major jobs.call › j now requests id-token: write; callers that grant less fail when the run starts',
+    ]);
+    const action = (steps: string) =>
+      `name: a\ndescription: d\nruns:\n  using: composite\n  steps:\n    - run: x\n      shell: bash\n${steps}`;
+    const helper = 'name: h\ndescription: d\nruns:\n  using: composite\n  steps: []\n';
+    expect(
+      changes(
+        { 'tools/a/action.yml': action(''), 'tools/h/action.yml': helper },
+        {
+          'tools/a/action.yml': action('    - uses: $/tools/h\n    - uses: ./../elsewhere/h\n'),
+          'tools/h/action.yml': helper,
+        },
+        ['tools/a'],
+      ),
+    ).toEqual([]);
+  });
+
   it('does not grade workflow_dispatch inputs, and reports a published unit that stops parsing', () => {
     const both = (opts: string) =>
       `on:\n  workflow_call:\n  workflow_dispatch:\n    inputs:\n      env: { type: choice, options: [${opts}] }\njobs:\n${job('t')}`;

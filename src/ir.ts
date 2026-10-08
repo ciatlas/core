@@ -90,7 +90,17 @@ export interface Binding {
   site?: ExprSite;
 }
 
-export type UsesKind = 'local-workflow' | 'remote-workflow' | 'local-action' | 'remote-action' | 'docker';
+export type UsesKind =
+  | 'local-workflow'
+  | 'remote-workflow'
+  | 'local-action'
+  | 'remote-action'
+  /**
+   * A step's `./path` that lies outside this repository's files in the runner's workspace: in another repository's
+   * checkout, outside the workspace, or somewhere only an earlier step fills. It cannot be read, so it is not verified.
+   */
+  | 'workspace-action'
+  | 'docker';
 
 export interface UsesRef {
   raw: string;
@@ -100,6 +110,15 @@ export interface UsesRef {
   target?: string;
   /** Set when a remote reference points at this same repository and was resolved locally. */
   sameRepoRef?: string;
+  /** `$/path`: GitHub's self-repository reference (this repository at the running commit, never the workspace). */
+  self?: boolean;
+  /** The `@ref` of a `$/path@ref` reference, which GitHub rejects: `$/` always runs the running commit. */
+  selfRef?: string;
+  /**
+   * A step's `./path`, normalized: GitHub resolves it against the runner's workspace, not the repository. The loader
+   * maps it through the job's earlier `actions/checkout` steps; `target` is where it lies in this repository.
+   */
+  workspacePath?: string;
 }
 
 export interface MatrixEntry {

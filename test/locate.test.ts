@@ -227,6 +227,44 @@ describe('SymbolLocator.occurrences', () => {
   });
 });
 
+describe('SymbolLocator with $/ and workspace paths', () => {
+  const W = `${WF}/self.yml`;
+  const text = yaml`
+    on: push
+    jobs:
+      call:
+        uses: $/.github/workflows/mid.yml
+        with:
+          cfg: x
+      steps:
+        runs-on: x
+        steps:
+          - uses: actions/checkout@v4
+            with:
+              path: src/app
+          - uses: $/.github/actions/build
+            with:
+              target: a
+          - uses: ./src/app/.github/actions/build
+            with:
+              target: b
+  `;
+  const own = new SymbolLocator(lint({ ...files, [W]: text }).index);
+  const find = (needle: string, offset = 0) => {
+    const before = text.slice(0, text.indexOf(needle) + offset).split('\n');
+    return own.at(W, before.length, before.at(-1)!.length + 1);
+  };
+
+  it('resolves $/ and checkout-relative uses: to the unit, with their bindings', () => {
+    expect(find('$/.github/workflows/mid.yml', 3)).toMatchObject({ symbol: MID, role: 'uses' });
+    expect(find('$/.github/actions/build', 3)).toMatchObject({ symbol: BUILD, role: 'uses' });
+    expect(find('./src/app/.github/actions/build', 3)).toMatchObject({ symbol: BUILD, role: 'uses' });
+    expect(find('cfg: x')).toMatchObject({ symbol: sym.input(MID, 'cfg'), role: 'binding' });
+    expect(find('target: b')).toMatchObject({ symbol: sym.input(BUILD, 'target'), role: 'binding' });
+    expect(own.occurrences(BUILD).filter((o) => o.loc.file === W)).toHaveLength(2);
+  });
+});
+
 describe('overlayFileSystem', () => {
   const base = memoryFileSystem({
     [`${WF}/a.yml`]: 'disk',

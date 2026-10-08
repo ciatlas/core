@@ -311,9 +311,12 @@ describe('structure and references', () => {
 
   it('never reads local uses: targets outside the repository', () => {
     const r = lint({
-      [`${WF}/w.yml`]: 'on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - uses: ./../../etc\n',
+      [`${WF}/w.yml`]:
+        'on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - uses: ./../../etc\n      - uses: $/../../etc\n',
     });
-    expect(byCode(r, 'FP606').length).toBe(1);
+    // A step's ./ path outside the workspace only exists at runtime (FP610); $/ is the repository, so it is missing.
+    expect(byCode(r, 'FP610').length).toBe(1);
+    expect(byCode(r, 'FP606').map((f) => f.message)).toEqual(['Action "../../etc" does not exist']);
     expect(r.project.actions.size).toBe(0);
   });
 

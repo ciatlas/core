@@ -1,12 +1,13 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { matchesPattern } from './glob';
-import type { Project } from './graph';
-import type { ActionDecl, UnitDecl, UsesRef, WorkflowDecl } from './ir';
+import type { Project, UnverifiedUse } from './graph';
+import type { ActionDecl, JobDecl, WorkflowDecl } from './ir';
 import type { Logger } from './logger';
 import { silentLogger } from './logger';
 import { createParseContext, parseActionFile, parseWorkflowFile } from './parse';
 import { validateSchema } from './validate';
+import { workspaceResolver } from './workspace';
 
 export const WORKFLOWS_DIR = '.github/workflows';
 export const ACTIONS_DIR = '.github/actions';
@@ -188,7 +189,7 @@ export function loadProject(opts: LoadProjectOptions): Project {
   const workflows = new Map<string, WorkflowDecl>();
   const actions = new Map<string, ActionDecl>();
   const missing: Project['missing'] = [];
-  const invalid: Project['missing'] = [];
+  const invalid: NonNullable<Project['invalidTargets']> = [];
 
   const loadWorkflow = (path: string): WorkflowDecl | undefined => {
     if (workflows.has(path)) return workflows.get(path);
@@ -278,48 +279,55 @@ export function loadProject(opts: LoadProjectOptions): Project {
   for (const f of discovered) loadWorkflow(f);
   for (const f of actionFiles) loadAction(f.replace(/\/?action\.ya?ml$/i, '') || '.');
 
-  // Follow local references until closure (actions outside .github/actions, workflows passed by path).
-  const resolveRefs = (unit: UnitDecl) => {
-    const note = (uses: UsesRef, extra: { job?: string; step?: number }) => {
-      if (!uses.target) return;
-      // Reusable workflows must live directly in .github/workflows; anything else is a broken reference.
-      if (uses.kind === 'local-workflow' && !isCallableWorkflowPath(uses.target)) {
-        invalid.push({ uses, from: unit.path, ...extra });
-        logger.warn(`reusable workflow outside .github/workflows: ${uses.raw}`, { from: unit.path });
-        return;
-      }
-      const found = uses.kind === 'local-workflow' ? loadWorkflow(uses.target) : loadAction(uses.target);
-      // `owner/repo/...@ref` for this repository may exist at that ref even if not in the working tree.
-      if (!found && uses.sameRepoRef && !escapesRoot(uses.target)) {
-        logger.debug(`same-repository reference not in the working tree: ${uses.raw}`);
-        return;
-      }
-      if (!found) {
-        missing.push({ uses, from: unit.path, ...extra });
-        logger.warn(`unresolved local reference ${uses.raw}`, { from: unit.path });
-      } else {
-        queue.push(found);
-      }
-    };
-    if (unit.kind === 'workflow') {
-      for (const job of Object.values(unit.jobs)) {
-        if (job.uses?.kind === 'local-workflow') note(job.uses, { job: job.id });
-        for (const step of job.steps)
-          if (step.uses?.kind === 'local-action') note(step.uses, { job: job.id, step: step.index });
-      }
+  // Follow local references until closure (actions outside .github/actions, workflows passed by path), walking each
+  // job's steps in order: a step's `./path` is relative to the runner's workspace, which its checkouts shape.
+  const unverified: UnverifiedUse[] = [];
+  const resolver = workspaceResolver({
+    ...(opts.repository ? { repository: opts.repository } : {}),
+    loadAction,
+    isDir: (dir) => fs.isDir(dir),
+    logger,
+  });
+
+  const noteCall = (wf: WorkflowDecl, job: JobDecl, pending: WorkflowDecl[]) => {
+    const uses = job.uses;
+    if (!uses?.target) return;
+    const where = { uses, from: wf.path, job: job.id };
+    if (uses.selfRef !== undefined) {
+      invalid.push({ ...where, reason: 'self-ref' });
+      return;
+    }
+    // Reusable workflows must live directly in .github/workflows; anything else is a broken reference.
+    if (!isCallableWorkflowPath(uses.target)) {
+      invalid.push({ ...where, reason: 'not-callable' });
+      logger.warn(`reusable workflow outside .github/workflows: ${uses.raw}`, { from: wf.path });
+      return;
+    }
+    const found = loadWorkflow(uses.target);
+    // `owner/repo/...@ref` for this repository may exist at that ref even if not in the working tree.
+    if (!found && uses.sameRepoRef && !escapesRoot(uses.target)) {
+      logger.debug(`same-repository reference not in the working tree: ${uses.raw}`);
+    } else if (!found) {
+      missing.push(where);
+      logger.warn(`unresolved local reference ${uses.raw}`, { from: wf.path });
     } else {
-      for (const step of unit.steps)
-        if (step.uses?.kind === 'local-action') note(step.uses, { step: step.index });
+      pending.push(found);
     }
   };
-  const queue: UnitDecl[] = [...workflows.values(), ...actions.values()];
-  const done = new Set<UnitDecl>();
-  while (queue.length) {
-    const u = queue.shift()!;
-    if (done.has(u)) continue;
-    done.add(u);
-    resolveRefs(u);
+
+  const pending: WorkflowDecl[] = [...workflows.values()];
+  const walked = new Set<WorkflowDecl>();
+  while (pending.length) {
+    const wf = pending.shift()!;
+    if (walked.has(wf)) continue;
+    walked.add(wf);
+    for (const job of Object.values(wf.jobs)) {
+      if (job.uses?.kind === 'local-workflow') noteCall(wf, job, pending);
+      resolver.walkJob(wf, job);
+    }
   }
+  resolver.walkRemainingActions(actions);
+  resolver.finish({ missing, invalid, unverified });
 
   if (opts.validateSchema !== false) {
     logger.time('schema validation', () => {
@@ -341,5 +349,6 @@ export function loadProject(opts: LoadProjectOptions): Project {
     ignoredTargets,
     missing,
     invalidTargets: invalid,
+    unverified,
   };
 }

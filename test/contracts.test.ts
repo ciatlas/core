@@ -226,6 +226,29 @@ describe('buildContract', () => {
     });
   });
 
+  it('counts consumers that reference a unit by $/ or through a checkout of this repository', () => {
+    const viaSelf = { ...base, [`${WF}/caller.yml`]: caller.replaceAll('./.github/', '$/.github/') };
+    const viaCheckout = {
+      ...base,
+      [`${WF}/caller.yml`]: caller
+        .replace(
+          '    steps:\n      - id: s',
+          '    steps:\n      - uses: actions/checkout@v5\n        with: { path: src/app }\n      - id: s',
+        )
+        .replace('uses: ./.github/actions/setup', 'uses: ./src/app/.github/actions/setup'),
+    };
+    expect(viaCheckout[`${WF}/caller.yml`]).toContain(
+      'path: src/app }\n      - id: s\n        uses: ./src/app/',
+    );
+    for (const files of [viaSelf, viaCheckout]) {
+      for (const unit of [`${WF}/reusable.yml`, '.github/actions/setup']) {
+        expect(contractOf(files, unit).consumers).toEqual(contractOf(base, unit).consumers);
+      }
+      expect(contractOf(files, `${WF}/caller.yml`).uses).toEqual(contractOf(base, `${WF}/caller.yml`).uses);
+    }
+    expect(contractOf(viaSelf, `${WF}/caller.yml`).calls).toEqual(contractOf(base, `${WF}/caller.yml`).calls);
+  });
+
   it('records a runtime-computed matrix without guessing its shape', () => {
     const files = {
       [`${WF}/reusable.yml`]: reusable,

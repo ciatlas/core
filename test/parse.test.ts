@@ -278,6 +278,29 @@ describe('classifyUses', () => {
   it('records the ref for same-repo references', () => {
     expect(classifyUses('acme/repo/.github/workflows/a.yml@main', 'job', loc0, ctx).sameRepoRef).toBe('main');
   });
+
+  it('reads $/ as this repository, never the workspace, and keeps a (rejected) @ref apart', () => {
+    expect(classifyUses('$/.github/workflows/a.yml', 'job', loc0, ctx)).toMatchObject({
+      kind: 'local-workflow',
+      target: '.github/workflows/a.yml',
+      self: true,
+    });
+    const step = classifyUses('$/.github/actions/setup/', 'step', loc0, ctx);
+    expect(step).toMatchObject({ kind: 'local-action', target: '.github/actions/setup', self: true });
+    expect(step.workspacePath).toBeUndefined();
+    expect(classifyUses('$/', 'step', loc0, ctx).target).toBe('.');
+    expect(classifyUses('$/.github/actions/x@v1', 'step', loc0, ctx)).toMatchObject({
+      target: '.github/actions/x',
+      selfRef: 'v1',
+    });
+  });
+
+  it('keeps the workspace path of a step’s ./ reference (a job’s ./ is the repository)', () => {
+    expect(classifyUses('./src/app//.github/actions/x', 'step', loc0, ctx).workspacePath).toBe(
+      'src/app/.github/actions/x',
+    );
+    expect(classifyUses('./.github/workflows/a.yml', 'job', loc0, ctx).workspacePath).toBeUndefined();
+  });
 });
 
 describe('scanRunWrites', () => {
