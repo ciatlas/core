@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { ConfigError, type WfcConfig } from './config';
+import { ConfigError, type FlowpactConfig } from './config';
 import type { Logger } from './logger';
 import { silentLogger } from './logger';
 import type { RuleRegistry } from './rules/registry';
@@ -19,7 +19,7 @@ const isRule = (v: unknown): v is RuleDefinition =>
  */
 export async function loadPlugins(
   root: string,
-  config: WfcConfig,
+  config: FlowpactConfig,
   registry: RuleRegistry,
   logger: Logger = silentLogger,
 ): Promise<RuleDefinition[]> {

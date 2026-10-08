@@ -11,10 +11,8 @@ import {
   CONFIG_FILES,
   ConfigError,
   defaultConfig,
-  LEGACY_CONFIG_DIR,
-  LEGACY_CONFIG_FILES,
+  type FlowpactConfig,
   parseConfigText,
-  type WfcConfig,
 } from './config';
 import { type GitError, gitFileSystem, resolveCommit } from './git';
 import { type DeclaredInput, type ImpactLevel, type ImpactPolicy, isPublished } from './impact';
@@ -107,13 +105,8 @@ function baselineConfig(
   fs: FileSystem,
   configPath: string | undefined,
   notes: string[],
-): WfcConfig | undefined {
-  const candidates = configPath
-    ? [configPath]
-    : [
-        ...CONFIG_FILES.map((f) => `${CONFIG_DIR}/${f}`),
-        ...LEGACY_CONFIG_FILES.map((f) => `${LEGACY_CONFIG_DIR}/${f}`),
-      ];
+): FlowpactConfig | undefined {
+  const candidates = configPath ? [configPath] : CONFIG_FILES.map((f) => `${CONFIG_DIR}/${f}`);
   for (const path of candidates) {
     const text = fs.read(path);
     if (text === undefined) continue;
@@ -173,7 +166,7 @@ const ZERO_SHA = /^0+$/;
 /** Resolves the baseline and the declaration, and analyses the baseline. */
 export function prepareImpact(
   root: string,
-  headConfig: WfcConfig,
+  headConfig: FlowpactConfig,
   req: ImpactRequest,
   logger?: Logger,
 ): PreparedImpact {

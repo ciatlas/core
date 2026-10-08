@@ -9,9 +9,6 @@ import { SCHEMA_VERSIONS, schemaUrl } from './version';
 
 export const CONFIG_DIR = '.github/flowpact';
 export const CONFIG_FILES = ['flowpact.config.yml', 'flowpact.config.yaml'] as const;
-/** Where wfc (before 0.2.0) kept its files. Still read when the new location is empty; `flowpact migrate` moves them. */
-export const LEGACY_CONFIG_DIR = '.github/workflow-contracts';
-export const LEGACY_CONFIG_FILES = ['wfc.config.yml', 'wfc.config.yaml'] as const;
 
 export const severitySettingSchema = z.enum(['error', 'warning', 'info', 'off']);
 
@@ -156,9 +153,9 @@ export const configSchema = z
   })
   .strict();
 
-export type WfcConfig = z.infer<typeof configSchema>;
+export type FlowpactConfig = z.infer<typeof configSchema>;
 
-export const defaultConfig = (): WfcConfig => configSchema.parse({});
+export const defaultConfig = (): FlowpactConfig => configSchema.parse({});
 
 export class ConfigError extends Error {
   constructor(
@@ -171,25 +168,18 @@ export class ConfigError extends Error {
 }
 
 export interface LoadedConfig {
-  config: WfcConfig;
+  config: FlowpactConfig;
   /** Repo-relative path of the config file, when one was found. */
   file?: string;
   /** Raw text of the config file, for code frames. */
   text?: string;
   /** Location of each `overrides[i]` entry in the config file. */
   overrideLocs?: Loc[];
-  /** Set when the config was found at the pre-0.2.0 location (`.github/workflow-contracts/wfc.config.yml`). */
-  legacy?: boolean;
 }
 
 /** Finds and validates the config. An explicit `--config` path must exist; the default location is optional. */
 export function loadConfig(root: string, explicit?: string): LoadedConfig {
-  const candidates = explicit
-    ? [explicit]
-    : [
-        ...CONFIG_FILES.map((f) => join(root, CONFIG_DIR, f)),
-        ...LEGACY_CONFIG_FILES.map((f) => join(root, LEGACY_CONFIG_DIR, f)),
-      ];
+  const candidates = explicit ? [explicit] : CONFIG_FILES.map((f) => join(root, CONFIG_DIR, f));
   for (const abs of candidates) {
     const full = explicit && !abs.startsWith('/') ? join(process.cwd(), abs) : abs;
     if (!existsSync(full)) {
@@ -202,8 +192,7 @@ export function loadConfig(root: string, explicit?: string): LoadedConfig {
       throw new ConfigError(`${rel} links outside the repository; flowpact does not read it`, rel);
     }
     const text = readFileSync(full, 'utf8');
-    const legacy = !explicit && rel.startsWith(`${LEGACY_CONFIG_DIR}/`);
-    return { ...parseConfigText(text, rel), file: rel, text, ...(legacy ? { legacy } : {}) };
+    return { ...parseConfigText(text, rel), file: rel, text };
   }
   return { config: defaultConfig() };
 }
@@ -212,7 +201,7 @@ export function loadConfig(root: string, explicit?: string): LoadedConfig {
 export function parseConfigText(
   text: string,
   file = 'flowpact.config.yml',
-): { config: WfcConfig; overrideLocs: Loc[] } {
+): { config: FlowpactConfig; overrideLocs: Loc[] } {
   const lineCounter = new LineCounter();
   const lines = text.split(/\r?\n/);
   const doc = parseDocument(text, { lineCounter, prettyErrors: false });
@@ -244,7 +233,7 @@ export function parseConfigText(
   return { config, overrideLocs };
 }
 
-export function parseConfig(raw: unknown, file?: string): WfcConfig {
+export function parseConfig(raw: unknown, file?: string): FlowpactConfig {
   const result = configSchema.safeParse(raw);
   if (!result.success) {
     // Record-key failures hide the key schema's own message ("use `<workflow path>#<job id>`") one level down.

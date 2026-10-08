@@ -4,8 +4,6 @@ import { CATEGORIES, type RuleDefinition } from './types';
 export const CODE_PATTERN = /^([A-Z][A-Z0-9]{1,9}?)(\d)(\d{2})$/;
 export const NAME_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 export const BUILTIN_PREFIX = 'FP';
-/** The prefix of built-in rules before 0.2.0; kept reserved so old codes never point at a plugin rule. */
-export const LEGACY_PREFIX = 'WFC';
 
 export class RuleRegistryError extends Error {}
 
@@ -27,7 +25,7 @@ export class RuleRegistry {
     if (opts.builtin && prefix !== BUILTIN_PREFIX) {
       throw new RuleRegistryError(`Built-in rule ${rule.code} must use the ${BUILTIN_PREFIX} prefix`);
     }
-    if (!opts.builtin && (prefix === BUILTIN_PREFIX || prefix === LEGACY_PREFIX)) {
+    if (!opts.builtin && prefix === BUILTIN_PREFIX) {
       throw new RuleRegistryError(`Rule ${rule.code}: the ${prefix} prefix is reserved for built-in rules`);
     }
     if (!opts.builtin && !rule.docsUrl)

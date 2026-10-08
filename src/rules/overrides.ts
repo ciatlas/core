@@ -94,34 +94,4 @@ export const overrideExpiringSoon = defineRule({
   },
 });
 
-export const legacyLocation = defineRule({
-  code: 'FP904',
-  name: 'legacy-location',
-  category: 'config',
-  defaultSeverity: 'info',
-  docs: {
-    summary:
-      'The config or the contracts are still in the location wfc used before it was renamed to flowpact.',
-    why:
-      'flowpact still reads `.github/workflow-contracts/wfc.config.yml` and the contracts in `.github/workflow-contracts/` ' +
-      'while `.github/flowpact/` has none, so nothing breaks. New repositories and the docs use `.github/flowpact/`, and ' +
-      'rule codes in the old config still use the `WFC` prefix, which flowpact rejects.',
-    fix: 'Run `flowpact migrate`: it moves the config to `.github/flowpact/flowpact.config.yml` and the contracts to `.github/flowpact/contracts/`, renames `WFC` rule codes to `FP`, and updates schema URLs. Commit the result.',
-  },
-  check(ctx) {
-    const file = ctx.legacyFiles?.[0];
-    if (!file) return;
-    ctx.report({
-      message: `flowpact files are still in the pre-0.2.0 location .github/workflow-contracts/ (${ctx.legacyFiles!.join(', ')})`,
-      loc: { file, line: 1, column: 1, endLine: 1, endColumn: 1 },
-      symbol: '.github/workflow-contracts',
-    });
-  },
-});
-
-export const overrideRules: RuleDefinition[] = [
-  overrideExpired,
-  overrideUnused,
-  overrideExpiringSoon,
-  legacyLocation,
-];
+export const overrideRules: RuleDefinition[] = [overrideExpired, overrideUnused, overrideExpiringSoon];

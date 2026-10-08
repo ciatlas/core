@@ -1,4 +1,4 @@
-import type { Override, WfcConfig } from '../config';
+import type { FlowpactConfig, Override } from '../config';
 import type { ContractPlan } from '../contracts';
 import type { ProjectIndex } from '../graph';
 import type { ImpactResult } from '../impact';
@@ -90,14 +90,12 @@ export interface OverrideUsage {
 
 export interface RuleContext {
   readonly index: ProjectIndex;
-  readonly config: WfcConfig;
+  readonly config: FlowpactConfig;
   readonly logger: Logger;
   /** Repo-relative path of the config file, when one was loaded. */
   readonly configFile?: string;
   /** Contract comparison; only present in check mode (`flowpact check`). */
   readonly contracts?: ContractPlan;
-  /** Files at the pre-0.2.0 location (`.github/workflow-contracts/`) that flowpact still reads. */
-  readonly legacyFiles?: string[];
   /** Impact mode: graded changes of published units and the verdict; only present when impact mode runs. */
   readonly impact?: ImpactResult;
   /** Override usage; only present for post-phase rules. */

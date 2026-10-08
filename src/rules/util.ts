@@ -74,19 +74,7 @@ export function editDistance(a: string, b: string): number {
 }
 
 /** Suggests the closest name, treating `-`/`_` as equivalent. */
-/** Rule codes were renamed from `WFC` to `FP` in 0.2.0 (no aliases): `WFC401` → `FP401`. */
-export function renamedCode(name: string): string | undefined {
-  const m = /^WFC(\d{3})$/i.exec(name.trim());
-  return m ? `FP${m[1]}` : undefined;
-}
-
-/** Appended to "unknown rule" messages for an old `FP` code. */
-export const RENAMED_CODE_HINT =
-  'rule codes were renamed from WFC to FP in 0.2.0; `flowpact migrate` updates the config';
-
 export function didYouMean(name: string, candidates: string[]): string | undefined {
-  const renamed = renamedCode(name);
-  if (renamed && candidates.includes(renamed)) return renamed;
   const norm = (s: string) => s.toLowerCase().replace(/[-_]/g, '');
   let best: { c: string; d: number } | undefined;
   for (const c of candidates) {

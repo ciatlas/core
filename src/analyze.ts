@@ -1,17 +1,9 @@
 import { createHash } from 'node:crypto';
-import {
-  ConfigError,
-  defaultConfig,
-  LEGACY_CONFIG_DIR,
-  matchesPattern,
-  type Override,
-  type WfcConfig,
-} from './config';
+import { ConfigError, defaultConfig, type FlowpactConfig, matchesPattern, type Override } from './config';
 import {
   type ContractPlan,
   type ContractPlanEntry,
   entryConsumers,
-  LEGACY_CONTRACTS_DIR,
   planContracts,
   scopePlan,
 } from './contracts';
@@ -32,7 +24,7 @@ import type {
   Severity,
   SeveritySetting,
 } from './rules/types';
-import { didYouMean, RENAMED_CODE_HINT, renamedCode } from './rules/util';
+import { didYouMean } from './rules/util';
 import { compareLoc, type Loc, SourceFile } from './source';
 import { escapeControl } from './text';
 import { type ToolMeta, toolMeta } from './version';
@@ -41,7 +33,7 @@ export interface AnalyzeOptions {
   root: string;
   paths?: string[];
   fs?: FileSystem;
-  config?: WfcConfig;
+  config?: FlowpactConfig;
   configFile?: string;
   registry?: RuleRegistry;
   logger?: Logger;
@@ -136,9 +128,8 @@ function triageUnknown(
     key,
     registry.all().flatMap((r) => [r.code, r.name]),
   );
-  const hint = renamedCode(key) ? ` — ${RENAMED_CODE_HINT}` : '';
-  const issue = `${path}: unknown rule${guess ? ` (did you mean ${guess}?${hint})` : ` "${key}"`}`;
-  if (allowUnknown && !guess && !/^(FP|WFC)\d/i.test(key)) out.tolerated.push(issue);
+  const issue = `${path}: unknown rule${guess ? ` (did you mean ${guess}?)` : ` "${key}"`}`;
+  if (allowUnknown && !guess && !/^FP\d/i.test(key)) out.tolerated.push(issue);
   else out.hard.push(issue);
 }
 
@@ -146,7 +137,7 @@ const SEVERITY_ORDER: Record<Severity, number> = { error: 0, warning: 1, info: 2
 
 export function resolveSeverities(
   registry: RuleRegistry,
-  config: WfcConfig,
+  config: FlowpactConfig,
   opts: { allowUnknown?: boolean; logger?: Logger; unloaded?: string[] } = {},
 ): Map<string, SeveritySetting> {
   const out = new Map<string, SeveritySetting>();
@@ -254,8 +245,7 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
       undefined,
       unknownOnly.map((o) => {
         const guess = didYouMean(o, names);
-        const hint = renamedCode(o) ? ` — ${RENAMED_CODE_HINT}` : '';
-        return `${o}: unknown rule${guess ? ` (did you mean ${guess}?${hint})` : ''}`;
+        return `${o}: unknown rule${guess ? ` (did you mean ${guess}?)` : ''}`;
       }),
     );
   }
@@ -278,17 +268,6 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
       { breaking: contracts.breaking },
     );
   }
-
-  // Files still at wfc's pre-0.2.0 location: they keep working, FP904 suggests `flowpact migrate`.
-  const layoutFs = opts.fs ?? nodeFileSystem(opts.root);
-  const legacyContracts = layoutFs
-    .walk(LEGACY_CONTRACTS_DIR)
-    .filter((f) => f.endsWith('.contract.yml'))
-    .sort();
-  const legacyFiles = [
-    ...(opts.configFile?.startsWith(`${LEGACY_CONFIG_DIR}/`) ? [opts.configFile] : []),
-    ...legacyContracts.slice(0, 1),
-  ];
 
   const impact = opts.impact
     ? logger.time('impact', () =>
@@ -319,7 +298,6 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
         matrix,
         ...(opts.configFile ? { configFile: opts.configFile } : {}),
         ...(contracts ? { contracts } : {}),
-        ...(legacyFiles.length ? { legacyFiles } : {}),
         ...(impact ? { impact } : {}),
         ...extra,
         report: (input) => out.push(toFinding(rule, severity, input, registry)),
@@ -532,7 +510,7 @@ export function overrideMatches(o: Override, code: string, f: Finding): boolean 
 /** Splits findings into kept and suppressed, and records how each override was used. */
 export function applyOverrides(
   findings: Finding[],
-  config: WfcConfig,
+  config: FlowpactConfig,
   registry: RuleRegistry,
   locs: Loc[],
   now: Date,
