@@ -1,4 +1,4 @@
-import { reportJsonSchema, reportSchema, toJsonReport } from '@wfc/core';
+import { reportJsonSchema, reportSchema, toJsonReport } from '@flowpact/core';
 import { describe, expect, it } from 'vitest';
 import { lint, WF } from './helpers';
 
@@ -17,9 +17,9 @@ describe('JSON report', () => {
 
   it('round-trips through JSON', () => {
     const json = JSON.parse(JSON.stringify(toJsonReport(r)));
-    expect(reportSchema.parse(json).findings[0]?.code).toBe('WFC104');
+    expect(reportSchema.parse(json).findings[0]?.code).toBe('FP104');
     expect(json.meta.version).toBeDefined();
-    expect(json.$schema).toBe('https://rumankazi.github.io/wfc/schemas/report/v1.json');
+    expect(json.$schema).toBe('https://rumankazi.github.io/flowpact/schemas/report/v1.json');
   });
 
   it('exports a JSON schema', () => {

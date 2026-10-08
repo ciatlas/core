@@ -5,7 +5,7 @@ import {
   parseActionFile,
   parseWorkflowFile,
   scanRunWrites,
-} from '@wfc/core';
+} from '@flowpact/core';
 import { describe, expect, it } from 'vitest';
 import { yaml } from './helpers';
 

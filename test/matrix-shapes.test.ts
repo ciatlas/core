@@ -1,4 +1,4 @@
-import { ConfigError, parseConfig } from '@wfc/core';
+import { ConfigError, parseConfig } from '@flowpact/core';
 import { describe, expect, it } from 'vitest';
 import { byCode, codes, lint, WF, yaml } from './helpers';
 
@@ -32,22 +32,22 @@ const files = {
   `,
 };
 
-const MATRIX = ['WFC401', 'WFC402', 'WFC403', 'WFC404'];
+const MATRIX = ['FP401', 'FP402', 'FP403', 'FP404'];
 const shapes = (s: Record<string, string[]>) => ({
   matrixShapes: Object.fromEntries(Object.entries(s).map(([k, keys]) => [k, { keys }])),
 });
 
 describe('matrixShapes', () => {
-  it('without a shape, reads of a runtime-computed matrix are unverified (WFC403)', () => {
+  it('without a shape, reads of a runtime-computed matrix are unverified (FP403)', () => {
     const r = lint(files, { only: MATRIX });
-    expect(byCode(r, 'WFC403').map((f) => f.message)).toEqual([
+    expect(byCode(r, 'FP403').map((f) => f.message)).toEqual([
       'jobs.dynamic has a runtime-computed matrix; reads of matrix.os, matrix.config, matrix.shard cannot be verified',
       'jobs.extra has a runtime-computed matrix; reads of matrix.os, matrix.flavor cannot be verified',
     ]);
-    expect(codes(r).filter((c) => c !== 'WFC403')).toEqual([]);
+    expect(codes(r).filter((c) => c !== 'FP403')).toEqual([]);
   });
 
-  it('with declared keys: no WFC403 and no false positives for declared keys', () => {
+  it('with declared keys: no FP403 and no false positives for declared keys', () => {
     const r = lint(files, {
       only: MATRIX,
       config: shapes({
@@ -59,10 +59,10 @@ describe('matrixShapes', () => {
     expect(r.summary.matrixCombinations).toBe(2);
   });
 
-  it('reports reads of undeclared keys as WFC404', () => {
+  it('reports reads of undeclared keys as FP404', () => {
     const r = lint(files, { only: MATRIX, config: shapes({ [`${WF}/m.yml#dynamic`]: ['os', 'config'] }) });
-    expect(byCode(r, 'WFC403').map((f) => f.symbol)).toEqual([`${WF}/m.yml#jobs.extra`]);
-    const f = byCode(r, 'WFC404');
+    expect(byCode(r, 'FP403').map((f) => f.symbol)).toEqual([`${WF}/m.yml#jobs.extra`]);
+    const f = byCode(r, 'FP404');
     expect(f.map((x) => [x.message, x.symbol])).toEqual([
       [
         'matrix.shard is not defined in any combination of jobs.dynamic (keys: os, config)',
@@ -70,7 +70,7 @@ describe('matrixShapes', () => {
       ],
     ]);
     expect(f[0]!.related.map((x) => x.message)).toEqual(['matrix defined here']);
-    expect(codes(r).filter((c) => c === 'WFC401' || c === 'WFC402')).toEqual([]);
+    expect(codes(r).filter((c) => c === 'FP401' || c === 'FP402')).toEqual([]);
   });
 
   it('matches keys case-insensitively, like GitHub', () => {
@@ -101,7 +101,7 @@ describe('matrixShapes', () => {
       },
       { only: MATRIX, config: shapes({ [`${WF}/s.yml#t`]: ['os', 'nope'] }) },
     );
-    expect(byCode(r, 'WFC404').map((f) => f.symbol)).toEqual([`${WF}/s.yml#jobs.t.matrix.nope`]);
+    expect(byCode(r, 'FP404').map((f) => f.symbol)).toEqual([`${WF}/s.yml#jobs.t.matrix.nope`]);
     expect(r.summary.matrixCombinations).toBe(2);
   });
 
@@ -120,11 +120,11 @@ describe('matrixShapes', () => {
 describe('matrixShapes — merging and unused entries', () => {
   it('keeps static keys when an include is runtime-computed', () => {
     const r = lint(files, { config: shapes({ [`${WF}/m.yml#extra`]: ['flavor'] }) });
-    const extra = byCode(r, 'WFC404').filter((f) => f.symbol?.includes('#jobs.extra.'));
+    const extra = byCode(r, 'FP404').filter((f) => f.symbol?.includes('#jobs.extra.'));
     expect(extra).toEqual([]);
   });
 
-  it('reports shapes that match no runtime-computed matrix (WFC405)', () => {
+  it('reports shapes that match no runtime-computed matrix (FP405)', () => {
     const r = lint(files, {
       config: shapes({
         [`${WF}/m.yml#dynamic`]: ['os', 'config', 'shard'],
@@ -133,7 +133,7 @@ describe('matrixShapes — merging and unused entries', () => {
         [`${WF}/gone.yml#dynamic`]: ['x'],
       }),
     });
-    expect(byCode(r, 'WFC405').map((f) => f.message)).toEqual([
+    expect(byCode(r, 'FP405').map((f) => f.message)).toEqual([
       'matrixShapes entry ".github/workflows/m.yml#setup" is not used: jobs.setup has no runtime-computed matrix',
       'matrixShapes entry ".github/workflows/m.yml#nope" is not used: .github/workflows/m.yml has no job "nope"',
       'matrixShapes entry ".github/workflows/gone.yml#dynamic" is not used: no workflow ".github/workflows/gone.yml"',

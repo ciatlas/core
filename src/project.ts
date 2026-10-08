@@ -24,7 +24,7 @@ const toPosix = (p: string) => p.split('\\').join('/');
 
 /**
  * Whether `abs` (after following symlinks) is inside the repository at `root` and outside its `.git` directory. A
- * checkout can contain symlinks; this keeps wfc from reading e.g. /etc or the persisted git credentials, and from
+ * checkout can contain symlinks; this keeps flowpact from reading e.g. /etc or the persisted git credentials, and from
  * writing through a link. A path that does not exist yet is judged by its nearest existing parent.
  */
 export function insideRepository(root: string, abs: string): boolean {
@@ -187,7 +187,7 @@ export function loadProject(opts: LoadProjectOptions): Project {
 
   const targets = new Set<string>();
   const missingTargets: string[] = [];
-  // `wfc lint .` (or the root's absolute path) means: report on everything.
+  // `flowpact lint .` (or the root's absolute path) means: report on everything.
   let wholeRepository = false;
   const ignoredTargets: string[] = [];
   for (const p of opts.paths ?? []) {
@@ -268,7 +268,7 @@ export function loadProject(opts: LoadProjectOptions): Project {
 
   if (opts.validateSchema !== false) {
     logger.time('schema validation', () => {
-      // Files that are not valid YAML are reported by WFC504; the schema parser would only repeat that.
+      // Files that are not valid YAML are reported by FP504; the schema parser would only repeat that.
       for (const u of [...workflows.values(), ...actions.values()]) {
         if (u.parseErrors.length === 0) u.schemaErrors = validateSchema(u, logger);
       }

@@ -24,7 +24,7 @@ export const CATEGORIES = {
 export type RuleCategory = (typeof CATEGORIES)[keyof typeof CATEGORIES]['id'];
 
 export interface RuleDocs {
-  /** One line, shown in `wfc rules` and as the docs page subtitle. */
+  /** One line, shown in `flowpact rules` and as the docs page subtitle. */
   summary: string;
   /** Why this matters — shown under every finding. */
   why: string;
@@ -50,7 +50,7 @@ export interface Finding {
   related: RelatedLocation[];
   /** Matrix combinations affected, as labels. */
   combos?: string[];
-  /** Stable symbol id the finding is about (used for overrides and `wfc trace`). */
+  /** Stable symbol id the finding is about (used for overrides and `flowpact trace`). */
   symbol?: string;
   why: string;
   fix: string;
@@ -93,8 +93,10 @@ export interface RuleContext {
   readonly logger: Logger;
   /** Repo-relative path of the config file, when one was loaded. */
   readonly configFile?: string;
-  /** Contract comparison; only present in check mode (`wfc check`). */
+  /** Contract comparison; only present in check mode (`flowpact check`). */
   readonly contracts?: ContractPlan;
+  /** Files at the pre-0.2.0 location (`.github/workflow-contracts/`) that flowpact still reads. */
+  readonly legacyFiles?: string[];
   /** Override usage; only present for post-phase rules. */
   readonly overrides?: OverrideUsage[];
   /** Cached matrix expansion of a job. */
@@ -103,7 +105,7 @@ export interface RuleContext {
 }
 
 export interface RuleDefinition {
-  /** `<PREFIX><category digit><two digits>`, e.g. `WFC401`. */
+  /** `<PREFIX><category digit><two digits>`, e.g. `FP401`. */
   code: string;
   /** kebab-case, e.g. `empty-binding-for-matrix-combo`. */
   name: string;

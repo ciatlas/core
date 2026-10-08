@@ -6,7 +6,7 @@ import {
   memoryFileSystem,
   memorySink,
   parseConfig,
-} from '@wfc/core';
+} from '@flowpact/core';
 
 /** Strips the common leading indentation so YAML can be written inline in tests. */
 export function yaml(strings: TemplateStringsArray, ...values: unknown[]): string {

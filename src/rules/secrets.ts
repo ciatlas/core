@@ -37,7 +37,7 @@ export function secretsNeededBy(
 }
 
 export const missingRequiredSecret = defineRule({
-  code: 'WFC201',
+  code: 'FP201',
   name: 'missing-required-secret',
   category: 'secrets',
   defaultSeverity: 'error',
@@ -75,7 +75,7 @@ secrets:
 });
 
 export const unknownSecret = defineRule({
-  code: 'WFC202',
+  code: 'FP202',
   name: 'unknown-secret',
   category: 'secrets',
   defaultSeverity: 'error',
@@ -109,7 +109,7 @@ export const unknownSecret = defineRule({
 });
 
 export const unusedSecret = defineRule({
-  code: 'WFC203',
+  code: 'FP203',
   name: 'unused-secret',
   category: 'secrets',
   defaultSeverity: 'warning',
@@ -143,13 +143,13 @@ export const unusedSecret = defineRule({
 });
 
 export const secretsInherit = defineRule({
-  code: 'WFC204',
+  code: 'FP204',
   name: 'secrets-inherit',
   category: 'secrets',
   defaultSeverity: 'info',
   docs: {
     summary:
-      '`secrets: inherit` hands every repository secret to the callee; wfc lists what is actually needed.',
+      '`secrets: inherit` hands every repository secret to the callee; flowpact lists what is actually needed.',
     why:
       'Inherit makes the secret flow invisible: nobody can tell from the caller which secrets reach which job, and every ' +
       'nested workflow gets all of them.',
@@ -181,7 +181,7 @@ secrets:
 });
 
 export const undeclaredSecretRef = defineRule({
-  code: 'WFC205',
+  code: 'FP205',
   name: 'undeclared-secret-ref',
   category: 'secrets',
   defaultSeverity: 'error',

@@ -17,7 +17,7 @@ const callee = yaml`
         - run: echo \${{ inputs.name }} \${{ inputs.optional }}
 `;
 
-describe('WFC101 missing-required-input', () => {
+describe('FP101 missing-required-input', () => {
   it('flags a reusable call without a required input, at the uses: line', () => {
     const r = lint({
       [`${WF}/caller.yml`]: yaml`
@@ -30,7 +30,7 @@ describe('WFC101 missing-required-input', () => {
       `,
       [`${WF}/callee.yml`]: callee,
     });
-    const [f] = byCode(r, 'WFC101');
+    const [f] = byCode(r, 'FP101');
     expect(f?.message).toContain('without required input "name"');
     expect(at(f!)).toBe(`${WF}/caller.yml:4:11`);
     expect(f?.related.at(-1)?.loc.file).toBe(`${WF}/callee.yml`);
@@ -43,7 +43,7 @@ describe('WFC101 missing-required-input', () => {
         'on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    with:\n      Name: x\n',
       [`${WF}/callee.yml`]: callee.replace('required: true }', 'required: true, default: d }'),
     });
-    expect(byCode(r, 'WFC101')).toEqual([]);
+    expect(byCode(r, 'FP101')).toEqual([]);
   });
 
   it('flags required action inputs (which GitHub does not enforce)', () => {
@@ -53,23 +53,23 @@ describe('WFC101 missing-required-input', () => {
       '.github/actions/a/action.yml':
         'inputs:\n  must: { required: true }\nruns:\n  using: composite\n  steps:\n    - run: echo ${{ inputs.must }}\n      shell: bash\n',
     });
-    expect(byCode(r, 'WFC101')[0]?.message).toMatch(/empty value/);
+    expect(byCode(r, 'FP101')[0]?.message).toMatch(/empty value/);
   });
 });
 
-describe('WFC102 unknown-input', () => {
+describe('FP102 unknown-input', () => {
   it('flags undeclared inputs and suggests the closest name', () => {
     const r = lint({
       [`${WF}/caller.yml`]:
         'on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    with:\n      name: x\n      nmae: y\n      zzz: 1\n',
       [`${WF}/callee.yml`]: callee,
     });
-    const msgs = byCode(r, 'WFC102').map((f) => f.message);
+    const msgs = byCode(r, 'FP102').map((f) => f.message);
     expect(msgs).toEqual([
       '.github/workflows/callee.yml has no input "nmae" — did you mean "name"?',
       '.github/workflows/callee.yml has no input "zzz"',
     ]);
-    expect(byCode(r, 'WFC102')[0]!.fix).toBe('Rename "nmae" to "name".');
+    expect(byCode(r, 'FP102')[0]!.fix).toBe('Rename "nmae" to "name".');
   });
 
   it('treats - and _ as equivalent when suggesting', () => {
@@ -79,11 +79,11 @@ describe('WFC102 unknown-input', () => {
       '.github/actions/a/action.yml':
         'inputs:\n  cache-dir: {}\nruns:\n  using: composite\n  steps:\n    - run: echo ${{ inputs.cache-dir }}\n      shell: bash\n',
     });
-    expect(byCode(r, 'WFC102')[0]?.message).toContain('did you mean "cache-dir"');
+    expect(byCode(r, 'FP102')[0]?.message).toContain('did you mean "cache-dir"');
   });
 });
 
-describe('WFC103 input-type-mismatch', () => {
+describe('FP103 input-type-mismatch', () => {
   it('flags quoted booleans and non-numeric literals for typed inputs', () => {
     const r = lint({
       [`${WF}/caller.yml`]: yaml`
@@ -98,7 +98,7 @@ describe('WFC103 input-type-mismatch', () => {
       `,
       [`${WF}/callee.yml`]: callee,
     });
-    expect(byCode(r, 'WFC103').map((f) => f.message)).toEqual([
+    expect(byCode(r, 'FP103').map((f) => f.message)).toEqual([
       'Input "flag" of .github/workflows/callee.yml is a boolean, but jobs.call passes a string ("true")',
       'Input "count" of .github/workflows/callee.yml is a number, but jobs.call passes a string ("many")',
     ]);
@@ -118,7 +118,7 @@ describe('WFC103 input-type-mismatch', () => {
       `,
       [`${WF}/callee.yml`]: callee,
     });
-    expect(byCode(r, 'WFC103')).toEqual([]);
+    expect(byCode(r, 'FP103')).toEqual([]);
   });
 
   it('evaluates constant expressions', () => {
@@ -127,11 +127,11 @@ describe('WFC103 input-type-mismatch', () => {
         "on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    with:\n      name: n\n      flag: ${{ 'yes' }}\n",
       [`${WF}/callee.yml`]: callee,
     });
-    expect(byCode(r, 'WFC103')).toHaveLength(1);
+    expect(byCode(r, 'FP103')).toHaveLength(1);
   });
 });
 
-describe('WFC104 unused-input', () => {
+describe('FP104 unused-input', () => {
   it('flags declared inputs that are never read, noting callers that still pass them', () => {
     const r = lint({
       [`${WF}/caller.yml`]:
@@ -141,7 +141,7 @@ describe('WFC104 unused-input', () => {
         'optional: { type: string, required: false }\n      dead: { type: string }',
       ),
     });
-    const [f] = byCode(r, 'WFC104');
+    const [f] = byCode(r, 'FP104');
     expect(f?.message).toBe(
       'Input "dead" of .github/workflows/callee.yml is never read (yet 1 caller passes it)',
     );
@@ -155,7 +155,7 @@ describe('WFC104 unused-input', () => {
       [`${WF}/b.yml`]:
         "on:\n  workflow_dispatch:\n    inputs:\n      y: {}\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: echo '${{ toJSON(inputs) }}'\n",
     });
-    expect(byCode(r, 'WFC104')).toEqual([]);
+    expect(byCode(r, 'FP104')).toEqual([]);
   });
 
   it('flags unused action inputs', () => {
@@ -163,11 +163,11 @@ describe('WFC104 unused-input', () => {
       '.github/actions/a/action.yml':
         'inputs:\n  unused: {}\nruns:\n  using: composite\n  steps:\n    - run: echo hi\n      shell: bash\n',
     });
-    expect(byCode(r, 'WFC104')[0]?.symbol).toBe('.github/actions/a#inputs.unused');
+    expect(byCode(r, 'FP104')[0]?.symbol).toBe('.github/actions/a#inputs.unused');
   });
 });
 
-describe('WFC105 optional-input-no-default-in-condition', () => {
+describe('FP105 optional-input-no-default-in-condition', () => {
   const w = (callerWith: string) =>
     lint({
       [`${WF}/caller.yml`]: `on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    with:\n      name: n\n${callerWith}`,
@@ -178,25 +178,25 @@ describe('WFC105 optional-input-no-default-in-condition', () => {
     });
 
   it('flags the condition when some caller omits the input', () => {
-    const [f] = byCode(w(''), 'WFC105');
+    const [f] = byCode(w(''), 'FP105');
     expect(f?.message).toContain('optional input "optional"');
     expect(f?.related.map((r) => r.message)).toContain('.github/workflows/caller.yml › jobs.call omits it');
   });
 
   it('is quiet when every caller passes the input', () => {
-    expect(byCode(w('      optional: gpu\n'), 'WFC105')).toEqual([]);
+    expect(byCode(w('      optional: gpu\n'), 'FP105')).toEqual([]);
   });
 
   it('ignores booleans (false is a natural default)', () => {
     expect(
-      byCode(lint({ [`${WF}/callee.yml`]: callee }), 'WFC105')
+      byCode(lint({ [`${WF}/callee.yml`]: callee }), 'FP105')
         .map((f) => f.message)
         .join(),
     ).not.toContain('"flag"');
   });
 });
 
-describe('WFC106 passthrough-dropped', () => {
+describe('FP106 passthrough-dropped', () => {
   it('reports the caller binding of an input the callee never reads', () => {
     const r = lint({
       [`${WF}/caller.yml`]:
@@ -206,13 +206,13 @@ describe('WFC106 passthrough-dropped', () => {
         'optional: { type: string, required: false }\n      ignored: { type: string }',
       ),
     });
-    const [f] = byCode(r, 'WFC106');
+    const [f] = byCode(r, 'FP106');
     expect(f?.severity).toBe('info');
     expect(at(f!)).toBe(`${WF}/caller.yml:7:7`);
   });
 });
 
-describe('WFC107 optional-forwarded-to-required', () => {
+describe('FP107 optional-forwarded-to-required', () => {
   const caller = (decl: string) => yaml`
     on:
       workflow_call:
@@ -230,7 +230,7 @@ describe('WFC107 optional-forwarded-to-required', () => {
       [`${WF}/caller.yml`]: caller('{ type: string, required: false }'),
       [`${WF}/callee.yml`]: callee,
     });
-    const [f] = byCode(r, 'WFC107');
+    const [f] = byCode(r, 'FP107');
     expect(f?.message).toBe(
       'Required input "name" of .github/workflows/callee.yml is fed from optional input "outer" without a default',
     );
@@ -239,7 +239,7 @@ describe('WFC107 optional-forwarded-to-required', () => {
 
   it.each(['{ type: string, required: true }', '{ type: string, default: x }'])('is quiet for %s', (decl) => {
     expect(
-      byCode(lint({ [`${WF}/caller.yml`]: caller(decl), [`${WF}/callee.yml`]: callee }), 'WFC107'),
+      byCode(lint({ [`${WF}/caller.yml`]: caller(decl), [`${WF}/callee.yml`]: callee }), 'FP107'),
     ).toEqual([]);
   });
 
@@ -251,16 +251,16 @@ describe('WFC107 optional-forwarded-to-required', () => {
       ),
       [`${WF}/callee.yml`]: callee,
     });
-    expect(byCode(r, 'WFC107')).toEqual([]);
+    expect(byCode(r, 'FP107')).toEqual([]);
   });
 });
 
-describe('WFC108 undefined-input-ref', () => {
+describe('FP108 undefined-input-ref', () => {
   it('flags reads of undeclared inputs with a suggestion', () => {
     const r = lint({
       [`${WF}/callee.yml`]: callee.replace('${{ inputs.name }}', '${{ inputs.nam }}'),
     });
-    const [f] = byCode(r, 'WFC108');
+    const [f] = byCode(r, 'FP108');
     expect(f?.message).toBe('.github/workflows/callee.yml has no input "nam" — did you mean "name"?');
     expect(f?.fix).toBe('Use `inputs.name`.');
   });
@@ -270,6 +270,6 @@ describe('WFC108 undefined-input-ref', () => {
       [`${WF}/w.yml`]:
         'on: workflow_dispatch\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: echo ${{ github.event.inputs.nope }}\n',
     });
-    expect(codes(r)).toEqual(['WFC108']);
+    expect(codes(r)).toEqual(['FP108']);
   });
 });

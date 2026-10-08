@@ -151,7 +151,7 @@ export class ProjectIndex {
     return this.actionUses.filter((u) => u.action.path === actionPath);
   }
 
-  /** The reusable workflow a job calls. Workflows without `on.workflow_call` are not callable (see WFC609). */
+  /** The reusable workflow a job calls. Workflows without `on.workflow_call` are not callable (see FP609). */
   calleeOf(job: JobDecl): WorkflowDecl | undefined {
     const wf = this.targetOf(job);
     return wf?.call ? wf : undefined;

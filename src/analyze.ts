@@ -1,9 +1,17 @@
 import { createHash } from 'node:crypto';
-import { ConfigError, defaultConfig, matchesPattern, type Override, type WfcConfig } from './config';
+import {
+  ConfigError,
+  defaultConfig,
+  LEGACY_CONFIG_DIR,
+  matchesPattern,
+  type Override,
+  type WfcConfig,
+} from './config';
 import {
   type ContractPlan,
   type ContractPlanEntry,
   entryConsumers,
+  LEGACY_CONTRACTS_DIR,
   planContracts,
   scopePlan,
 } from './contracts';
@@ -23,7 +31,7 @@ import type {
   Severity,
   SeveritySetting,
 } from './rules/types';
-import { didYouMean } from './rules/util';
+import { didYouMean, RENAMED_CODE_HINT, renamedCode } from './rules/util';
 import { compareLoc, type Loc, SourceFile } from './source';
 import { escapeControl } from './text';
 import { type ToolMeta, toolMeta } from './version';
@@ -40,7 +48,7 @@ export interface AnalyzeOptions {
   repository?: string;
   /** Only run these rules (codes or names). */
   only?: string[];
-  /** Compare against the contracts in `.github/workflow-contracts/` (`wfc check`). */
+  /** Compare against the contracts in `.github/flowpact/` (`flowpact check`). */
   checkContracts?: boolean;
   /** Clock for override expiry; defaults to the current time. */
   now?: Date;
@@ -88,7 +96,7 @@ export interface AnalysisResult {
   suppressed: SuppressedFinding[];
   /** Contract comparison (check mode only). */
   contracts?: ContractPlan;
-  /** The config file, for code frames of WFC9xx findings. */
+  /** The config file, for code frames of FP9xx findings. */
   configSource?: SourceFile;
   /**
    * With plugins skipped: config entries naming rules that are not loaded (presumably plugin rules). They are ignored
@@ -100,7 +108,7 @@ export interface AnalysisResult {
 
 /**
  * Sorts config references to unknown rules. With plugins skipped, a name may belong to a plugin rule and is tolerated —
- * unless it uses the built-in `WFC` prefix or is a near miss of a built-in rule, which makes it a typo.
+ * unless it uses the built-in `FP` prefix or is a near miss of a built-in rule, which makes it a typo.
  */
 function triageUnknown(
   registry: RuleRegistry,
@@ -113,8 +121,9 @@ function triageUnknown(
     key,
     registry.all().flatMap((r) => [r.code, r.name]),
   );
-  const issue = `${path}: unknown rule${guess ? ` (did you mean ${guess}?)` : ` "${key}"`}`;
-  if (allowUnknown && !guess && !/^WFC/i.test(key)) out.tolerated.push(issue);
+  const hint = renamedCode(key) ? ` — ${RENAMED_CODE_HINT}` : '';
+  const issue = `${path}: unknown rule${guess ? ` (did you mean ${guess}?${hint})` : ` "${key}"`}`;
+  if (allowUnknown && !guess && !/^(FP|WFC)\d/i.test(key)) out.tolerated.push(issue);
   else out.hard.push(issue);
 }
 
@@ -221,7 +230,8 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
       undefined,
       unknownOnly.map((o) => {
         const guess = didYouMean(o, names);
-        return `${o}: unknown rule${guess ? ` (did you mean ${guess}?)` : ''}`;
+        const hint = renamedCode(o) ? ` — ${RENAMED_CODE_HINT}` : '';
+        return `${o}: unknown rule${guess ? ` (did you mean ${guess}?${hint})` : ''}`;
       }),
     );
   }
@@ -245,6 +255,17 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
     );
   }
 
+  // Files still at wfc's pre-0.2.0 location: they keep working, FP904 suggests `flowpact migrate`.
+  const layoutFs = opts.fs ?? nodeFileSystem(opts.root);
+  const legacyContracts = layoutFs
+    .walk(LEGACY_CONTRACTS_DIR)
+    .filter((f) => f.endsWith('.contract.yml'))
+    .sort();
+  const legacyFiles = [
+    ...(opts.configFile?.startsWith(`${LEGACY_CONFIG_DIR}/`) ? [opts.configFile] : []),
+    ...legacyContracts.slice(0, 1),
+  ];
+
   const runRules = (phase: 'main' | 'post', extra: Partial<RuleContext>): Finding[] => {
     const out: Finding[] = [];
     for (const rule of registry.all()) {
@@ -262,6 +283,7 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
         matrix,
         ...(opts.configFile ? { configFile: opts.configFile } : {}),
         ...(contracts ? { contracts } : {}),
+        ...(legacyFiles.length ? { legacyFiles } : {}),
         ...extra,
         report: (input) => out.push(toFinding(rule, severity, input, registry)),
       };
@@ -302,7 +324,7 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
     const notRun = !rule || (rule.category === 'contracts' && !opts.checkContracts);
     if (severity === 'off' || (only && !only.includes(code)) || notRun) u.inactive = true;
   }
-  // The contract of a targeted workflow belongs to it (e.g. a conflicted contract, WFC805), and so do the contracts
+  // The contract of a targeted workflow belongs to it (e.g. a conflicted contract, FP805), and so do the contracts
   // that list it as a consumer.
   const scopedEntries = (contracts?.entries ?? []).filter(contractInScope);
   const contractFilesInScope = new Set(scopedEntries.map((e) => e.file));

@@ -36,15 +36,15 @@ function* entries(
 }
 
 const GENERATE =
-  'Run `wfc generate` and commit the updated contracts. In CI, the wfc action (check mode) attaches the regenerated contracts and a `git apply`-able patch to the run — see its job summary.';
+  'Run `flowpact generate` and commit the updated contracts. In CI, the flowpact action (check mode) attaches the regenerated contracts and a `git apply`-able patch to the run — see its job summary.';
 
 export const contractMissing = defineRule({
-  code: 'WFC801',
+  code: 'FP801',
   name: 'contract-missing',
   category: 'contracts',
   defaultSeverity: 'error',
   docs: {
-    summary: 'A workflow or local action has no contract in `.github/workflow-contracts/` (check mode).',
+    summary: 'A workflow or local action has no contract in `.github/flowpact/` (check mode).',
     why: 'Without a locked contract, changes to its interface and wiring are not visible in review and cannot be checked.',
     fix: GENERATE,
   },
@@ -60,7 +60,7 @@ export const contractMissing = defineRule({
 });
 
 export const contractOutdated = defineRule({
-  code: 'WFC802',
+  code: 'FP802',
   name: 'contract-outdated',
   category: 'contracts',
   defaultSeverity: 'error',
@@ -74,9 +74,9 @@ export const contractOutdated = defineRule({
   },
   check(ctx) {
     for (const { entry, unit } of entries(ctx, ['update'])) {
-      if (entry.invalid) continue; // WFC805
+      if (entry.invalid) continue; // FP805
       const changes = entry.changes.filter((c) => !c.breaking);
-      if (changes.length === 0 && entry.changes.length > 0) continue; // only breaking changes → WFC803
+      if (changes.length === 0 && entry.changes.length > 0) continue; // only breaking changes → FP803
       ctx.report({
         message: `Contract ${entry.file} is outdated: ${
           changes.length
@@ -95,7 +95,7 @@ export const contractOutdated = defineRule({
 });
 
 export const breakingInterfaceChange = defineRule({
-  code: 'WFC803',
+  code: 'FP803',
   name: 'breaking-interface-change',
   category: 'contracts',
   defaultSeverity: 'error',
@@ -105,7 +105,7 @@ export const breakingInterfaceChange = defineRule({
     why:
       'Callers written against the locked interface will fail (unknown or missing input) or silently read empty outputs. ' +
       'In large pipelines those callers may live in other repositories or rarely-run branches.',
-    fix: 'Update every caller first (wfc lists the known consumers), then regenerate the contract. If the change is intended, `wfc generate` records it and the diff makes the break explicit in review.',
+    fix: 'Update every caller first (flowpact lists the known consumers), then regenerate the contract. If the change is intended, `flowpact generate` records it and the diff makes the break explicit in review.',
     examples: {
       bad: `# contract: input "channel" optional
 on:
@@ -113,13 +113,13 @@ on:
     inputs:
       channel: { type: string, required: true }   # now required`,
       good: `# keep it optional with a default (a required workflow_call input ignores its default),
-# or update all callers first, then: wfc generate
+# or update all callers first, then: flowpact generate
       channel: { type: string, required: false, default: stable }`,
     },
   },
   check(ctx) {
     for (const { entry, unit } of entries(ctx, ['update', 'delete'])) {
-      if (entry.status === 'delete') continue; // WFC804
+      if (entry.status === 'delete') continue; // FP804
       const consumers =
         unit?.kind === 'action'
           ? ctx.index.usersOf(unit.path).map((u) => ({
@@ -143,7 +143,7 @@ on:
 });
 
 export const orphanContract = defineRule({
-  code: 'WFC804',
+  code: 'FP804',
   name: 'orphan-contract',
   category: 'contracts',
   defaultSeverity: 'error',
@@ -152,11 +152,11 @@ export const orphanContract = defineRule({
     why:
       'If the workflow was removed or renamed, anything still calling it (including other repositories) breaks — the stale ' +
       'contract is the last record of that interface.',
-    fix: 'Confirm nothing depends on the removed workflow, then run `wfc generate` to delete the contract.',
+    fix: 'Confirm nothing depends on the removed workflow, then run `flowpact generate` to delete the contract.',
   },
   check(ctx) {
     for (const { entry } of entries(ctx, ['delete'])) {
-      if (entry.invalid) continue; // WFC805 — an unreadable file does not say what it describes
+      if (entry.invalid) continue; // FP805 — an unreadable file does not say what it describes
       ctx.report({
         message: `Contract ${entry.file} describes ${entry.unit ?? 'a workflow'} which no longer exists`,
         loc: fileStart(entry.file),
@@ -167,7 +167,7 @@ export const orphanContract = defineRule({
 });
 
 export const contractInvalid = defineRule({
-  code: 'WFC805',
+  code: 'FP805',
   name: 'contract-invalid',
   category: 'contracts',
   defaultSeverity: 'error',
@@ -175,7 +175,7 @@ export const contractInvalid = defineRule({
     summary:
       'A contract file cannot be read (invalid YAML or schema), usually because it was edited by hand or merged badly.',
     why: 'An unreadable contract cannot be compared, so drift and breaking changes go unnoticed.',
-    fix: 'Contracts are generated: resolve the merge by running `wfc generate` instead of editing the file.',
+    fix: 'Contracts are generated: resolve the merge by running `flowpact generate` instead of editing the file.',
   },
   check(ctx) {
     for (const { entry } of entries(ctx, ['update', 'delete'])) {

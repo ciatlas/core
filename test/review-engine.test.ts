@@ -23,7 +23,7 @@ describe('YAML anchors and aliases are resolved', () => {
             steps: [{ run: echo }]
       `,
     });
-    expect(codes(r)).not.toContain('WFC404');
+    expect(codes(r)).not.toContain('FP404');
   });
 
   it('aliased include entries and scalar values keep their keys', () => {
@@ -64,7 +64,7 @@ describe('YAML anchors and aliases are resolved', () => {
                   node-version: \${{ matrix.config }}
       `,
     });
-    expect(codes(r).filter((c) => c.startsWith('WFC40'))).toEqual([]);
+    expect(codes(r).filter((c) => c.startsWith('FP40'))).toEqual([]);
     const b = r.project.workflows.get(`${WF}/w.yml`)!.jobs.b!;
     expect(b.matrix!.include[0]!.values).toEqual({ os: 'ubuntu-latest', config: 'ci-default.json' });
   });
@@ -103,7 +103,7 @@ ${steps}
       [`${WF}/m.yml`]: matrix(`          - if: matrix.os != 'macos'
             run: echo \${{ matrix.arch }}`),
     });
-    expect(codes(r)).toEqual(['WFC402']);
+    expect(codes(r)).toEqual(['FP402']);
   });
 
   it('does not report comparisons, negation or && guards', () => {
@@ -121,37 +121,37 @@ ${steps}
     expect(codes(r)).toEqual([]);
   });
 
-  it('reports non-empty with: values that interpolate a missing key (WFC402)', () => {
+  it('reports non-empty with: values that interpolate a missing key (FP402)', () => {
     const r = lint({
       [`${WF}/m.yml`]: matrix(`          - uses: some/action@v1
             with:
               args: --arch=\${{ matrix.arch }}
               path: \${{ format('cfg/{0}', matrix.arch) }}`),
     });
-    expect(codes(r)).toEqual(['WFC402', 'WFC402']);
+    expect(codes(r)).toEqual(['FP402', 'FP402']);
   });
 });
 
 describe('inputs', () => {
-  it('WFC101 flags a missing required reusable-workflow input even with a default', () => {
+  it('FP101 flags a missing required reusable-workflow input even with a default', () => {
     const r = lint({
       [`${WF}/top.yml`]: 'on: push\njobs:\n  call:\n    uses: ./.github/workflows/called.yml\n',
       [`${WF}/called.yml`]: callee("      a: { type: string, required: true, default: 'x' }"),
     });
-    expect(codes(r)).toContain('WFC101');
+    expect(codes(r)).toContain('FP101');
   });
 
-  it('WFC101 still accepts a default for composite action inputs', () => {
+  it('FP101 still accepts a default for composite action inputs', () => {
     const r = lint({
       [`${WF}/w.yml`]:
         'on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - uses: ./.github/actions/a\n',
       '.github/actions/a/action.yml':
         "inputs:\n  must: { required: true, default: 'x' }\nruns:\n  using: composite\n  steps:\n    - run: echo ${{ inputs.must }}\n      shell: bash\n",
     });
-    expect(codes(r)).not.toContain('WFC101');
+    expect(codes(r)).not.toContain('FP101');
   });
 
-  it('WFC104 skips JavaScript and Docker actions', () => {
+  it('FP104 skips JavaScript and Docker actions', () => {
     const r = lint({
       [`${WF}/w.yml`]:
         'on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - uses: ./.github/actions/js\n        with: { token: t }\n      - uses: ./.github/actions/dock\n        with: { path: p }\n',
@@ -159,7 +159,7 @@ describe('inputs', () => {
         'inputs:\n  token: { required: true }\nruns:\n  using: node20\n  main: index.js\n',
       '.github/actions/dock/action.yml': 'inputs:\n  path: {}\nruns:\n  using: docker\n  image: Dockerfile\n',
     });
-    expect(codes(r)).not.toContain('WFC104');
+    expect(codes(r)).not.toContain('FP104');
   });
 
   it('github.event.inputs in called workflows and actions belongs to the dispatching workflow', () => {
@@ -185,11 +185,11 @@ describe('inputs', () => {
       '.github/actions/comp/action.yml':
         'runs:\n  using: composite\n  steps:\n    - run: echo ${{ github.event.inputs.env-name }}\n      shell: bash\n',
     });
-    expect(codes(r)).not.toContain('WFC108');
-    expect(codes(r)).not.toContain('WFC104');
+    expect(codes(r)).not.toContain('FP108');
+    expect(codes(r)).not.toContain('FP104');
   });
 
-  it('WFC105 accepts explicit empty checks and number inputs', () => {
+  it('FP105 accepts explicit empty checks and number inputs', () => {
     const r = lint({
       [`${WF}/d.yml`]: yaml`
         on:
@@ -208,10 +208,10 @@ describe('inputs', () => {
             steps: [{ run: echo }]
       `,
     });
-    expect(codes(r)).not.toContain('WFC105');
+    expect(codes(r)).not.toContain('FP105');
   });
 
-  it('WFC107 knows optional numbers default to 0', () => {
+  it('FP107 knows optional numbers default to 0', () => {
     const r = lint({
       [`${WF}/outer.yml`]: yaml`
         on:
@@ -226,7 +226,7 @@ describe('inputs', () => {
       `,
       [`${WF}/inner.yml`]: callee('      retries: { type: number, required: true }'),
     });
-    expect(codes(r)).not.toContain('WFC107');
+    expect(codes(r)).not.toContain('FP107');
   });
 });
 
@@ -280,22 +280,22 @@ describe('outputs and run scripts', () => {
       '.github/actions/comp/action.yml':
         'outputs:\n  sha:\n    value: x\nruns:\n  using: composite\n  steps: []\n',
     });
-    expect(byCode(r, 'WFC301').map((f) => f.message)).toEqual([
+    expect(byCode(r, 'FP301').map((f) => f.message)).toEqual([
       '.github/actions/comp has no output "undeclared"',
     ]);
   });
 });
 
 describe('structure and references', () => {
-  it('WFC609 reports calls to workflows without workflow_call, and nothing misleading', () => {
+  it('FP609 reports calls to workflows without workflow_call, and nothing misleading', () => {
     const r = lint({
       [`${WF}/top.yml`]:
         'on: push\njobs:\n  call:\n    uses: ./.github/workflows/called.yml\n    with:\n      target: prod\n',
       [`${WF}/called.yml`]:
         'on:\n  workflow_dispatch:\n    inputs:\n      target: { type: string, required: true }\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: echo ${{ inputs.target }}\n',
     });
-    expect(codes(r)).toEqual(['WFC609']);
-    expect(byCode(r, 'WFC609')[0]!.message).toContain('not reusable');
+    expect(codes(r)).toEqual(['FP609']);
+    expect(byCode(r, 'FP609')[0]!.message).toContain('not reusable');
   });
 
   it('loads the action at the repository root (uses: ./)', () => {
@@ -305,15 +305,15 @@ describe('structure and references', () => {
       'action.yml':
         'inputs:\n  token: {}\nruns:\n  using: composite\n  steps:\n    - run: echo ${{ inputs.token }}\n      shell: bash\n',
     });
-    expect(byCode(r, 'WFC102').map((f) => f.message)).toEqual(['. has no input "nope"']);
-    expect(codes(r)).not.toContain('WFC606');
+    expect(byCode(r, 'FP102').map((f) => f.message)).toEqual(['. has no input "nope"']);
+    expect(codes(r)).not.toContain('FP606');
   });
 
   it('never reads local uses: targets outside the repository', () => {
     const r = lint({
       [`${WF}/w.yml`]: 'on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - uses: ./../../etc\n',
     });
-    expect(byCode(r, 'WFC606').length).toBe(1);
+    expect(byCode(r, 'FP606').length).toBe(1);
     expect(r.project.actions.size).toBe(0);
   });
 
@@ -321,12 +321,12 @@ describe('structure and references', () => {
     const r = lint({
       [`${WF}/w.yml`]: 'on: push\njobs:\n  j:\n    uses: acme/repo/.github/workflows/old.yml@v1\n',
     });
-    expect(codes(r)).not.toContain('WFC606');
+    expect(codes(r)).not.toContain('FP606');
   });
 });
 
-describe('schema: context availability (WFC505)', () => {
-  it('reports env in a reusable call with:, keeps typos for WFC502 only', () => {
+describe('schema: context availability (FP505)', () => {
+  it('reports env in a reusable call with:, keeps typos for FP502 only', () => {
     const r = lint(
       {
         [`${WF}/c.yml`]: yaml`
@@ -343,12 +343,12 @@ describe('schema: context availability (WFC505)', () => {
       },
       { schema: true },
     );
-    const f = byCode(r, 'WFC505');
+    const f = byCode(r, 'FP505');
     expect(f.map((x) => x.message)).toEqual([
       '`env` is not available here — GitHub rejects the workflow ("Unrecognized named-value: \'env\'")',
     ]);
     expect(f[0]!.loc.line).toBe(8);
-    expect(codes(r)).not.toContain('WFC503');
+    expect(codes(r)).not.toContain('FP503');
   });
 
   it('does not require name/description for local actions', () => {
@@ -359,7 +359,7 @@ describe('schema: context availability (WFC505)', () => {
       },
       { schema: true },
     );
-    expect(codes(r)).not.toContain('WFC503');
+    expect(codes(r)).not.toContain('FP503');
   });
 });
 
@@ -397,7 +397,7 @@ describe('reference locations in folded, literal and quoted conditions', () => {
   it('handles CRLF files', () => {
     const text =
       'on: push\r\njobs:\r\n  j:\r\n    runs-on: x\r\n    steps:\r\n      - run: |\r\n          echo one\r\n          echo ${{ inputs.zzz }}\r\n';
-    const [f] = byCode(lint({ [`${WF}/w.yml`]: text }), 'WFC108');
+    const [f] = byCode(lint({ [`${WF}/w.yml`]: text }), 'FP108');
     expect(f?.loc).toMatchObject({ line: 8, column: 20 });
   });
 });

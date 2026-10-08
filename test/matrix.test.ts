@@ -11,7 +11,7 @@ import {
   type MatrixDecl,
   matrixResolver,
   parseWorkflowFile,
-} from '@wfc/core';
+} from '@flowpact/core';
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { yaml } from './helpers';

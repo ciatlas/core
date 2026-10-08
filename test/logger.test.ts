@@ -1,4 +1,4 @@
-import { createLogger, memorySink, resolveLogLevel, silentLogger } from '@wfc/core';
+import { createLogger, memorySink, resolveLogLevel, silentLogger } from '@flowpact/core';
 import { describe, expect, it } from 'vitest';
 
 describe('logger', () => {
@@ -9,8 +9,8 @@ describe('logger', () => {
     log.info('shown', { n: 1 });
     log.child('x').warn('child');
     expect(sink.records.map((r) => [r.level, r.scope, r.message])).toEqual([
-      ['info', 'wfc', 'shown'],
-      ['warn', 'wfc:x', 'child'],
+      ['info', 'flowpact', 'shown'],
+      ['warn', 'flowpact:x', 'child'],
     ]);
     expect(log.enabled('debug')).toBe(false);
   });
@@ -46,11 +46,11 @@ describe('logger', () => {
     [{ verbose: 1 }, {}, 'debug'],
     [{ verbose: 2 }, {}, 'trace'],
     [{ quiet: true, debug: true }, {}, 'error'],
-    [{}, { WFC_DEBUG: '1' }, 'debug'],
-    [{}, { WFC_DEBUG: 'trace' }, 'trace'],
+    [{}, { FLOWPACT_DEBUG: '1' }, 'debug'],
+    [{}, { FLOWPACT_DEBUG: 'trace' }, 'trace'],
     [{}, { RUNNER_DEBUG: '1' }, 'debug'],
     [{}, { ACTIONS_STEP_DEBUG: 'true' }, 'debug'],
-    [{}, { WFC_DEBUG: '0' }, 'info'],
+    [{}, { FLOWPACT_DEBUG: '0' }, 'info'],
   ])('resolveLogLevel(%j, %j) = %s', (opts, env, level) => {
     expect(resolveLogLevel(opts, env)).toBe(level);
   });

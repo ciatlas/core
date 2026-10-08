@@ -14,7 +14,7 @@ const callee = yaml`
         - run: echo \${{ inputs.config }} \${{ inputs.name }}
 `;
 
-describe('WFC401 empty-binding-for-matrix-combo — the shipped-without-a-variant incident', () => {
+describe('FP401 empty-binding-for-matrix-combo — the shipped-without-a-variant incident', () => {
   const files = (binding: string, extraEntry = '') => ({
     [`${WF}/root.yml`]: 'on: push\njobs:\n  t:\n    uses: ./.github/workflows/tests.yml\n',
     [`${WF}/tests.yml`]: yaml`
@@ -37,7 +37,7 @@ describe('WFC401 empty-binding-for-matrix-combo — the shipped-without-a-varian
 
   it('names the combination, the include entry, the chain and the receiving input', () => {
     const r = lint(files('${{ matrix.config }}'));
-    const [f] = byCode(r, 'WFC401');
+    const [f] = byCode(r, 'FP401');
     expect(f?.severity).toBe('error');
     expect(f?.message).toBe(
       'Input "config" for .github/workflows/callee.yml is empty in 1 of 2 matrix combinations — matrix.config is not defined there',
@@ -53,14 +53,14 @@ describe('WFC401 empty-binding-for-matrix-combo — the shipped-without-a-varian
   });
 
   it('is quiet with an explicit fallback or when every combination defines the key', () => {
-    expect(byCode(lint(files("${{ matrix.config || 'default.json' }}")), 'WFC401')).toEqual([]);
+    expect(byCode(lint(files("${{ matrix.config || 'default.json' }}")), 'FP401')).toEqual([]);
     expect(
-      byCode(lint(files('${{ matrix.config }}', '\n                  config: win.json')), 'WFC401'),
+      byCode(lint(files('${{ matrix.config }}', '\n                  config: win.json')), 'FP401'),
     ).toEqual([]);
   });
 
   it('catches the missing key through string functions', () => {
-    expect(byCode(lint(files("${{ format('{0}', matrix.config) }}")), 'WFC401')).toHaveLength(1);
+    expect(byCode(lint(files("${{ format('{0}', matrix.config) }}")), 'FP401')).toHaveLength(1);
   });
 
   it('works for product matrices with partial includes and for action inputs', () => {
@@ -84,7 +84,7 @@ describe('WFC401 empty-binding-for-matrix-combo — the shipped-without-a-varian
       '.github/actions/build/action.yml':
         'inputs:\n  target: { required: true }\nruns:\n  using: composite\n  steps:\n    - run: echo ${{ inputs.target }}\n      shell: bash\n',
     });
-    const [f] = byCode(r, 'WFC401');
+    const [f] = byCode(r, 'FP401');
     expect(f?.combos).toEqual(['{ os: mac }']);
     expect(f?.related.at(-1)?.message).toBe('receives the empty value: input "target"');
   });
@@ -103,7 +103,7 @@ describe('WFC401 empty-binding-for-matrix-combo — the shipped-without-a-varian
               b: \${{ matrix.b }}
       `,
     });
-    expect(codes(r)).toContain('WFC401');
+    expect(codes(r)).toContain('FP401');
   });
 
   it('does not guess about unknown matrix values', () => {
@@ -122,11 +122,11 @@ describe('WFC401 empty-binding-for-matrix-combo — the shipped-without-a-varian
                   os: \${{ matrix.os }}
       `,
     });
-    expect(byCode(r, 'WFC401')).toEqual([]);
+    expect(byCode(r, 'FP401')).toEqual([]);
   });
 });
 
-describe('WFC402 matrix-key-missing-in-combo', () => {
+describe('FP402 matrix-key-missing-in-combo', () => {
   const w = (step: string) =>
     lint({
       [`${WF}/w.yml`]: yaml`
@@ -149,7 +149,7 @@ describe('WFC402 matrix-key-missing-in-combo', () => {
     });
 
   it('flags run scripts that interpolate a key missing in some combinations', () => {
-    const [f] = byCode(w('run: ./test --shard ${{ matrix.shard }}'), 'WFC402');
+    const [f] = byCode(w('run: ./test --shard ${{ matrix.shard }}'), 'FP402');
     expect(f?.message).toBe('matrix.shard is undefined in 2 of 3 combinations of jobs.j');
     expect(f?.combos).toEqual(['{ suite: unit }', '{ suite: canary, experimental: true }']);
     expect(f?.related[0]?.message).toBe('this include entry has no `shard`');
@@ -157,11 +157,11 @@ describe('WFC402 matrix-key-missing-in-combo', () => {
 
   it('exempts conditions and continue-on-error', () => {
     const r = w('if: matrix.experimental\n          run: echo x');
-    expect(byCode(r, 'WFC402')).toEqual([]);
+    expect(byCode(r, 'FP402')).toEqual([]);
   });
 });
 
-describe('WFC403 dynamic-matrix-unverified', () => {
+describe('FP403 dynamic-matrix-unverified', () => {
   it('reports runtime matrices whose keys are read', () => {
     const r = lint({
       [`${WF}/w.yml`]: yaml`
@@ -179,13 +179,13 @@ describe('WFC403 dynamic-matrix-unverified', () => {
             steps: [{ run: x }]
       `,
     });
-    expect(byCode(r, 'WFC403')[0]?.message).toBe(
+    expect(byCode(r, 'FP403')[0]?.message).toBe(
       'jobs.j has a runtime-computed matrix; reads of matrix.os cannot be verified',
     );
   });
 });
 
-describe('WFC404 undefined-matrix-key', () => {
+describe('FP404 undefined-matrix-key', () => {
   it('flags keys no combination defines, and matrix reads in jobs without a matrix', () => {
     const r = lint({
       [`${WF}/w.yml`]: yaml`
@@ -204,11 +204,11 @@ describe('WFC404 undefined-matrix-key', () => {
               - run: echo \${{ matrix.os }}
       `,
     });
-    expect(byCode(r, 'WFC404').map((f) => f.message)).toEqual([
+    expect(byCode(r, 'FP404').map((f) => f.message)).toEqual([
       'matrix.sute is not defined in any combination of jobs.a (keys: suite)',
       'jobs.b has no matrix, so matrix.os is always empty',
     ]);
     // The typo is not double-reported as "missing in some combinations".
-    expect(byCode(r, 'WFC402')).toEqual([]);
+    expect(byCode(r, 'FP402')).toEqual([]);
   });
 });

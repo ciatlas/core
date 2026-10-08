@@ -1,4 +1,4 @@
-import { resolveSymbols, sym, trace } from '@wfc/core';
+import { resolveSymbols, sym, trace } from '@flowpact/core';
 import { describe, expect, it } from 'vitest';
 import { lint, WF, yaml } from './helpers';
 

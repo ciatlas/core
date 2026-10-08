@@ -9,7 +9,7 @@ import {
   toStr,
   truthy,
   UNKNOWN,
-} from '@wfc/core';
+} from '@flowpact/core';
 import { describe, expect, it } from 'vitest';
 
 const refs = (src: string) =>

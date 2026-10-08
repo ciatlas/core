@@ -4,7 +4,7 @@ import { CONTEXT_FUNCTIONS, KNOWN_CONTEXTS } from './expressions';
 import type { Diagnostic, UnitDecl } from './ir';
 import type { Logger } from './logger';
 
-/** Syntax problems are reported by WFC502 with better positions; drop the parser's duplicates. */
+/** Syntax problems are reported by FP502 with better positions; drop the parser's duplicates. */
 const SYNTAX_NOISE = [/Unexpected symbol/i, /Unexpected end of expression/i, /Unclosed expression/i];
 
 /** Action metadata that GitHub's schema requires but the runner does not need for local actions. */
@@ -14,8 +14,8 @@ const CONTEXT_NAMES = new Set<string>(KNOWN_CONTEXTS);
 const FUNCTION_NAMES = new Set(CONTEXT_FUNCTIONS.map((f) => f.name.toLowerCase()));
 
 /**
- * "Unrecognized named-value: 'env'" for a context wfc knows means the context is not available in that field
- * (GitHub's context-availability rules); for an unknown name it is a typo already reported by WFC502.
+ * "Unrecognized named-value: 'env'" for a context flowpact knows means the context is not available in that field
+ * (GitHub's context-availability rules); for an unknown name it is a typo already reported by FP502.
  */
 function classify(message: string): 'drop' | 'context' | 'schema' {
   if (SYNTAX_NOISE.some((re) => re.test(message))) return 'drop';

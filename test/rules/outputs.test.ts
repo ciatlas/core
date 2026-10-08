@@ -39,7 +39,7 @@ const lib = yaml`
           run: echo "url=x" >> $GITHUB_OUTPUT
 `;
 
-describe('WFC301 undefined-output-ref', () => {
+describe('FP301 undefined-output-ref', () => {
   it('flags unknown job outputs and reusable workflow outputs', () => {
     const r = lint({
       [`${WF}/p.yml`]: pipeline(
@@ -47,7 +47,7 @@ describe('WFC301 undefined-output-ref', () => {
       ),
       [`${WF}/lib.yml`]: lib,
     });
-    expect(byCode(r, 'WFC301').map((f) => f.message)).toEqual([
+    expect(byCode(r, 'FP301').map((f) => f.message)).toEqual([
       'jobs.build has no output "versoin" — did you mean "version"?',
       'jobs.call has no output "uri" — did you mean "url"?',
     ]);
@@ -66,7 +66,7 @@ describe('WFC301 undefined-output-ref', () => {
         ),
     });
     const r = broken;
-    expect(byCode(r, 'WFC301').map((f) => f.message)).toEqual([
+    expect(byCode(r, 'FP301').map((f) => f.message)).toEqual([
       '.github/workflows/lib.yml has no job "k"',
       'jobs.j has no output "nope"',
     ]);
@@ -88,7 +88,7 @@ describe('WFC301 undefined-output-ref', () => {
               - run: echo \${{ steps.later.outputs.x }}
       `,
     });
-    expect(byCode(r, 'WFC301').map((f) => f.message)).toEqual([
+    expect(byCode(r, 'FP301').map((f) => f.message)).toEqual([
       'No step with id "nope" in jobs.j',
       'Step "later" runs after this step, so its outputs are not available yet',
     ]);
@@ -101,7 +101,7 @@ describe('WFC301 undefined-output-ref', () => {
       '.github/actions/a/action.yml':
         'outputs:\n  present:\n    value: x\nruns:\n  using: composite\n  steps: []\n',
     });
-    expect(byCode(r, 'WFC301')[0]?.message).toBe('.github/actions/a has no output "missing"');
+    expect(byCode(r, 'FP301')[0]?.message).toBe('.github/actions/a has no output "missing"');
   });
 
   it('does not judge remote reusable workflows', () => {
@@ -109,11 +109,11 @@ describe('WFC301 undefined-output-ref', () => {
       [`${WF}/w.yml`]:
         'on: push\njobs:\n  r:\n    uses: o/r/.github/workflows/x.yml@v1\n  c:\n    needs: r\n    runs-on: x\n    steps:\n      - run: echo ${{ needs.r.outputs.any }}\n',
     });
-    expect(byCode(r, 'WFC301')).toEqual([]);
+    expect(byCode(r, 'FP301')).toEqual([]);
   });
 });
 
-describe('WFC302 output-ref-without-needs', () => {
+describe('FP302 output-ref-without-needs', () => {
   it('flags needs.<job> reads without a needs edge, and unknown jobs', () => {
     const r = lint({
       [`${WF}/w.yml`]: yaml`
@@ -129,7 +129,7 @@ describe('WFC302 output-ref-without-needs', () => {
               - run: echo \${{ needs.a.outputs.v }} \${{ needs.ghost.result }}
       `,
     });
-    const fs = byCode(r, 'WFC302');
+    const fs = byCode(r, 'FP302');
     expect(fs.map((f) => f.message)).toEqual([
       'jobs.b reads needs.a but does not list "a" under needs',
       'jobs.b reads needs.ghost, but .github/workflows/w.yml has no job "ghost"',
@@ -138,13 +138,13 @@ describe('WFC302 output-ref-without-needs', () => {
   });
 });
 
-describe('WFC303 unused-output', () => {
+describe('FP303 unused-output', () => {
   it('flags unread job outputs and workflow outputs no caller reads', () => {
     const r = lint({
       [`${WF}/p.yml`]: pipeline('echo ${{ needs.build.outputs.version }} ${{ needs.call.outputs.url }}'),
       [`${WF}/lib.yml`]: lib,
     });
-    expect(byCode(r, 'WFC303').map((f) => f.message)).toEqual([
+    expect(byCode(r, 'FP303').map((f) => f.message)).toEqual([
       'Workflow output "dead" of .github/workflows/lib.yml is not read by any of its 1 caller',
       'Output "unused" of jobs.build is never read',
     ]);
@@ -152,7 +152,7 @@ describe('WFC303 unused-output', () => {
 
   it('does not judge workflow outputs without local callers', () => {
     const r = lint({ [`${WF}/lib.yml`]: lib });
-    expect(byCode(r, 'WFC303')).toEqual([]);
+    expect(byCode(r, 'FP303')).toEqual([]);
   });
 
   it('flags action outputs that no user reads', () => {
@@ -162,16 +162,16 @@ describe('WFC303 unused-output', () => {
       '.github/actions/a/action.yml':
         'outputs:\n  used:\n    value: x\n  dead:\n    value: y\nruns:\n  using: composite\n  steps: []\n',
     });
-    expect(byCode(r, 'WFC303').map((f) => f.symbol)).toEqual(['.github/actions/a#outputs.dead']);
+    expect(byCode(r, 'FP303').map((f) => f.symbol)).toEqual(['.github/actions/a#outputs.dead']);
   });
 });
 
-describe('WFC304 step-output-never-written', () => {
+describe('FP304 step-output-never-written', () => {
   it('flags outputs the inline script never writes', () => {
     const r = lint({
       [`${WF}/w.yml`]: pipeline('x').replace('steps.meta.outputs.version', 'steps.meta.outputs.ver'),
     });
-    const [f] = byCode(r, 'WFC304');
+    const [f] = byCode(r, 'FP304');
     expect(f?.message).toBe(
       'Step "meta" never writes output "ver" (it writes version) — did you mean "version"?',
     );
@@ -195,6 +195,6 @@ describe('WFC304 step-output-never-written', () => {
                 run: ./script.sh
       `,
     });
-    expect(byCode(r, 'WFC304')).toEqual([]);
+    expect(byCode(r, 'FP304')).toEqual([]);
   });
 });

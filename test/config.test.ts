@@ -8,7 +8,7 @@ import {
   loadConfig,
   matchesPattern,
   parseConfig,
-} from '@wfc/core';
+} from '@flowpact/core';
 import { describe, expect, it } from 'vitest';
 
 describe('config', () => {
@@ -27,26 +27,26 @@ describe('config', () => {
   it('rejects unknown keys and bad values with paths', () => {
     expect(() => parseConfig({ rulez: {} })).toThrow(ConfigError);
     try {
-      parseConfig({ rules: { WFC101: 'fatal' }, limits: { nestingDepth: 0 } });
+      parseConfig({ rules: { FP101: 'fatal' }, limits: { nestingDepth: 0 } });
     } catch (err) {
       expect((err as ConfigError).issues.map((i) => i.split(':')[0])).toEqual([
-        'rules.WFC101',
+        'rules.FP101',
         'limits.nestingDepth',
       ]);
     }
   });
 
   it('loads from the default location, or an explicit path', () => {
-    const root = mkdtempSync(join(tmpdir(), 'wfc-'));
+    const root = mkdtempSync(join(tmpdir(), 'flowpact-'));
     expect(loadConfig(root).file).toBeUndefined();
-    mkdirSync(join(root, '.github/workflow-contracts'), { recursive: true });
+    mkdirSync(join(root, '.github/flowpact'), { recursive: true });
     writeFileSync(
-      join(root, '.github/workflow-contracts/wfc.config.yml'),
-      'rules:\n  WFC104: off\nlimits:\n  maxInputs: 5\n',
+      join(root, '.github/flowpact/flowpact.config.yml'),
+      'rules:\n  FP104: off\nlimits:\n  maxInputs: 5\n',
     );
     const loaded = loadConfig(root);
-    expect(loaded.file).toBe('.github/workflow-contracts/wfc.config.yml');
-    expect(loaded.config.rules).toEqual({ WFC104: 'off' });
+    expect(loaded.file).toBe('.github/flowpact/flowpact.config.yml');
+    expect(loaded.config.rules).toEqual({ FP104: 'off' });
     expect(loaded.config.limits).toEqual({ nestingDepth: 10, maxInputs: 5 });
     expect(() => loadConfig(root, join(root, 'missing.yml'))).toThrow(/not found/);
     writeFileSync(join(root, 'bad.yml'), 'rules: [\n');
@@ -55,7 +55,7 @@ describe('config', () => {
 
   it('exports a JSON schema', () => {
     const s = configJsonSchema();
-    expect(s.$id).toBe('https://rumankazi.github.io/wfc/schemas/config/v1.json');
+    expect(s.$id).toBe('https://rumankazi.github.io/flowpact/schemas/config/v1.json');
     expect(JSON.stringify(s)).toContain('nestingDepth');
   });
 

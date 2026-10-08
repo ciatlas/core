@@ -34,7 +34,7 @@ export interface Logger {
 export function createLogger(options: { level?: LogLevel; sink?: LogSink; scope?: string } = {}): Logger {
   const level = options.level ?? 'info';
   const sink = options.sink ?? { write() {} };
-  const scope = options.scope ?? 'wfc';
+  const scope = options.scope ?? 'flowpact';
 
   const log = (lvl: Exclude<LogLevel, 'silent'>, message: string, data?: Record<string, unknown>) => {
     if (ORDER[lvl] > ORDER[level]) return;
@@ -81,7 +81,7 @@ export function memorySink(): LogSink & { records: LogRecord[] } {
 
 /**
  * Resolves the effective log level from flags and environment.
- * `WFC_DEBUG=1`, `RUNNER_DEBUG=1` and `ACTIONS_STEP_DEBUG=true` all enable debug.
+ * `FLOWPACT_DEBUG=1`, `RUNNER_DEBUG=1` and `ACTIONS_STEP_DEBUG=true` all enable debug.
  */
 export function resolveLogLevel(
   opts: { debug?: boolean; verbose?: number; quiet?: boolean },
@@ -89,9 +89,9 @@ export function resolveLogLevel(
 ): LogLevel {
   if (opts.quiet) return 'error';
   if ((opts.verbose ?? 0) >= 2) return 'trace';
-  const envDebug = truthy(env.WFC_DEBUG) || truthy(env.RUNNER_DEBUG) || truthy(env.ACTIONS_STEP_DEBUG);
+  const envDebug = truthy(env.FLOWPACT_DEBUG) || truthy(env.RUNNER_DEBUG) || truthy(env.ACTIONS_STEP_DEBUG);
   if (opts.debug || (opts.verbose ?? 0) >= 1 || envDebug)
-    return env.WFC_DEBUG === 'trace' ? 'trace' : 'debug';
+    return env.FLOWPACT_DEBUG === 'trace' ? 'trace' : 'debug';
   return 'info';
 }
 

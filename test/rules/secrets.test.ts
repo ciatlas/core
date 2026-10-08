@@ -17,38 +17,38 @@ const callee = yaml`
 const caller = (secrets: string) =>
   `on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n${secrets}`;
 
-describe('WFC201 missing-required-secret', () => {
+describe('FP201 missing-required-secret', () => {
   it('flags a missing required secret', () => {
     const r = lint({
       [`${WF}/caller.yml`]: caller('    secrets:\n      optional: x\n'),
       [`${WF}/callee.yml`]: callee,
     });
-    expect(byCode(r, 'WFC201').map((f) => f.message)).toEqual([
+    expect(byCode(r, 'FP201').map((f) => f.message)).toEqual([
       'jobs.call calls .github/workflows/callee.yml without required secret "token"',
     ]);
   });
   it('accepts secrets: inherit', () => {
     const r = lint({ [`${WF}/caller.yml`]: caller('    secrets: inherit\n'), [`${WF}/callee.yml`]: callee });
-    expect(byCode(r, 'WFC201')).toEqual([]);
+    expect(byCode(r, 'FP201')).toEqual([]);
   });
 });
 
-describe('WFC202 unknown-secret', () => {
+describe('FP202 unknown-secret', () => {
   it('flags undeclared secrets with a suggestion', () => {
     const r = lint({
       [`${WF}/caller.yml`]: caller('    secrets:\n      token: x\n      tokn: y\n'),
       [`${WF}/callee.yml`]: callee,
     });
-    expect(byCode(r, 'WFC202')[0]?.message).toBe(
+    expect(byCode(r, 'FP202')[0]?.message).toBe(
       '.github/workflows/callee.yml has no secret "tokn" — did you mean "token"?',
     );
   });
 });
 
-describe('WFC203 unused-secret', () => {
+describe('FP203 unused-secret', () => {
   it('flags declared secrets that are never read', () => {
     const r = lint({ [`${WF}/callee.yml`]: callee });
-    expect(byCode(r, 'WFC203').map((f) => f.symbol)).toEqual([`${WF}/callee.yml#secrets.unused`]);
+    expect(byCode(r, 'FP203').map((f) => f.symbol)).toEqual([`${WF}/callee.yml#secrets.unused`]);
   });
   it('counts secrets forwarded to a callee through inherit', () => {
     const r = lint({
@@ -65,11 +65,11 @@ describe('WFC203 unused-secret', () => {
       [`${WF}/leaf.yml`]:
         'on: workflow_call\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: echo ${{ secrets.token }}\n',
     });
-    expect(byCode(r, 'WFC203')).toEqual([]);
+    expect(byCode(r, 'FP203')).toEqual([]);
   });
 });
 
-describe('WFC204 secrets-inherit', () => {
+describe('FP204 secrets-inherit', () => {
   it('lists the secrets the callee tree actually reads and suggests an explicit mapping', () => {
     const r = lint({
       [`${WF}/caller.yml`]: caller('    secrets: inherit\n'),
@@ -80,7 +80,7 @@ describe('WFC204 secrets-inherit', () => {
       [`${WF}/leaf.yml`]:
         'on: workflow_call\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: echo ${{ secrets.NPM_TOKEN }}\n',
     });
-    const f = byCode(r, 'WFC204').find((x) => x.loc.file.endsWith('caller.yml'));
+    const f = byCode(r, 'FP204').find((x) => x.loc.file.endsWith('caller.yml'));
     expect(f?.message).toBe(
       'jobs.call inherits all secrets; .github/workflows/callee.yml and its callees read NPM_TOKEN, optional, token',
     );
@@ -89,7 +89,7 @@ describe('WFC204 secrets-inherit', () => {
   });
 });
 
-describe('WFC205 undeclared-secret-ref', () => {
+describe('FP205 undeclared-secret-ref', () => {
   it('flags reads of undeclared secrets when a caller does not inherit', () => {
     const r = lint({
       [`${WF}/caller.yml`]: caller('    secrets:\n      token: x\n'),
@@ -98,7 +98,7 @@ describe('WFC205 undeclared-secret-ref', () => {
         '${{ secrets.GITHUB_TOKEN }} ${{ secrets.EXTRA }}',
       ),
     });
-    expect(byCode(r, 'WFC205').map((f) => f.message)).toEqual([
+    expect(byCode(r, 'FP205').map((f) => f.message)).toEqual([
       '.github/workflows/callee.yml reads secrets.EXTRA, which is not declared — it is empty when called from 1 caller without `secrets: inherit`',
     ]);
   });
@@ -107,6 +107,6 @@ describe('WFC205 undeclared-secret-ref', () => {
       [`${WF}/caller.yml`]: caller('    secrets: inherit\n'),
       [`${WF}/callee.yml`]: callee.replace('${{ secrets.GITHUB_TOKEN }}', '${{ secrets.EXTRA }}'),
     });
-    expect(byCode(r, 'WFC205')).toEqual([]);
+    expect(byCode(r, 'FP205')).toEqual([]);
   });
 });

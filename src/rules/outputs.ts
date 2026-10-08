@@ -15,7 +15,7 @@ function stepsInScope(unit: UnitDecl, jobId: string | undefined): StepDecl[] {
 }
 
 export const undefinedOutputRef = defineRule({
-  code: 'WFC301',
+  code: 'FP301',
   name: 'undefined-output-ref',
   category: 'outputs',
   defaultSeverity: 'error',
@@ -51,7 +51,7 @@ export const undefinedOutputRef = defineRule({
                 symbol: sym.job(unit.path, a),
               });
             }
-            continue; // needs.<missing> is reported by WFC302
+            continue; // needs.<missing> is reported by FP302
           }
           if (job.uses && job.uses.kind !== 'local-workflow') continue;
           if (job.uses && !ctx.index.calleeOf(job)) continue;
@@ -116,7 +116,7 @@ export const undefinedOutputRef = defineRule({
 });
 
 export const outputRefWithoutNeeds = defineRule({
-  code: 'WFC302',
+  code: 'FP302',
   name: 'output-ref-without-needs',
   category: 'outputs',
   defaultSeverity: 'error',
@@ -159,7 +159,7 @@ export const outputRefWithoutNeeds = defineRule({
 });
 
 export const unusedOutput = defineRule({
-  code: 'WFC303',
+  code: 'FP303',
   name: 'unused-output',
   category: 'outputs',
   defaultSeverity: 'warning',
@@ -217,7 +217,7 @@ export const unusedOutput = defineRule({
 });
 
 export const stepOutputNeverWritten = defineRule({
-  code: 'WFC304',
+  code: 'FP304',
   name: 'step-output-never-written',
   category: 'outputs',
   defaultSeverity: 'warning',

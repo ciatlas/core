@@ -23,7 +23,7 @@ const GITHUB_ENV_HINTS: Record<string, string> = {
 };
 
 export const undefinedEnvRef = defineRule({
-  code: 'WFC501',
+  code: 'FP501',
   name: 'undefined-env-ref',
   category: 'expressions',
   defaultSeverity: 'warning',
@@ -74,7 +74,7 @@ export const undefinedEnvRef = defineRule({
 });
 
 export const expressionParseError = defineRule({
-  code: 'WFC502',
+  code: 'FP502',
   name: 'expression-parse-error',
   category: 'expressions',
   defaultSeverity: 'error',
@@ -108,7 +108,7 @@ export const expressionParseError = defineRule({
 });
 
 export const schemaViolation = defineRule({
-  code: 'WFC503',
+  code: 'FP503',
   name: 'schema-violation',
   category: 'expressions',
   defaultSeverity: 'error',
@@ -126,7 +126,7 @@ export const schemaViolation = defineRule({
 });
 
 export const contextNotAvailable = defineRule({
-  code: 'WFC505',
+  code: 'FP505',
   name: 'context-not-available',
   category: 'expressions',
   defaultSeverity: 'error',
@@ -266,7 +266,7 @@ function refLocFor(sites: ExprSite[], e: Diagnostic, name: string | undefined): 
 }
 
 export const yamlSyntaxError = defineRule({
-  code: 'WFC504',
+  code: 'FP504',
   name: 'yaml-syntax-error',
   category: 'expressions',
   defaultSeverity: 'error',

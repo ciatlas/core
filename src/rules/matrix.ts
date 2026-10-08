@@ -106,7 +106,7 @@ function* matrixJobs(ctx: RuleContext): Generator<{ wf: WorkflowDecl; job: JobDe
 }
 
 export const emptyBindingForMatrixCombo = defineRule({
-  code: 'WFC401',
+  code: 'FP401',
   name: 'empty-binding-for-matrix-combo',
   category: 'matrix',
   defaultSeverity: 'error',
@@ -136,7 +136,7 @@ with:
   },
   check(ctx) {
     for (const { wf, job, exp } of matrixJobs(ctx)) {
-      // Over GitHub's limit the matrix is rejected as a whole (WFC406); checking each combination would only be slow.
+      // Over GitHub's limit the matrix is rejected as a whole (FP406); checking each combination would only be slow.
       if (exp.dynamic || exp.combos.length === 0 || exp.combos.length > GITHUB_MATRIX_LIMIT) continue;
       const targets: {
         binding: Binding;
@@ -201,7 +201,7 @@ const SKIP_FIELDS = new Set(['job.strategy']);
 const WITH_FIELDS = new Set(['job.with', 'step.with']);
 
 export const matrixKeyMissingInCombo = defineRule({
-  code: 'WFC402',
+  code: 'FP402',
   name: 'matrix-key-missing-in-combo',
   category: 'matrix',
   defaultSeverity: 'warning',
@@ -219,7 +219,7 @@ export const matrixKeyMissingInCombo = defineRule({
         if (site.job !== job.id || site.isCondition || SKIP_FIELDS.has(site.field) || !hasMatrixRef(site))
           continue;
         if (site.yamlPath.at(-1) === 'continue-on-error') continue;
-        // Empty `with:` values are WFC401's; here only values that still degrade (e.g. `--config=`).
+        // Empty `with:` values are FP401's; here only values that still degrade (e.g. `--config=`).
         const predicate = WITH_FIELDS.has(site.field)
           ? (v: ReturnType<typeof evaluateTemplate>) => !isEmptyValue(v)
           : () => true;
@@ -233,13 +233,13 @@ export const matrixKeyMissingInCombo = defineRule({
           const guards = guardsOf(job, site);
           const { combos } = affectedCombos(site, exp, predicate, guards, key);
           if (combos.length === 0) continue;
-          // The count says how often the key is missing; combinations where the whole input is empty are WFC401's.
+          // The count says how often the key is missing; combinations where the whole input is empty are FP401's.
           const all = WITH_FIELDS.has(site.field)
             ? affectedCombos(site, exp, () => true, guards, key).combos.length
             : combos.length;
           const rest = all - combos.length;
           ctx.report({
-            message: `matrix.${key} is undefined in ${all} of ${exp.combos.length} combinations of jobs.${job.id}${rest ? `; in ${rest} of them the whole input is empty (WFC401)` : ''}`,
+            message: `matrix.${key} is undefined in ${all} of ${exp.combos.length} combinations of jobs.${job.id}${rest ? `; in ${rest} of them the whole input is empty (FP401)` : ''}`,
             loc: firstMatrixRefLoc(site, [key]),
             combos: combos.map((c) => comboLabel(c, exp.keys)),
             symbol: sym.matrix(wf.path, job.id, key),
@@ -252,15 +252,15 @@ export const matrixKeyMissingInCombo = defineRule({
 });
 
 export const dynamicMatrixUnverified = defineRule({
-  code: 'WFC403',
+  code: 'FP403',
   name: 'dynamic-matrix-unverified',
   category: 'matrix',
   defaultSeverity: 'info',
   docs: {
     summary:
-      'The matrix is computed at runtime, so wfc cannot check that every combination defines the keys it reads.',
+      'The matrix is computed at runtime, so flowpact cannot check that every combination defines the keys it reads.',
     why: 'Dynamic matrices (`fromJSON(...)`) hide the same empty-value failure mode as static ones, but no tool can see it.',
-    fix: 'Declare the keys in the config (`matrixShapes: { "<workflow>#<job>": { keys: [os, config] } }`) so wfc can verify reads, prefer a static matrix, or validate the generated JSON in the job that produces it.',
+    fix: 'Declare the keys in the config (`matrixShapes: { "<workflow>#<job>": { keys: [os, config] } }`) so flowpact can verify reads, prefer a static matrix, or validate the generated JSON in the job that produces it.',
   },
   check(ctx) {
     for (const { wf, job, exp } of matrixJobs(ctx)) {
@@ -283,7 +283,7 @@ export const dynamicMatrixUnverified = defineRule({
 });
 
 export const undefinedMatrixKey = defineRule({
-  code: 'WFC404',
+  code: 'FP404',
   name: 'undefined-matrix-key',
   category: 'matrix',
   defaultSeverity: 'error',
@@ -321,7 +321,7 @@ export const undefinedMatrixKey = defineRule({
 });
 
 export const unusedMatrixShape = defineRule({
-  code: 'WFC405',
+  code: 'FP405',
   name: 'unused-matrix-shape',
   category: 'matrix',
   defaultSeverity: 'warning',
@@ -346,7 +346,7 @@ export const unusedMatrixShape = defineRule({
       ctx.report({
         message: `matrixShapes entry ${quote(key)} is not used: ${reason}`,
         loc: {
-          file: ctx.configFile ?? '.github/workflow-contracts/wfc.config.yml',
+          file: ctx.configFile ?? '.github/flowpact/flowpact.config.yml',
           line: 1,
           column: 1,
           endLine: 1,
@@ -359,7 +359,7 @@ export const unusedMatrixShape = defineRule({
 });
 
 export const matrixTooLarge = defineRule({
-  code: 'WFC406',
+  code: 'FP406',
   name: 'matrix-too-large',
   category: 'matrix',
   defaultSeverity: 'error',
@@ -375,7 +375,7 @@ export const matrixTooLarge = defineRule({
       if (n <= GITHUB_MATRIX_LIMIT) continue;
       ctx.report({
         message: exp.truncated
-          ? `jobs.${job.id} expands to at least ${n} matrix jobs (GitHub allows ${GITHUB_MATRIX_LIMIT}); wfc did not list them`
+          ? `jobs.${job.id} expands to at least ${n} matrix jobs (GitHub allows ${GITHUB_MATRIX_LIMIT}); flowpact did not list them`
           : `jobs.${job.id} expands to ${n} matrix jobs (GitHub allows ${GITHUB_MATRIX_LIMIT})`,
         loc: job.matrix!.loc,
         symbol: sym.job(wf.path, job.id),

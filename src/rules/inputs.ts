@@ -37,7 +37,7 @@ function declaredInputs(unit: UnitDecl): Record<string, InputDecl> {
 }
 
 export const missingRequiredInput = defineRule({
-  code: 'WFC101',
+  code: 'FP101',
   name: 'missing-required-input',
   category: 'inputs',
   defaultSeverity: 'error',
@@ -97,7 +97,7 @@ export const missingRequiredInput = defineRule({
 });
 
 export const unknownInput = defineRule({
-  code: 'WFC102',
+  code: 'FP102',
   name: 'unknown-input',
   category: 'inputs',
   defaultSeverity: 'error',
@@ -153,7 +153,7 @@ function jsonKind(v: Json): string {
 }
 
 export const inputTypeMismatch = defineRule({
-  code: 'WFC103',
+  code: 'FP103',
   name: 'input-type-mismatch',
   category: 'inputs',
   defaultSeverity: 'error',
@@ -198,7 +198,7 @@ export const inputTypeMismatch = defineRule({
 });
 
 export const unusedInput = defineRule({
-  code: 'WFC104',
+  code: 'FP104',
   name: 'unused-input',
   category: 'inputs',
   defaultSeverity: 'warning',
@@ -220,7 +220,7 @@ if: inputs.legacy-flag`,
   check(ctx) {
     const dispatchReads = eventInputReadsByRoot(ctx.index);
     for (const unit of ctx.index.units()) {
-      // JavaScript and Docker actions read inputs in code (`core.getInput`, INPUT_*), invisible to wfc.
+      // JavaScript and Docker actions read inputs in code (`core.getInput`, INPUT_*), invisible to flowpact.
       if (unit.kind === 'action' && unit.using !== 'composite') continue;
       if (readsContextDynamically(unit, 'inputs')) continue;
       for (const input of Object.values(declaredInputs(unit))) {
@@ -245,7 +245,7 @@ if: inputs.legacy-flag`,
 });
 
 export const optionalInputInCondition = defineRule({
-  code: 'WFC105',
+  code: 'FP105',
   name: 'optional-input-no-default-in-condition',
   category: 'inputs',
   defaultSeverity: 'warning',
@@ -304,7 +304,7 @@ if: inputs.variant == 'gpu'`,
 });
 
 export const passthroughDropped = defineRule({
-  code: 'WFC106',
+  code: 'FP106',
   name: 'passthrough-dropped',
   category: 'inputs',
   defaultSeverity: 'info',
@@ -334,7 +334,7 @@ export const passthroughDropped = defineRule({
 });
 
 export const optionalForwardedToRequired = defineRule({
-  code: 'WFC107',
+  code: 'FP107',
   name: 'optional-forwarded-to-required',
   category: 'inputs',
   defaultSeverity: 'warning',
@@ -388,7 +388,7 @@ jobs:
 });
 
 export const undefinedInputRef = defineRule({
-  code: 'WFC108',
+  code: 'FP108',
   name: 'undefined-input-ref',
   category: 'inputs',
   defaultSeverity: 'error',

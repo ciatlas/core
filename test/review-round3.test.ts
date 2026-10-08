@@ -14,8 +14,8 @@ import {
   planContracts,
   UnsafePathError,
   writeContracts,
-} from '@wfc/core';
-import { buildCallGraph, renderMarkdown } from '@wfc/reporters';
+} from '@flowpact/core';
+import { buildCallGraph, renderMarkdown } from '@flowpact/reporters';
 import { describe, expect, it } from 'vitest';
 import { byCode, codes, lint, WF, yaml } from './helpers';
 
@@ -34,11 +34,11 @@ function chainWithCycle(a: string): Record<string, string> {
   return files;
 }
 
-describe('WFC602 with call cycles (#21)', () => {
+describe('FP602 with call cycles (#21)', () => {
   it.each(['a_x', 's_x'])('finds the over-limit chain whatever the cycle entry is called (%s)', (a) => {
     const r = lint(chainWithCycle(a));
-    expect(byCode(r, 'WFC601')).toHaveLength(1);
-    const deep = byCode(r, 'WFC602');
+    expect(byCode(r, 'FP601')).toHaveLength(1);
+    const deep = byCode(r, 'FP602');
     expect(deep.length).toBeGreaterThan(0);
     expect(deep[0]!.message).toContain('Call chain is 11 workflows deep (limit 10)');
     expect(deep[0]!.message).toContain(`r1.yml → `);
@@ -46,7 +46,7 @@ describe('WFC602 with call cycles (#21)', () => {
 
   it('gives the same findings for both names', () => {
     const shape = (a: string) =>
-      byCode(lint(chainWithCycle(a)), 'WFC602').map((f) => f.message.replaceAll(a, 'A'));
+      byCode(lint(chainWithCycle(a)), 'FP602').map((f) => f.message.replaceAll(a, 'A'));
     expect(shape('a_x')).toEqual(shape('s_x'));
   });
 });
@@ -57,11 +57,11 @@ describe('untrusted names in output (#9)', () => {
     [`${WF}/r.yml`]: `on: workflow_call\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: |\n          echo "\${{ secrets['${name.replaceAll('\n', '\n          ')}'] }}"\n`,
   });
 
-  it('escapes secret names inside the WFC204 snippet', () => {
+  it('escapes secret names inside the FP204 snippet', () => {
     const r = lint(
       inheritCall('A\n```\n</details><img src=https://e.vil/p.png> @octocat\n::error title=x::pwned\n'),
     );
-    const fix = byCode(r, 'WFC204')[0]!.fix;
+    const fix = byCode(r, 'FP204')[0]!.fix;
     expect(fix.split('\n')).toHaveLength(3);
     expect(fix).toContain('\\n```\\n');
     const md = renderMarkdown(r);
@@ -88,17 +88,17 @@ describe('untrusted names in output (#9)', () => {
 
 describe('symlinks and .git (#10)', () => {
   const repo = () => {
-    const root = mkdtempSync(join(tmpdir(), 'wfc-r3-'));
-    const outside = mkdtempSync(join(tmpdir(), 'wfc-r3-out-'));
+    const root = mkdtempSync(join(tmpdir(), 'flowpact-r3-'));
+    const outside = mkdtempSync(join(tmpdir(), 'flowpact-r3-out-'));
     mkdirSync(join(root, '.github/workflows'), { recursive: true });
-    mkdirSync(join(root, '.github/workflow-contracts/workflows'), { recursive: true });
+    mkdirSync(join(root, '.github/flowpact/contracts/workflows'), { recursive: true });
     return { root, outside };
   };
 
   it('does not read a config that links outside the repository', () => {
     const { root, outside } = repo();
     writeFileSync(join(outside, 'r.yml'), 'rules: {gho_SECRETVALUE: error}\n');
-    symlinkSync(join(outside, 'r.yml'), join(root, '.github/workflow-contracts/wfc.config.yml'));
+    symlinkSync(join(outside, 'r.yml'), join(root, '.github/flowpact/flowpact.config.yml'));
     expect(() => loadConfig(root)).toThrow(/links outside the repository/);
     try {
       loadConfig(root);
@@ -117,7 +117,7 @@ describe('symlinks and .git (#10)', () => {
     );
     symlinkSync(
       join(outside, 'victim.txt'),
-      join(root, '.github/workflow-contracts/workflows/ci.contract.yml'),
+      join(root, '.github/flowpact/contracts/workflows/ci.contract.yml'),
     );
     const r = analyze({ root, validateSchema: false, only: [], repository: 'a/b' });
     const plan = planContracts(r.index, nodeFileSystem(root));
@@ -184,7 +184,7 @@ describe('config edge cases (#3, #11, #14)', () => {
       'rules.unused-inptu: unknown rule (did you mean unused-input?)',
     ]);
     expect(() =>
-      run({ ...base, overrides: [{ rule: 'WFC10l', file: WF, reason: 'typo of a built-in rule' }] }, true),
+      run({ ...base, overrides: [{ rule: 'FP10l', file: WF, reason: 'typo of a built-in rule' }] }, true),
     ).toThrow(ConfigError);
     const r = run(
       {
@@ -211,7 +211,7 @@ describe('config edge cases (#3, #11, #14)', () => {
         },
       ],
     });
-    const f = byCode(r, 'WFC901')[0]!;
+    const f = byCode(r, 'FP901')[0]!;
     expect(f.message).toContain('it matches no finding now');
     expect(f.message).not.toContain('reported again');
     expect(f.fix).toBe('Delete the override.');
@@ -246,11 +246,11 @@ describe('contract drift caused by a caller (#15)', () => {
     });
     expect(r.contracts?.drift).toBe(true);
     expect(r.contracts?.entries.map((e) => e.unit)).toContain(`${WF}/deploy.yml`);
-    expect(codes(r)).toContain('WFC802');
+    expect(codes(r)).toContain('FP802');
   });
 });
 
-describe('WFC505 in bare conditions of jobs and actions (#17)', () => {
+describe('FP505 in bare conditions of jobs and actions (#17)', () => {
   it('checks functions in job conditions', () => {
     const r = lint({
       [`${WF}/v.yml`]: yaml`
@@ -268,7 +268,7 @@ describe('WFC505 in bare conditions of jobs and actions (#17)', () => {
                 run: x
       `,
     });
-    const found = byCode(r, 'WFC505');
+    const found = byCode(r, 'FP505');
     expect(found.map((f) => [f.loc.line, f.loc.column])).toEqual([[4, 9]]);
     expect(found[0]!.message).toContain('`hashFiles()` is not available in a job');
   });
@@ -301,13 +301,13 @@ describe('WFC505 in bare conditions of jobs and actions (#17)', () => {
           post-if: secrets.X != ''
       `,
     });
-    const found = byCode(r, 'WFC505').map((f) => `${f.loc.file}:${f.loc.line} ${f.message.split(' — ')[0]}`);
+    const found = byCode(r, 'FP505').map((f) => `${f.loc.file}:${f.loc.line} ${f.message.split(' — ')[0]}`);
     expect(found).toEqual([
       ".github/actions/c/action.yml:6 `vars` is not available in a composite action step's `if:`",
       ".github/actions/c/action.yml:9 `needs` is not available in a composite action step's `if:`",
       ".github/actions/n/action.yml:7 `secrets` is not available in an action's `pre-if:`/`post-if:`",
     ]);
-    expect(byCode(r, 'WFC505')[0]!.message).toContain('GitHub fails the step using the action');
+    expect(byCode(r, 'FP505')[0]!.message).toContain('GitHub fails the step using the action');
   });
 
   it('words parser findings in actions for actions', () => {
@@ -318,7 +318,7 @@ describe('WFC505 in bare conditions of jobs and actions (#17)', () => {
       },
       { schema: true },
     );
-    const found = byCode(r, 'WFC505');
+    const found = byCode(r, 'FP505');
     expect(found.length).toBeGreaterThan(0);
     for (const f of found) expect(f.message).toContain('GitHub fails the step using the action');
   });
@@ -330,7 +330,7 @@ describe('calls by path (#18, #23)', () => {
       [`${WF}/c.yml`]: 'on: push\njobs:\n  x:\n    uses: ./.GitHub/workflows/r.yml\n',
       '.GitHub/workflows/r.yml': 'on: workflow_call\njobs:\n  j:\n    runs-on: x\n    steps: [{ run: x }]\n',
     });
-    expect(codes(r)).toContain('WFC606');
+    expect(codes(r)).toContain('FP606');
   });
 
   it('draws calls to files outside .github/workflows in the graph', () => {
@@ -338,7 +338,7 @@ describe('calls by path (#18, #23)', () => {
       [`${WF}/c.yml`]: 'on: push\njobs:\n  x:\n    uses: ./ci/r.yml\n',
       'ci/r.yml': 'on: workflow_call\njobs:\n  j:\n    runs-on: x\n    steps: [{ run: x }]\n',
     });
-    expect(codes(r)).toContain('WFC606');
+    expect(codes(r)).toContain('FP606');
     const g = buildCallGraph(r.index);
     expect(g.nodes.find((n) => n.id === 'ci/r.yml')?.kind).toBe('invalid');
     expect(g.edges).toContainEqual(
@@ -354,7 +354,7 @@ describe('large matrices (#4, #8)', () => {
     const r = lint({
       [`${WF}/m.yml`]: `on: push\njobs:\n  j:\n    runs-on: x\n    strategy:\n      matrix:\n        a: ${values('a', 17)}\n        b: ${values('b', 17)}\n        include:\n          - a: a0\n            extra: x\n    steps:\n      - run: echo \${{ matrix.extra }}\n`,
     });
-    expect(codes(r)).toEqual(['WFC406']);
+    expect(codes(r)).toEqual(['FP406']);
   });
 
   it('counts exclude when the product is too large to list', () => {
@@ -364,8 +364,8 @@ describe('large matrices (#4, #8)', () => {
       .join('\n');
     const m = (exclude: string) =>
       `on: push\njobs:\n  j:\n    runs-on: x\n    strategy:\n      matrix:\n${dims}\n${exclude}    steps: [{ run: x }]\n`;
-    expect(codes(lint({ [`${WF}/m.yml`]: m(`        exclude:\n${excludes}\n`) }))).not.toContain('WFC406');
-    expect(byCode(lint({ [`${WF}/m.yml`]: m('') }), 'WFC406')[0]!.message).toContain(
+    expect(codes(lint({ [`${WF}/m.yml`]: m(`        exclude:\n${excludes}\n`) }))).not.toContain('FP406');
+    expect(byCode(lint({ [`${WF}/m.yml`]: m('') }), 'FP406')[0]!.message).toContain(
       'expands to at least 100000 matrix jobs',
     );
   });
@@ -382,10 +382,10 @@ describe('large matrices (#4, #8)', () => {
       [`${WF}/m.yml`]: `on: push\njobs:\n  j:\n    runs-on: x\n    strategy:\n      matrix:\n${dims}\n        exclude:\n${excludes}\n        include:\n          - d: 1\n            extra: x\n    steps:\n      - run: echo \${{ matrix.extra }}\n`,
     });
     expect(r.summary.matrixCombinations).toBe(30);
-    expect(byCode(r, 'WFC402')[0]?.message).toContain('matrix.extra is undefined in 20 of 30 combinations');
+    expect(byCode(r, 'FP402')[0]?.message).toContain('matrix.extra is undefined in 20 of 30 combinations');
   });
 
-  it('gives true per-key counts for WFC401 and WFC402', () => {
+  it('gives true per-key counts for FP401 and FP402', () => {
     const r = lint({
       [`${WF}/m.yml`]: yaml`
         on: push
@@ -408,12 +408,12 @@ describe('large matrices (#4, #8)', () => {
       '.github/actions/act/action.yml':
         'name: a\ndescription: b\ninputs:\n  flag: {}\nruns:\n  using: composite\n  steps: []\n',
     });
-    expect(byCode(r, 'WFC401')[0]!.message).toContain(
+    expect(byCode(r, 'FP401')[0]!.message).toContain(
       'empty in 2 of 4 matrix combinations — not defined there: matrix.extra (2), matrix.other (2)',
     );
-    expect(byCode(r, 'WFC402').map((f) => f.message)).toEqual([
-      'matrix.extra is undefined in 3 of 4 combinations of jobs.small; in 2 of them the whole input is empty (WFC401)',
-      'matrix.other is undefined in 3 of 4 combinations of jobs.small; in 2 of them the whole input is empty (WFC401)',
+    expect(byCode(r, 'FP402').map((f) => f.message)).toEqual([
+      'matrix.extra is undefined in 3 of 4 combinations of jobs.small; in 2 of them the whole input is empty (FP401)',
+      'matrix.other is undefined in 3 of 4 combinations of jobs.small; in 2 of them the whole input is empty (FP401)',
     ]);
   });
 });

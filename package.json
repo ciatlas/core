@@ -1,5 +1,5 @@
 {
-  "name": "@wfc/core",
+  "name": "@flowpact/core",
   "version": "0.1.1",
   "private": true,
   "description": "Workflow data-flow engine: IR, expression analysis, matrix expansion, graph and rules.",

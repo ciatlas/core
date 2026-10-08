@@ -4,7 +4,7 @@ import { defineRule, type RuleDefinition } from './types';
 import { chainRelated, isCallOnly, listNames, quote, refsOf } from './util';
 
 export const callCycle = defineRule({
-  code: 'WFC601',
+  code: 'FP601',
   name: 'call-cycle',
   category: 'structure',
   defaultSeverity: 'error',
@@ -105,7 +105,7 @@ function callComponents(paths: string[], byCaller: Map<string, CallSite[]>): str
 }
 
 export const nestingDepth = defineRule({
-  code: 'WFC602',
+  code: 'FP602',
   name: 'nesting-depth',
   category: 'structure',
   defaultSeverity: 'error',
@@ -128,7 +128,7 @@ export const nestingDepth = defineRule({
     const internal = (c: CallSite) => componentOf.get(c.caller.path) === componentOf.get(c.callee.path);
 
     // Longest chain (in workflows, counting the top level) that reaches each workflow, computed over the components
-    // from the top-level workflows down: linear in the number of calls outside cycles. Inside a cycle (WFC601) a
+    // from the top-level workflows down: linear in the number of calls outside cycles. Inside a cycle (FP601) a
     // workflow counts the shortest way from where the chain enters the cycle, so the depth never overstates a real
     // chain and does not depend on file names.
     const entry = new Map<string, { depth: number; call?: CallSite }>();
@@ -191,13 +191,13 @@ export const nestingDepth = defineRule({
 });
 
 export const remoteUnverified = defineRule({
-  code: 'WFC603',
+  code: 'FP603',
   name: 'remote-unverified',
   category: 'structure',
   defaultSeverity: 'info',
   docs: {
     summary: 'A job calls a reusable workflow in another repository; its interface is not verified.',
-    why: 'wfc analyzes this repository only, so inputs, secrets and outputs of the remote workflow are taken on trust.',
+    why: 'flowpact analyzes this repository only, so inputs, secrets and outputs of the remote workflow are taken on trust.',
     fix: 'Nothing to fix. If the workflow lives in this repository, set `repository: owner/repo` in the config so it resolves locally.',
   },
   check(ctx) {
@@ -215,7 +215,7 @@ export const remoteUnverified = defineRule({
 });
 
 export const needsWithoutData = defineRule({
-  code: 'WFC604',
+  code: 'FP604',
   name: 'needs-without-data',
   category: 'structure',
   defaultSeverity: 'off',
@@ -252,7 +252,7 @@ export const needsWithoutData = defineRule({
 });
 
 export const largeInterface = defineRule({
-  code: 'WFC605',
+  code: 'FP605',
   name: 'large-interface',
   category: 'structure',
   defaultSeverity: 'info',
@@ -277,7 +277,7 @@ export const largeInterface = defineRule({
 });
 
 export const missingLocalTarget = defineRule({
-  code: 'WFC606',
+  code: 'FP606',
   name: 'missing-local-target',
   category: 'structure',
   defaultSeverity: 'error',
@@ -305,7 +305,7 @@ export const missingLocalTarget = defineRule({
 });
 
 export const unreferencedReusableWorkflow = defineRule({
-  code: 'WFC607',
+  code: 'FP607',
   name: 'unreferenced-reusable-workflow',
   category: 'structure',
   defaultSeverity: 'info',
@@ -327,7 +327,7 @@ export const unreferencedReusableWorkflow = defineRule({
 });
 
 export const undefinedNeedsJob = defineRule({
-  code: 'WFC608',
+  code: 'FP608',
   name: 'undefined-needs-job',
   category: 'structure',
   defaultSeverity: 'error',
@@ -354,7 +354,7 @@ export const undefinedNeedsJob = defineRule({
 });
 
 export const calleeNotReusable = defineRule({
-  code: 'WFC609',
+  code: 'FP609',
   name: 'callee-not-reusable',
   category: 'structure',
   defaultSeverity: 'error',

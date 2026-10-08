@@ -1,6 +1,6 @@
 import { readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { analyze, reportSchema, toJsonReport } from '@wfc/core';
+import { analyze, reportSchema, toJsonReport } from '@flowpact/core';
 import { describe, expect, it } from 'vitest';
 
 const FIXTURES = fileURLToPath(new URL('../../../fixtures/', import.meta.url));
@@ -19,7 +19,7 @@ describe('fixture repositories', () => {
 
   it('incident-matrix: exactly the missing-variant error, with the full chain', () => {
     const r = run('incident-matrix');
-    expect(r.findings.map((f) => f.code)).toEqual(['WFC401']);
+    expect(r.findings.map((f) => f.code)).toEqual(['FP401']);
     const [f] = r.findings;
     expect(f!.combos).toEqual(['{ name: windows }']);
     expect(f!.related.map((x) => x.loc.file)).toEqual([

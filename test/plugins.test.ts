@@ -9,7 +9,7 @@ import {
   memoryFileSystem,
   parseConfig,
   RuleRegistryError,
-} from '@wfc/core';
+} from '@flowpact/core';
 import { describe, expect, it } from 'vitest';
 import { byCode, WF } from './helpers';
 
@@ -40,7 +40,7 @@ const rule = (code: string, name: string, extra = '') => `{
 
 /** Writes plugin modules into a fresh directory and returns it. */
 const pluginDir = (modules: Record<string, string>): string => {
-  const root = mkdtempSync(join(tmpdir(), 'wfc-plugins-'));
+  const root = mkdtempSync(join(tmpdir(), 'flowpact-plugins-'));
   for (const [file, src] of Object.entries(modules)) {
     mkdirSync(join(root, file, '..'), { recursive: true });
     writeFileSync(join(root, file), src);
@@ -70,8 +70,10 @@ const run = async (root: string, plugins: string[], extra: Record<string, unknow
 
 describe('loadPlugins', () => {
   it('registers a default-exported rule and reports its findings with its docs URL', async () => {
-    const root = pluginDir({ 'wfc/one.mjs': `export default ${rule('ACME601', 'acme-every-workflow')};\n` });
-    const { result, loaded } = await run(root, ['wfc/one.mjs']);
+    const root = pluginDir({
+      'flowpact/one.mjs': `export default ${rule('ACME601', 'acme-every-workflow')};\n`,
+    });
+    const { result, loaded } = await run(root, ['flowpact/one.mjs']);
     expect(loaded.map((r) => r.code)).toEqual(['ACME601']);
     const found = byCode(result, 'ACME601');
     expect(found.map((f) => [f.message, f.severity, f.docsUrl, f.category])).toEqual([
@@ -130,15 +132,17 @@ describe('loadPlugins', () => {
     expect((err as Error).message).toMatch(/^Plugin broken\.mjs failed to load: /);
   });
 
-  it('rejects the reserved WFC prefix, invalid codes and missing docsUrl', async () => {
+  it('rejects the reserved FP prefix, invalid codes and missing docsUrl', async () => {
     const root = pluginDir({
-      'wfc.mjs': `export default ${rule('WFC699', 'not-mine')};\n`,
+      'flowpact.mjs': `export default ${rule('FP699', 'not-mine')};\n`,
       'docs.mjs': `export default ${rule('ACME601', 'acme-x').replace(/docsUrl: .*\n/, '')};\n`,
       'dup.mjs': `export default ${rule('ACME601', 'unused-input')};\n`,
       'cat.mjs': `export default ${rule('ACME101', 'acme-cat')};\n`,
     });
-    await expect(load(root, ['wfc.mjs'])).rejects.toThrow(RuleRegistryError);
-    await expect(load(root, ['wfc.mjs'])).rejects.toThrow('the WFC prefix is reserved for built-in rules');
+    await expect(load(root, ['flowpact.mjs'])).rejects.toThrow(RuleRegistryError);
+    await expect(load(root, ['flowpact.mjs'])).rejects.toThrow(
+      'the FP prefix is reserved for built-in rules',
+    );
     await expect(load(root, ['docs.mjs'])).rejects.toThrow('plugin rules must set docsUrl');
     await expect(load(root, ['dup.mjs'])).rejects.toThrow('Duplicate rule name unused-input');
     await expect(load(root, ['cat.mjs'])).rejects.toThrow('category digit 1 means "inputs"');
@@ -147,6 +151,6 @@ describe('loadPlugins', () => {
   it('does nothing without plugins', async () => {
     const { loaded, registry } = await load(pluginDir({}), []);
     expect(loaded).toEqual([]);
-    expect(registry.all().every((r) => r.code.startsWith('WFC'))).toBe(true);
+    expect(registry.all().every((r) => r.code.startsWith('FP'))).toBe(true);
   });
 });

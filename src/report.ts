@@ -127,7 +127,7 @@ export function toJsonReport(result: AnalysisResult, opts: { includeGraph?: bool
             drift: result.contracts.drift,
             breaking: result.contracts.breaking,
             counts: result.contracts.counts,
-            // File contents are omitted; use `wfc generate --dry-run` or the patch for those.
+            // File contents are omitted; use `flowpact generate --dry-run` or the patch for those.
             entries: result.contracts.entries.map(({ before: _b, after: _a, ...e }) => e),
           },
         }
@@ -138,5 +138,5 @@ export function toJsonReport(result: AnalysisResult, opts: { includeGraph?: bool
 }
 
 export function reportJsonSchema(): Record<string, unknown> {
-  return { $id: schemaUrl('report'), title: 'wfc report', ...z.toJSONSchema(reportSchema) };
+  return { $id: schemaUrl('report'), title: 'flowpact report', ...z.toJSONSchema(reportSchema) };
 }

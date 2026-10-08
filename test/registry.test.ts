@@ -6,7 +6,7 @@ import {
   defineRule,
   RuleRegistry,
   RuleRegistryError,
-} from '@wfc/core';
+} from '@flowpact/core';
 import { describe, expect, it } from 'vitest';
 
 const rule = (over: Partial<Parameters<typeof defineRule>[0]> = {}) =>
@@ -31,7 +31,7 @@ describe('RuleRegistry', () => {
 
   it.each([
     [{ code: 'BAD' }, /Invalid rule code/],
-    [{ code: 'WFC199' }, /reserved for built-in/],
+    [{ code: 'FP199' }, /reserved for built-in/],
     [{ docsUrl: undefined }, /must set docsUrl/],
     [{ name: 'Not Kebab' }, /kebab-case/],
     [{ category: 'secrets' as const }, /category digit 1 means "inputs"/],
@@ -40,11 +40,11 @@ describe('RuleRegistry', () => {
     expect(() => new RuleRegistry().register(rule(over))).toThrow(msg);
   });
 
-  it('rejects duplicate codes and names, and non-WFC built-ins', () => {
+  it('rejects duplicate codes and names, and non-FP built-ins', () => {
     const r = new RuleRegistry().register(rule());
     expect(() => r.register(rule())).toThrow(RuleRegistryError);
     expect(() => r.register(rule({ code: 'ACME102' }))).toThrow(/Duplicate rule name/);
-    expect(() => new RuleRegistry().register(rule(), { builtin: true })).toThrow(/must use the WFC prefix/);
+    expect(() => new RuleRegistry().register(rule(), { builtin: true })).toThrow(/must use the FP prefix/);
   });
 });
 
@@ -59,12 +59,14 @@ describe('built-in rules', () => {
     '%s has complete docs and a matching category',
     (_code, r) => {
       expect(CODE_PATTERN.test(r.code)).toBe(true);
-      const digit = Number(r.code[3]) as keyof typeof CATEGORIES;
+      const digit = Number(CODE_PATTERN.exec(r.code)![2]) as keyof typeof CATEGORIES;
       expect(CATEGORIES[digit].id).toBe(r.category);
       expect(r.docs.summary.length).toBeGreaterThan(20);
       expect(r.docs.why.length).toBeGreaterThan(30);
       expect(r.docs.fix.length).toBeGreaterThan(10);
-      expect(registry.docsUrl(r)).toBe(`https://rumankazi.github.io/wfc/docs/rules/${r.code.toLowerCase()}`);
+      expect(registry.docsUrl(r)).toBe(
+        `https://rumankazi.github.io/flowpact/docs/rules/${r.code.toLowerCase()}`,
+      );
     },
   );
 });

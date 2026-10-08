@@ -12,7 +12,7 @@ import {
   serializeContract,
   sym,
   trace,
-} from '@wfc/core';
+} from '@flowpact/core';
 import { describe, expect, it } from 'vitest';
 import { byCode, codes, lint, WF, yaml } from './helpers';
 
@@ -69,7 +69,7 @@ describe('matrix guards with runtime-only parts (#1)', () => {
       '.github/actions/act/action.yml':
         'inputs:\n  flag: {}\nruns:\n  using: composite\n  steps:\n    - run: echo ${{ inputs.flag }}\n      shell: bash\n',
     });
-    expect(codes(r).filter((c) => c.startsWith('WFC40'))).toEqual([]);
+    expect(codes(r).filter((c) => c.startsWith('FP40'))).toEqual([]);
   });
 
   it('still reports when the guard does not decide (always() || matrix.flavor)', () => {
@@ -78,16 +78,16 @@ describe('matrix guards with runtime-only parts (#1)', () => {
         '        - if: always() || matrix.flavor\n          run: echo "${{ matrix.flavor }}"',
       ),
     });
-    expect(codes(r)).toContain('WFC402');
+    expect(codes(r)).toContain('FP402');
   });
 });
 
 describe('scale (#2, #5, #21)', () => {
-  it('WFC601/WFC602 stay fast on deep diamond-shaped call graphs', () => {
+  it('FP601/FP602 stay fast on deep diamond-shaped call graphs', () => {
     const started = performance.now();
-    const r = lint(dag(26, 2), { only: ['WFC601', 'WFC602'] });
+    const r = lint(dag(26, 2), { only: ['FP601', 'FP602'] });
     expect(performance.now() - started).toBeLessThan(5_000);
-    expect(byCode(r, 'WFC602').length).toBeGreaterThan(0);
+    expect(byCode(r, 'FP602').length).toBeGreaterThan(0);
   });
 
   it('reports each call cycle once, wherever it is entered', () => {
@@ -97,7 +97,7 @@ describe('scale (#2, #5, #21)', () => {
       [`${WF}/b.yml`]: 'on: workflow_call\njobs:\n  x:\n    uses: ./.github/workflows/c.yml\n',
       [`${WF}/c.yml`]: 'on: workflow_call\njobs:\n  x:\n    uses: ./.github/workflows/b.yml\n',
     });
-    expect(byCode(r, 'WFC601')).toHaveLength(1);
+    expect(byCode(r, 'FP601')).toHaveLength(1);
   });
 
   it('trace shows shared subtrees once', () => {
@@ -112,14 +112,14 @@ describe('scale (#2, #5, #21)', () => {
 });
 
 describe('YAML alias bombs (#3)', () => {
-  it('stops with WFC504 instead of expanding', () => {
+  it('stops with FP504 instead of expanding', () => {
     const lines = ['on: push', 'env:', '  L0: &l0 ["${{ github.sha }}", "x"]'];
     for (let i = 1; i <= 24; i++) lines.push(`  L${i}: &l${i} [*l${i - 1}, *l${i - 1}]`);
     lines.push('jobs:', '  j:', '    runs-on: x', '    steps: [{ run: x }]');
     const started = performance.now();
     const r = lint({ [`${WF}/a.yml`]: `${lines.join('\n')}\n` });
     expect(performance.now() - started).toBeLessThan(2_000);
-    expect(byCode(r, 'WFC504')[0]?.message).toContain('possible alias bomb');
+    expect(byCode(r, 'FP504')[0]?.message).toContain('possible alias bomb');
   });
 });
 
@@ -145,22 +145,22 @@ describe('large matrices (#4)', () => {
               - run: echo \${{ matrix.e }}
       `,
     });
-    expect(codes(r).filter((c) => c.startsWith('WFC40'))).toEqual(['WFC406']);
-    expect(byCode(r, 'WFC406')[0]!.message).toContain('expands to 500 matrix jobs');
+    expect(codes(r).filter((c) => c.startsWith('FP40'))).toEqual(['FP406']);
+    expect(byCode(r, 'FP406')[0]!.message).toContain('expands to 500 matrix jobs');
   });
 
   it('accepts matrices up to 256 jobs and flags larger ones', () => {
     const m = (n: number) =>
       `on: push\njobs:\n  j:\n    runs-on: x\n    strategy:\n      matrix:\n        a: ${values('a', n)}\n        b: ${values('b', n)}\n    steps: [{ run: x }]\n`;
-    expect(codes(lint({ [`${WF}/m.yml`]: m(16) }))).not.toContain('WFC406');
-    expect(codes(lint({ [`${WF}/m.yml`]: m(17) }))).toContain('WFC406');
-    expect(byCode(lint({ [`${WF}/m.yml`]: m(150) }), 'WFC406')[0]!.message).toContain(
+    expect(codes(lint({ [`${WF}/m.yml`]: m(16) }))).not.toContain('FP406');
+    expect(codes(lint({ [`${WF}/m.yml`]: m(17) }))).toContain('FP406');
+    expect(byCode(lint({ [`${WF}/m.yml`]: m(150) }), 'FP406')[0]!.message).toContain(
       'expands to at least 22500 matrix jobs',
     );
   });
 });
 
-describe('WFC505 in bare if: conditions (#6, #17, #22)', () => {
+describe('FP505 in bare if: conditions (#6, #17, #22)', () => {
   it('checks contexts that GitHub does not allow in job and step conditions', () => {
     const r = lint({
       [`${WF}/c.yml`]: yaml`
@@ -183,7 +183,7 @@ describe('WFC505 in bare if: conditions (#6, #17, #22)', () => {
             steps: [{ run: x }]
       `,
     });
-    expect(byCode(r, 'WFC505').map((f) => `${f.loc.line}:${f.loc.column}`)).toEqual(['6:9', '9:13']);
+    expect(byCode(r, 'FP505').map((f) => `${f.loc.line}:${f.loc.column}`)).toEqual(['6:9', '9:13']);
   });
 
   it('points at the reference inside a multi-line quoted scalar', () => {
@@ -197,12 +197,12 @@ describe('WFC505 in bare if: conditions (#6, #17, #22)', () => {
       },
       { schema: true },
     );
-    const [f] = byCode(r, 'WFC505');
+    const [f] = byCode(r, 'FP505');
     expect(f?.loc).toMatchObject({ line: 9, column: 13 });
   });
 });
 
-describe('WFC402 per key (#8)', () => {
+describe('FP402 per key (#8)', () => {
   it('reports each missing key with its own count', () => {
     const r = lint({
       [`${WF}/m.yml`]: yaml`
@@ -220,7 +220,7 @@ describe('WFC402 per key (#8)', () => {
               - run: echo "\${{ matrix.extra }} \${{ matrix.other }}"
       `,
     });
-    expect(byCode(r, 'WFC402').map((f) => f.message)).toEqual([
+    expect(byCode(r, 'FP402').map((f) => f.message)).toEqual([
       'matrix.extra is undefined in 3 of 4 combinations of jobs.small',
       'matrix.other is undefined in 3 of 4 combinations of jobs.small',
     ]);
@@ -234,24 +234,24 @@ describe('untrusted text and files (#9, #10)', () => {
       [`${WF}/r.yml`]:
         'on:\n  workflow_call:\n    inputs:\n      "x\\n```\\n<b>hi</b>": { required: true }\njobs:\n  j:\n    runs-on: x\n    steps: [{ run: x }]\n',
     });
-    const fix = byCode(r, 'WFC101')[0]!.fix;
+    const fix = byCode(r, 'FP101')[0]!.fix;
     expect(fix).not.toContain('\n');
     expect(fix).toContain('\\n```');
   });
 
-  it('keeps the multi-line YAML snippet of WFC204', () => {
+  it('keeps the multi-line YAML snippet of FP204', () => {
     const r = lint({
       [`${WF}/c.yml`]:
         'on: push\njobs:\n  call:\n    uses: ./.github/workflows/r.yml\n    secrets: inherit\n',
       [`${WF}/r.yml`]:
         'on: workflow_call\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: echo ${{ secrets.TOKEN }}\n',
     });
-    expect(byCode(r, 'WFC204')[0]!.fix).toContain('\nsecrets:\n  TOKEN:');
+    expect(byCode(r, 'FP204')[0]!.fix).toContain('\nsecrets:\n  TOKEN:');
   });
 
   it('never reads files that symlink out of the repository', () => {
-    const root = mkdtempSync(join(tmpdir(), 'wfc-sym-'));
-    const outside = mkdtempSync(join(tmpdir(), 'wfc-outside-'));
+    const root = mkdtempSync(join(tmpdir(), 'flowpact-sym-'));
+    const outside = mkdtempSync(join(tmpdir(), 'flowpact-outside-'));
     writeFileSync(join(outside, 'secret.yml'), 'TOP SECRET: [\n');
     mkdirSync(join(root, '.github/workflows'), { recursive: true });
     mkdirSync(join(root, '.github/actions/x'), { recursive: true });
@@ -284,7 +284,7 @@ describe('paths, plugins and contracts (#11, #12, #13, #15, #18)', () => {
       repository: 'a/b',
     });
     expect(r.project.wholeRepository).toBe(true);
-    expect(codes(r)).toEqual(['WFC104']);
+    expect(codes(r)).toEqual(['FP104']);
   });
 
   it('tolerates config entries for rules of skipped plugins', () => {
@@ -303,7 +303,7 @@ describe('paths, plugins and contracts (#11, #12, #13, #15, #18)', () => {
         repository: 'a/b',
       });
     expect(() => run(false)).toThrow(/unknown rules/);
-    expect(codes(run(true))).toEqual(['WFC104']);
+    expect(codes(run(true))).toEqual(['FP104']);
   });
 
   it('keeps consumer entries of a caller that does not parse', () => {
@@ -324,7 +324,7 @@ describe('paths, plugins and contracts (#11, #12, #13, #15, #18)', () => {
     const broken = {
       ...repo,
       [`${WF}/ci.yml`]: '- [',
-      '.github/workflow-contracts/workflows/deploy.contract.yml': locked,
+      '.github/flowpact/contracts/workflows/deploy.contract.yml': locked,
     };
     const idx2 = analyze({
       root: '/v',
@@ -361,8 +361,8 @@ describe('paths, plugins and contracts (#11, #12, #13, #15, #18)', () => {
       },
       { schema: true },
     );
-    expect(codes(r)).toEqual(['WFC606']);
-    expect(byCode(r, 'WFC606')[0]!.message).toContain('is not a reusable workflow');
+    expect(codes(r)).toEqual(['FP606']);
+    expect(byCode(r, 'FP606')[0]!.message).toContain('is not a reusable workflow');
   });
 });
 

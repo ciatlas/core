@@ -6,14 +6,17 @@ import { insideRepository } from './project';
 import type { Loc } from './source';
 import { SCHEMA_VERSIONS, schemaUrl } from './version';
 
-export const CONFIG_DIR = '.github/workflow-contracts';
-export const CONFIG_FILES = ['wfc.config.yml', 'wfc.config.yaml'] as const;
+export const CONFIG_DIR = '.github/flowpact';
+export const CONFIG_FILES = ['flowpact.config.yml', 'flowpact.config.yaml'] as const;
+/** Where wfc (before 0.2.0) kept its files. Still read when the new location is empty; `flowpact migrate` moves them. */
+export const LEGACY_CONFIG_DIR = '.github/workflow-contracts';
+export const LEGACY_CONFIG_FILES = ['wfc.config.yml', 'wfc.config.yaml'] as const;
 
 export const severitySettingSchema = z.enum(['error', 'warning', 'info', 'off']);
 
 export const overrideSchema = z
   .object({
-    rule: z.string().min(1).describe('Rule code (WFC104) or name (unused-input) to suppress.'),
+    rule: z.string().min(1).describe('Rule code (FP104) or name (unused-input) to suppress.'),
     target: z
       .string()
       .optional()
@@ -29,7 +32,7 @@ export const overrideSchema = z
       .date()
       .optional()
       .describe(
-        'YYYY-MM-DD (UTC). After the end of this day the finding is reported again, together with WFC901.',
+        'YYYY-MM-DD (UTC). After the end of this day the finding is reported again, together with FP901.',
       ),
     owner: z.string().optional().describe('Who owns the exception, e.g. `@platform-team`.'),
   })
@@ -58,7 +61,7 @@ export const configSchema = z
     rules: z
       .record(z.string(), severitySettingSchema)
       .default({})
-      .describe('Severity per rule, keyed by code (WFC401) or name (empty-binding-for-matrix-combo).'),
+      .describe('Severity per rule, keyed by code (FP401) or name (empty-binding-for-matrix-combo).'),
     limits: z
       .object({
         nestingDepth: z
@@ -66,13 +69,13 @@ export const configSchema = z
           .int()
           .positive()
           .default(10)
-          .describe('Maximum workflows in one call chain, counting the top-level workflow (WFC602).'),
+          .describe('Maximum workflows in one call chain, counting the top-level workflow (FP602).'),
         maxInputs: z
           .number()
           .int()
           .positive()
           .default(30)
-          .describe('Inputs on one workflow_call interface before WFC605 suggests grouping them.'),
+          .describe('Inputs on one workflow_call interface before FP605 suggests grouping them.'),
       })
       .strict()
       .prefault({})
@@ -92,7 +95,7 @@ export const configSchema = z
       )
       .default({})
       .describe(
-        'Declared keys of runtime-computed matrices, keyed by `<workflow path>#<job id>`. Lets wfc verify `matrix.*` reads (WFC404) instead of reporting WFC403.',
+        'Declared keys of runtime-computed matrices, keyed by `<workflow path>#<job id>`. Lets flowpact verify `matrix.*` reads (FP404) instead of reporting FP403.',
       ),
     plugins: z
       .array(z.string())
@@ -125,11 +128,18 @@ export interface LoadedConfig {
   text?: string;
   /** Location of each `overrides[i]` entry in the config file. */
   overrideLocs?: Loc[];
+  /** Set when the config was found at the pre-0.2.0 location (`.github/workflow-contracts/wfc.config.yml`). */
+  legacy?: boolean;
 }
 
 /** Finds and validates the config. An explicit `--config` path must exist; the default location is optional. */
 export function loadConfig(root: string, explicit?: string): LoadedConfig {
-  const candidates = explicit ? [explicit] : CONFIG_FILES.map((f) => join(root, CONFIG_DIR, f));
+  const candidates = explicit
+    ? [explicit]
+    : [
+        ...CONFIG_FILES.map((f) => join(root, CONFIG_DIR, f)),
+        ...LEGACY_CONFIG_FILES.map((f) => join(root, LEGACY_CONFIG_DIR, f)),
+      ];
   for (const abs of candidates) {
     const full = explicit && !abs.startsWith('/') ? join(process.cwd(), abs) : abs;
     if (!existsSync(full)) {
@@ -139,10 +149,11 @@ export function loadConfig(root: string, explicit?: string): LoadedConfig {
     const rel = relative(root, full).split('\\').join('/');
     // The default location is part of the checkout: never follow a symlink out of the repository.
     if (!explicit && !insideRepository(root, full)) {
-      throw new ConfigError(`${rel} links outside the repository; wfc does not read it`, rel);
+      throw new ConfigError(`${rel} links outside the repository; flowpact does not read it`, rel);
     }
     const text = readFileSync(full, 'utf8');
-    return { ...parseConfigText(text, rel), file: rel, text };
+    const legacy = !explicit && rel.startsWith(`${LEGACY_CONFIG_DIR}/`);
+    return { ...parseConfigText(text, rel), file: rel, text, ...(legacy ? { legacy } : {}) };
   }
   return { config: defaultConfig() };
 }
@@ -150,7 +161,7 @@ export function loadConfig(root: string, explicit?: string): LoadedConfig {
 /** Parses config YAML, keeping the location of each override for findings about it. */
 export function parseConfigText(
   text: string,
-  file = 'wfc.config.yml',
+  file = 'flowpact.config.yml',
 ): { config: WfcConfig; overrideLocs: Loc[] } {
   const lineCounter = new LineCounter();
   const lines = text.split(/\r?\n/);
@@ -200,7 +211,7 @@ export function parseConfig(raw: unknown, file?: string): WfcConfig {
 export function configJsonSchema(): Record<string, unknown> {
   return {
     $id: schemaUrl('config'),
-    title: 'wfc configuration',
+    title: 'flowpact configuration',
     ...z.toJSONSchema(configSchema, { io: 'input' }),
   };
 }

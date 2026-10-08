@@ -1,17 +1,17 @@
 import type { Loc } from '../source';
 import { defineRule, type RuleDefinition } from './types';
 
-/** Days before expiry at which WFC903 starts reminding. */
+/** Days before expiry at which FP903 starts reminding. */
 export const EXPIRY_WARNING_DAYS = 14;
 
 const configLoc = (loc: Loc | undefined): Loc =>
-  loc ?? { file: '.github/workflow-contracts/wfc.config.yml', line: 1, column: 1, endLine: 1, endColumn: 1 };
+  loc ?? { file: '.github/flowpact/flowpact.config.yml', line: 1, column: 1, endLine: 1, endColumn: 1 };
 
 const describe = (o: { rule: string; target?: string | undefined; file?: string | undefined }) =>
   `${o.rule} on ${o.target ?? o.file}`;
 
 export const overrideExpired = defineRule({
-  code: 'WFC901',
+  code: 'FP901',
   name: 'override-expired',
   category: 'config',
   defaultSeverity: 'error',
@@ -33,7 +33,7 @@ export const overrideExpired = defineRule({
   },
   check(ctx) {
     for (const u of ctx.overrides ?? []) {
-      // Like WFC902: an override whose rule did not run (off, --only, contract rules under lint) is judged where it runs.
+      // Like FP902: an override whose rule did not run (off, --only, contract rules under lint) is judged where it runs.
       if (!u.expired || u.inactive) continue;
       const owner = u.override.owner ? ` (owner ${u.override.owner})` : '';
       ctx.report({
@@ -50,7 +50,7 @@ export const overrideExpired = defineRule({
 });
 
 export const overrideUnused = defineRule({
-  code: 'WFC902',
+  code: 'FP902',
   name: 'override-unused',
   category: 'config',
   defaultSeverity: 'warning',
@@ -58,7 +58,7 @@ export const overrideUnused = defineRule({
   docs: {
     summary: 'An override matches no finding — the problem was fixed, or the target is misspelled.',
     why: 'Stale overrides hide future problems at the same target and make the exception list untrustworthy.',
-    fix: 'Delete the override, or correct its `rule` / `target` / `file` (use the `symbol` shown in JSON output or `wfc lint --format json`).',
+    fix: 'Delete the override, or correct its `rule` / `target` / `file` (use the `symbol` shown in JSON output or `flowpact lint --format json`).',
   },
   check(ctx) {
     for (const u of ctx.overrides ?? []) {
@@ -72,7 +72,7 @@ export const overrideUnused = defineRule({
 });
 
 export const overrideExpiringSoon = defineRule({
-  code: 'WFC903',
+  code: 'FP903',
   name: 'override-expiring-soon',
   category: 'config',
   defaultSeverity: 'info',
@@ -94,4 +94,34 @@ export const overrideExpiringSoon = defineRule({
   },
 });
 
-export const overrideRules: RuleDefinition[] = [overrideExpired, overrideUnused, overrideExpiringSoon];
+export const legacyLocation = defineRule({
+  code: 'FP904',
+  name: 'legacy-location',
+  category: 'config',
+  defaultSeverity: 'info',
+  docs: {
+    summary:
+      'The config or the contracts are still in the location wfc used before it was renamed to flowpact.',
+    why:
+      'flowpact still reads `.github/workflow-contracts/wfc.config.yml` and the contracts in `.github/workflow-contracts/` ' +
+      'while `.github/flowpact/` has none, so nothing breaks. New repositories and the docs use `.github/flowpact/`, and ' +
+      'rule codes in the old config still use the `WFC` prefix, which flowpact rejects.',
+    fix: 'Run `flowpact migrate`: it moves the config to `.github/flowpact/flowpact.config.yml` and the contracts to `.github/flowpact/contracts/`, renames `WFC` rule codes to `FP`, and updates schema URLs. Commit the result.',
+  },
+  check(ctx) {
+    const file = ctx.legacyFiles?.[0];
+    if (!file) return;
+    ctx.report({
+      message: `flowpact files are still in the pre-0.2.0 location .github/workflow-contracts/ (${ctx.legacyFiles!.join(', ')})`,
+      loc: { file, line: 1, column: 1, endLine: 1, endColumn: 1 },
+      symbol: '.github/workflow-contracts',
+    });
+  },
+});
+
+export const overrideRules: RuleDefinition[] = [
+  overrideExpired,
+  overrideUnused,
+  overrideExpiringSoon,
+  legacyLocation,
+];
