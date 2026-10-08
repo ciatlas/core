@@ -716,6 +716,17 @@ export function entryConsumers(e: ContractPlanEntry): string[] {
   return [...out];
 }
 
+/**
+ * With paths (`flowpact check <paths>`, `flowpact generate <paths>`): the contracts of the targeted workflows and
+ * actions, and the contracts they appear in as a consumer, since what a caller passes or reads is locked in its
+ * callee's contract.
+ */
+export function contractsInScope(index: ProjectIndex): (e: ContractPlanEntry) => boolean {
+  const { targets } = index.project;
+  const targeted = (unit: string) => targets.has(index.unit(unit)?.file ?? unit);
+  return (e) => (e.unit !== undefined && targeted(e.unit)) || entryConsumers(e).some(targeted);
+}
+
 /** The part of a plan that concerns `keep`: drift, counts and the patch then only cover those units. */
 export function scopePlan(plan: ContractPlan, keep: (e: ContractPlanEntry) => boolean): ContractPlan {
   const entries = plan.entries.filter(keep);

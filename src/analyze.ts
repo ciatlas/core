@@ -1,12 +1,6 @@
 import { createHash } from 'node:crypto';
 import { ConfigError, defaultConfig, type FlowpactConfig, matchesPattern, type Override } from './config';
-import {
-  type ContractPlan,
-  type ContractPlanEntry,
-  entryConsumers,
-  planContracts,
-  scopePlan,
-} from './contracts';
+import { type ContractPlan, contractsInScope, planContracts, scopePlan } from './contracts';
 import { type Project, ProjectIndex } from './graph';
 import { computeImpact, type DeclaredInput, type ImpactPolicy, type ImpactResult } from './impact';
 import type { JobDecl, UnitDecl } from './ir';
@@ -252,16 +246,13 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
   const only = opts.only?.map((o) => registry.get(o)!.code);
   const ruleLog = logger.child('rules');
 
-  const targeted = (unit: string) => project.targets.has(index.unit(unit)?.file ?? unit);
-  const contractInScope = (e: ContractPlanEntry) =>
-    (e.unit !== undefined && targeted(e.unit)) || entryConsumers(e).some(targeted);
+  const contractInScope = contractsInScope(index);
   let contracts: ContractPlan | undefined;
   if (opts.checkContracts) {
     contracts = logger.time('compare contracts', () =>
       planContracts(index, opts.fs ?? nodeFileSystem(opts.root)),
     );
-    // With paths, only the contracts of those workflows/actions count (drift output, patch, summary) — and the
-    // contracts they appear in as a consumer, since what a caller passes or reads is locked in its callee's contract.
+    // With paths, only the contracts in scope count (drift output, patch, summary).
     if (project.targets.size > 0) contracts = scopePlan(contracts, contractInScope);
     logger.info(
       `contracts: ${contracts.counts.unchanged} unchanged, ${contracts.counts.update} outdated, ${contracts.counts.create} missing, ${contracts.counts.delete} orphaned`,
