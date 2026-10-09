@@ -136,6 +136,62 @@ describe('FP302 output-ref-without-needs', () => {
     ]);
     expect(fs[0]!.fix).toBe('Add "a" to jobs.b.needs.');
   });
+
+  // GitHub, checked with a workflow: a job's own `if:` sees jobs it depends on through its needs; steps, env, with:,
+  // name and the matrix do not (the value is empty there).
+  it('accepts a job-level if that reads a job it depends on indirectly, and flags the other places', () => {
+    const r = lint({
+      [`${WF}/w.yml`]: yaml`
+        on: push
+        jobs:
+          setup:
+            runs-on: x
+            outputs: { v: x }
+            steps: [{ run: x }]
+          middle:
+            needs: setup
+            runs-on: x
+            steps: [{ run: x }]
+          leaf:
+            needs: middle
+            if: needs.setup.outputs.v == 'hello'
+            runs-on: x
+            env:
+              V: \${{ needs.setup.outputs.v }}
+            steps:
+              - if: needs.setup.outputs.v == 'hello'
+                run: echo \${{ needs.setup.outputs.v }}
+          call:
+            needs: middle
+            uses: ./.github/workflows/lib.yml
+            with:
+              x: \${{ needs.setup.outputs.v }}
+          apart:
+            runs-on: x
+            if: needs.setup.result == 'success'
+            steps: [{ run: x }]
+      `,
+      [`${WF}/lib.yml`]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              x: { type: string, required: false }
+        jobs:
+          j: { runs-on: x, steps: [{ run: 'echo \${{ inputs.x }}' }] }
+      `,
+    });
+    const at = (f: { loc: { line: number } }) => f.loc.line;
+    const fs = byCode(r, 'FP302');
+    // leaf's job-level if (line 13) is fine; its env (16), step if (18) and run (19), and call's with: (24) are not.
+    expect(fs.filter((f) => f.message.includes('only the job')).map(at)).toEqual([16, 18, 19, 24]);
+    expect(fs.find((f) => at(f) === 16)!.message).toBe(
+      'jobs.leaf reads needs.setup, which is empty here: "setup" is not under needs, and only the job\'s `if:` sees jobs it depends on indirectly',
+    );
+    // A job that does not depend on setup at all is flagged even in its own if.
+    expect(fs.filter((f) => at(f) === 27).map((f) => f.message)).toEqual([
+      'jobs.apart reads needs.setup but does not list "setup" under needs',
+    ]);
+  });
 });
 
 describe('FP303 unused-output', () => {

@@ -124,10 +124,11 @@ export const outputRefWithoutNeeds = defineRule({
   category: 'outputs',
   defaultSeverity: 'error',
   docs: {
-    summary: '`needs.<job>` is read in a job that does not list `<job>` under `needs:`.',
+    summary: '`needs.<job>` is read where the `needs` context does not contain `<job>`.',
     why:
-      'The `needs` context only contains direct dependencies. Without the edge, the value is empty and the jobs may also ' +
-      'run in parallel, so even a fixed name would race.',
+      "The `needs` context contains the jobs listed under `needs:`. Only the job's own `if:` also sees the jobs it " +
+      'depends on indirectly (through one of its needs); in steps, `env`, `with:`, `name` and the matrix their values ' +
+      'are empty. A job that does not depend on `<job>` at all may also run before it.',
     fix: 'Add the job to `needs:` (it is fine to list transitive dependencies explicitly).',
     examples: {
       bad: `deploy:
@@ -139,16 +140,37 @@ export const outputRefWithoutNeeds = defineRule({
   },
   check(ctx) {
     for (const wf of ctx.index.project.workflows.values()) {
+      // Every job a job depends on, directly or through its needs (lowercased ids; cycles are FP601's business).
+      const ancestors = new Map<string, Set<string>>();
+      const ancestorsOf = (id: string): Set<string> => {
+        const known = ancestors.get(id);
+        if (known) return known;
+        const found = new Set<string>();
+        ancestors.set(id, found);
+        for (const n of wf.jobs[id]?.needs ?? []) {
+          const dep = lookup(wf.jobs, n.id);
+          if (!dep || found.has(dep.id.toLowerCase())) continue;
+          found.add(dep.id.toLowerCase());
+          for (const up of ancestorsOf(dep.id)) found.add(up);
+        }
+        return found;
+      };
       for (const { site, ref } of refsOf(wf)) {
         const a = ref.path[0];
         if (ref.context !== 'needs' || !site.job || !a || a === '*' || a === '?') continue;
         const job = wf.jobs[site.job];
         if (!job || job.needs.some((n) => n.id.toLowerCase() === a.toLowerCase())) continue;
         const exists = lookup(wf.jobs, a);
+        // GitHub evaluates a job's own `if:` with every job it depends on, directly or not; everywhere else only the
+        // jobs under `needs:` are in the context (checked against GitHub, see the rule docs).
+        const indirect = exists !== undefined && ancestorsOf(job.id).has(exists.id.toLowerCase());
+        if (indirect && site.field === 'job.if') continue;
         ctx.report({
-          message: exists
-            ? `jobs.${site.job} reads needs.${a} but does not list ${quote(a)} under needs`
-            : `jobs.${site.job} reads needs.${a}, but ${wf.path} has no job ${quote(a)}`,
+          message: !exists
+            ? `jobs.${site.job} reads needs.${a}, but ${wf.path} has no job ${quote(a)}`
+            : indirect
+              ? `jobs.${site.job} reads needs.${a}, which is empty here: ${quote(a)} is not under needs, and only the job's \`if:\` sees jobs it depends on indirectly`
+              : `jobs.${site.job} reads needs.${a} but does not list ${quote(a)} under needs`,
           loc: ref.loc,
           symbol: sym.job(wf.path, a),
           related: [

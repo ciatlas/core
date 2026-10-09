@@ -54,7 +54,7 @@ exports[`fixture repositories > deep-nesting: findings snapshot 1`] = `
   "info FP106 .github/workflows/pipeline.yml:25:7 jobs.build passes "verbose" to .github/workflows/build.yml, which never reads it",
   "info FP204 .github/workflows/pipeline.yml:26:5 jobs.build inherits all secrets; .github/workflows/build.yml and its callees read REGISTRY_TOKEN",
   "error FP301 .github/workflows/pipeline.yml:33:73 jobs.build has no output "image-digest"",
-  "error FP302 .github/workflows/pipeline.yml:39:33 jobs.notify reads needs.build but does not list "build" under needs",
+  "error FP302 .github/workflows/pipeline.yml:39:33 jobs.notify reads needs.build, which is empty here: "build" is not under needs, and only the job's \`if:\` sees jobs it depends on indirectly",
   "warning FP501 .github/workflows/publish.yml:34:36 env.TARGET_URL is not defined in this scope",
 ]
 `;
