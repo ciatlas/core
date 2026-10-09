@@ -30,6 +30,15 @@ export class RuleRegistry {
     }
     if (!opts.builtin && !rule.docsUrl)
       throw new RuleRegistryError(`Rule ${rule.code}: plugin rules must set docsUrl`);
+    if (
+      rule.generatedFiles !== undefined &&
+      rule.generatedFiles !== 'report' &&
+      rule.generatedFiles !== 'skip'
+    ) {
+      throw new RuleRegistryError(
+        `Rule ${rule.code}: generatedFiles must be "report" or "skip", got ${JSON.stringify(rule.generatedFiles)}`,
+      );
+    }
     const expected = CATEGORIES[Number(cat) as keyof typeof CATEGORIES];
     if (!expected) throw new RuleRegistryError(`Rule ${rule.code}: unknown category digit ${cat}`);
     if (expected.id !== rule.category) {

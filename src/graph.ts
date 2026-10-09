@@ -495,7 +495,15 @@ export class ProjectIndex {
         return sym.jobOutput(unit.path, job.id, this.canonicalJobOutput(job, c));
       }
       case 'jobs': {
-        if (unit.kind !== 'workflow' || site.field !== 'workflow.output' || !a || b !== 'outputs' || !c)
+        if (
+          unit.kind !== 'workflow' ||
+          site.field !== 'workflow.output' ||
+          !a ||
+          b !== 'outputs' ||
+          !c ||
+          c === '*' ||
+          c === '?'
+        )
           return undefined;
         const job = lookup(unit.jobs, a);
         if (!job) return undefined;
@@ -526,6 +534,70 @@ export class ProjectIndex {
     }
   }
 
+  /**
+   * Every symbol a reference reads. Besides the single symbol of `resolveRef`, a reference that stops at a whole object
+   * of outputs reads each of them: `toJSON(needs.build.outputs)`, `needs.build`, `steps.meta.outputs`,
+   * `needs.build.outputs[matrix.key]`, `toJSON(needs)` (every job the reading job needs), or `toJSON(steps)` (every
+   * step that ran before the reading step).
+   */
+  readsOf(unit: UnitDecl, site: ExprSite, ref: LocatedRef): string[] {
+    const one = this.resolveRef(unit, site, ref);
+    if (one) return [one];
+    const [a, b, c] = ref.path;
+    const computed = (s: string | undefined) => s === undefined || s === '*' || s === '?';
+    /** The outputs `<job or step>.<b>.<c>` reads: all of them, one by name, or none (`needs.build.result`). */
+    const pick = (names: string[]): string[] => {
+      if (computed(b)) return names;
+      if (b!.toLowerCase() !== 'outputs') return [];
+      if (computed(c)) return names;
+      return names.filter((n) => n.toLowerCase() === c!.toLowerCase());
+    };
+    switch (ref.context) {
+      case 'needs':
+      case 'jobs': {
+        if (unit.kind !== 'workflow') return [];
+        if (ref.context === 'jobs' && site.field !== 'workflow.output') return [];
+        let jobs: JobDecl[];
+        if (!computed(a)) {
+          const job = lookup(unit.jobs, a!);
+          jobs = job ? [job] : [];
+        } else if (ref.context === 'jobs') {
+          jobs = Object.values(unit.jobs);
+        } else {
+          // The `needs` context holds the jobs the reading job depends on directly.
+          const reader = site.job ? unit.jobs[site.job] : undefined;
+          jobs = (reader?.needs ?? []).flatMap((n) => lookup(unit.jobs, n.id) ?? []);
+        }
+        return jobs.flatMap((job) =>
+          pick(this.jobOutputNames(job)).map((n) => sym.jobOutput(unit.path, job.id, n)),
+        );
+      }
+      case 'steps': {
+        const steps =
+          unit.kind === 'action' ? unit.steps : site.job ? (unit.jobs[site.job]?.steps ?? []) : [];
+        // In a step, the `steps` context holds only the steps that ran before it; job and action outputs see them all.
+        const named = computed(a)
+          ? steps.filter((s) => site.step === undefined || s.index < site.step)
+          : steps.filter((s) => s.id?.toLowerCase() === a!.toLowerCase());
+        return named.flatMap((step) => {
+          const action = this.actionOf(step);
+          if (!step.id || !action) return [];
+          return pick(Object.keys(action.outputs)).map((n) =>
+            sym.stepOutput(unit.path, unit.kind === 'workflow' ? site.job : undefined, step.id!, n),
+          );
+        });
+      }
+      default:
+        return [];
+    }
+  }
+
+  /** Output names of a job: its own `outputs:`, or the callee's workflow outputs for a reusable call. */
+  jobOutputNames(job: JobDecl): string[] {
+    const callee = this.calleeOf(job);
+    return Object.keys(callee ? (callee.call?.outputs ?? {}) : job.outputs);
+  }
+
   private canonicalInput(unit: UnitDecl, name: string): string {
     if (unit.kind === 'action') return lookup(unit.inputs, name)?.name ?? name;
     return (
@@ -545,22 +617,30 @@ export class ProjectIndex {
     const sink = this.sinkOf(unit, site);
     for (const seg of site.segments) {
       for (const ref of seg.refs) {
-        const symbol = this.resolveRef(unit, site, ref);
-        if (!symbol) continue;
-        if (!this.nodes.has(symbol)) {
-          this.node({
-            id: symbol,
-            kind: ref.context === 'vars' ? 'var' : 'unresolved',
-            label: `${ref.context}.${ref.path.join('.')}`,
-            unit: unit.path,
-          });
-        }
-        const usage: Usage = { symbol, site, ref, ...(sink ? { sink } : {}) };
-        const list = this.usages.get(symbol);
-        if (list) list.push(usage);
-        else this.usages.set(symbol, [usage]);
-        if (sink) this.edge({ from: symbol, to: sink, kind: 'flows', loc: ref.loc, siteId: site.id });
+        for (const symbol of this.readsOf(unit, site, ref)) this.addUsage(unit, site, ref, symbol, sink);
       }
     }
+  }
+
+  private addUsage(
+    unit: UnitDecl,
+    site: ExprSite,
+    ref: LocatedRef,
+    symbol: string,
+    sink: string | undefined,
+  ) {
+    if (!this.nodes.has(symbol)) {
+      this.node({
+        id: symbol,
+        kind: ref.context === 'vars' ? 'var' : 'unresolved',
+        label: `${ref.context}.${ref.path.join('.')}`,
+        unit: unit.path,
+      });
+    }
+    const usage: Usage = { symbol, site, ref, ...(sink ? { sink } : {}) };
+    const list = this.usages.get(symbol);
+    if (list) list.push(usage);
+    else this.usages.set(symbol, [usage]);
+    if (sink) this.edge({ from: symbol, to: sink, kind: 'flows', loc: ref.loc, siteId: site.id });
   }
 }

@@ -202,6 +202,7 @@ export const unusedInput = defineRule({
   name: 'unused-input',
   category: 'inputs',
   defaultSeverity: 'warning',
+  generatedFiles: 'skip',
   docs: {
     summary: 'An input is declared but never read anywhere in the workflow or action.',
     why:
@@ -249,6 +250,7 @@ export const optionalInputInCondition = defineRule({
   name: 'optional-input-no-default-in-condition',
   category: 'inputs',
   defaultSeverity: 'warning',
+  generatedFiles: 'skip',
   docs: {
     summary: 'An optional input without a default decides an `if:` condition.',
     why:

@@ -35,7 +35,10 @@ export interface ExprRef {
   context: string;
   /** Property path after the context. `*` for a filter, `?` for a computed index. */
   path: string[];
-  /** True when the path contains a computed (`?`) segment or stops at the bare context. */
+  /**
+   * True when the path contains a computed (`?`) segment or stops at the bare context. A path that stops at an object
+   * below the context (`needs.build.outputs`) is not dynamic: `ProjectIndex.readsOf` resolves it to every output.
+   */
   dynamic: boolean;
   /** Offsets relative to the expression source text. */
   start: number;

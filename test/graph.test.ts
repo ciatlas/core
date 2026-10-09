@@ -132,6 +132,32 @@ describe('trace', () => {
     expect(t.leaves.map((l) => `${l.role}:${l.text}`)).toEqual(['literal:"literal"', 'omitted:(not passed)']);
   });
 
+  it('shows a whole-object read of outputs as a read of each output', () => {
+    const { index: i2 } = lint({
+      ...files,
+      [`${WF}/root.yml`]: files[`${WF}/root.yml`]!.replace(
+        'echo ${{ needs.mid.outputs.result }}',
+        'echo ${{ toJSON(needs.mid.outputs) }}',
+      ),
+      [`${WF}/mid.yml`]: files[`${WF}/mid.yml`]!.replace(
+        'value: ${{ jobs.leaf.outputs.r }}',
+        'value: ${{ toJSON(jobs.leaf.outputs) }}',
+      ),
+    });
+    const t = trace(i2, sym.jobOutput(`${WF}/root.yml`, 'mid', 'result'));
+    expect(t.leaves.map((l) => `${l.role}:${l.text}`)).toEqual([
+      'run script:echo ${{ toJSON(needs.mid.outputs) }}',
+    ]);
+    const up = trace(i2, sym.output(`${WF}/mid.yml`, 'result'), { direction: 'up' });
+    expect(up.children.map((c) => c.symbol)).toEqual([sym.jobOutput(`${WF}/mid.yml`, 'leaf', 'r')]);
+    // `needs.<job>.result` and similar reads name the job but no output.
+    const result = lint({
+      ...files,
+      [`${WF}/root.yml`]: files[`${WF}/root.yml`]!.replace('needs.mid.outputs.result', 'needs.mid.result'),
+    });
+    expect(result.index.usagesOf(sym.jobOutput(`${WF}/root.yml`, 'mid', 'result'))).toEqual([]);
+  });
+
   it('stops at cycles and depth limits', () => {
     const t = trace(index, sym.input(`${WF}/root.yml`, 'config'), { maxDepth: 1 });
     expect(t.children[0]?.stop).toBe('depth');

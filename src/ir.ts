@@ -215,6 +215,11 @@ interface BaseDecl {
   sites: ExprSite[];
   parseErrors: Diagnostic[];
   schemaErrors: Diagnostic[];
+  /**
+   * Set when the file is generated, to the marker that says so: a header comment such as `DO NOT EDIT` or
+   * `automatically generated`, or the `.lock.yml` suffix of GitHub Agentic Workflows.
+   */
+  generated?: string;
 }
 
 export interface WorkflowDecl extends BaseDecl {

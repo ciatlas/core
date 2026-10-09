@@ -208,6 +208,24 @@ describe('buildContract', () => {
     ]);
   });
 
+  it('records a whole outputs object as reading every output', () => {
+    const files = {
+      ...base,
+      [`${WF}/caller.yml`]: caller.replace(
+        'echo ${{ needs.build.outputs.url }}',
+        "echo ${{ needs.build.outputs.url }} ${{ format('{0}', toJSON(needs.other.outputs)) }}",
+      ),
+    };
+    files[`${WF}/caller.yml`] = files[`${WF}/caller.yml`]!.replace(
+      'needs: build\n',
+      'needs: [build, other]\n',
+    );
+    expect(contractOf(files, `${WF}/reusable.yml`).consumers).toEqual([
+      { from: `${WF}/caller.yml`, job: 'build', passes: ['count', 'mode'], reads: ['url'] },
+      { from: `${WF}/caller.yml`, job: 'other', passes: ['mode'], reads: ['url'] },
+    ]);
+  });
+
   it('describes a local action and the steps that use it', () => {
     const c = contractOf(base, '.github/actions/setup');
     expect(c).toEqual({

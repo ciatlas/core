@@ -139,30 +139,215 @@ describe('FP302 output-ref-without-needs', () => {
 });
 
 describe('FP303 unused-output', () => {
-  it('flags unread job outputs and workflow outputs no caller reads', () => {
-    const r = lint({
-      [`${WF}/p.yml`]: pipeline('echo ${{ needs.build.outputs.version }} ${{ needs.call.outputs.url }}'),
-      [`${WF}/lib.yml`]: lib,
-    });
+  // `_`-prefixed reusable workflows are internal by convention; lib.yml is published.
+  const internal = (consumer: string) => ({
+    [`${WF}/p.yml`]: pipeline(consumer).replace('workflows/lib.yml', 'workflows/_lib.yml'),
+    [`${WF}/_lib.yml`]: lib,
+  });
+
+  it('flags unread job outputs and outputs of an internal workflow no caller reads', () => {
+    const r = lint(internal('echo ${{ needs.build.outputs.version }} ${{ needs.call.outputs.url }}'));
     expect(byCode(r, 'FP303').map((f) => f.message)).toEqual([
-      'Workflow output "dead" of .github/workflows/lib.yml is not read by any of its 1 caller',
+      'Workflow output "dead" of .github/workflows/_lib.yml is not read by any of its 1 caller',
       'Output "unused" of jobs.build is never read',
     ]);
   });
 
+  it('does not judge outputs of a published reusable workflow, whose callers live elsewhere (#40)', () => {
+    const r = lint({
+      [`${WF}/p.yml`]: pipeline('echo ${{ needs.build.outputs.version }} ${{ needs.call.outputs.url }}'),
+      [`${WF}/lib.yml`]: lib,
+    });
+    expect(byCode(r, 'FP303').map((f) => f.message)).toEqual(['Output "unused" of jobs.build is never read']);
+  });
+
+  it('follows impact.publish when it lists the published units', () => {
+    const files = {
+      [`${WF}/p.yml`]: pipeline('echo ${{ needs.build.outputs.version }} ${{ needs.call.outputs.url }}'),
+      [`${WF}/lib.yml`]: lib,
+    };
+    const listed = lint(files, { config: { impact: { publish: ['.github/workflows/lib.yml'] } } });
+    expect(byCode(listed, 'FP303').map((f) => f.symbol)).toEqual([`${WF}/p.yml#jobs.build.outputs.unused`]);
+    const other = lint(files, { config: { impact: { publish: ['action.yml'] } } });
+    expect(byCode(other, 'FP303').map((f) => f.symbol)).toEqual([
+      `${WF}/lib.yml#outputs.dead`,
+      `${WF}/p.yml#jobs.build.outputs.unused`,
+    ]);
+    expect(byCode(other, 'FP303')[0]?.fix).toBe(
+      'Remove the output, or make a caller read it. If other repositories use this workflow, add ".github/workflows/lib.yml" to `impact.publish`.',
+    );
+    expect(byCode(other, 'FP303')[1]?.fix).toBe('Remove the output, or make the intended consumer read it.');
+  });
+
   it('does not judge workflow outputs without local callers', () => {
-    const r = lint({ [`${WF}/lib.yml`]: lib });
+    const r = lint({ [`${WF}/_lib.yml`]: lib });
     expect(byCode(r, 'FP303')).toEqual([]);
   });
 
-  it('flags action outputs that no user reads', () => {
+  const actionUser = (read: string) =>
+    `on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - id: a\n        uses: ./.github/actions/a\n      - run: echo ${read}\n`;
+  const action =
+    'outputs:\n  used:\n    value: x\n  dead:\n    value: y\nruns:\n  using: composite\n  steps: []\n';
+
+  it('flags outputs of an internal action that no user reads', () => {
     const r = lint({
-      [`${WF}/w.yml`]:
-        'on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - id: a\n        uses: ./.github/actions/a\n      - run: echo ${{ steps.a.outputs.used }}\n',
-      '.github/actions/a/action.yml':
-        'outputs:\n  used:\n    value: x\n  dead:\n    value: y\nruns:\n  using: composite\n  steps: []\n',
+      [`${WF}/w.yml`]: actionUser('${{ steps.a.outputs.used }}'),
+      '.github/actions/a/action.yml': action,
     });
     expect(byCode(r, 'FP303').map((f) => f.symbol)).toEqual(['.github/actions/a#outputs.dead']);
+  });
+
+  it('does not judge outputs of a published action', () => {
+    const root = lint({
+      [`${WF}/w.yml`]: actionUser('${{ steps.a.outputs.used }}').replace('./.github/actions/a', './'),
+      'action.yml': action,
+    });
+    expect(byCode(root, 'FP303')).toEqual([]);
+    const unlisted = lint(
+      {
+        [`${WF}/w.yml`]: actionUser('${{ steps.a.outputs.used }}').replace('./.github/actions/a', './'),
+        'action.yml': action,
+      },
+      { config: { impact: { publish: ['.github/workflows/*.yml'] } } },
+    );
+    expect(byCode(unlisted, 'FP303').map((f) => f.symbol)).toEqual(['.#outputs.dead']);
+    const listed = lint(
+      { [`${WF}/w.yml`]: actionUser('${{ steps.a.outputs.used }}'), '.github/actions/a/action.yml': action },
+      { config: { impact: { publish: ['.github/actions/a'] } } },
+    );
+    expect(byCode(listed, 'FP303')).toEqual([]);
+  });
+
+  it('counts a whole outputs object as reading every output', () => {
+    for (const consumer of [
+      'echo ${{ toJSON(needs.build.outputs) }} ${{ toJSON(needs.call.outputs) }}',
+      "echo ${{ format('{0}', needs.build.outputs) }} ${{ fromJSON(toJSON(needs.call)).outputs.url }}",
+      'echo ${{ needs.build.outputs[matrix.key] }} ${{ needs.call.outputs[inputs.which] }}',
+      'echo ${{ needs.build.outputs.* }} ${{ toJSON(needs.*.outputs) }}',
+    ]) {
+      expect({ consumer, findings: byCode(lint(internal(consumer)), 'FP303') }).toEqual({
+        consumer,
+        findings: [],
+      });
+    }
+  });
+
+  it('still judges the other jobs when one job is read through a computed key', () => {
+    const r = lint(internal('echo ${{ needs.call.outputs[matrix.key] }}'));
+    expect(byCode(r, 'FP303').map((f) => f.message)).toEqual([
+      'Output "version" of jobs.build is never read',
+      'Output "unused" of jobs.build is never read',
+    ]);
+  });
+
+  it('does not count needs.<job>.result as reading outputs', () => {
+    const r = lint(internal('echo ${{ needs.build.result }} ${{ needs.call.outputs.url }}'));
+    expect(byCode(r, 'FP303').map((f) => f.symbol)).toEqual([
+      `${WF}/_lib.yml#outputs.dead`,
+      `${WF}/p.yml#jobs.build.outputs.version`,
+      `${WF}/p.yml#jobs.build.outputs.unused`,
+    ]);
+  });
+
+  it('counts toJSON(needs.<job>.outputs) in a run: step as reading every output', () => {
+    const r = lint({
+      [`${WF}/main.yml`]: yaml`
+        on: push
+        jobs:
+          dlart:
+            runs-on: ubuntu-latest
+            outputs:
+              one: \${{ steps.s.outputs.one }}
+            steps:
+              - id: s
+                run: echo "one=1" >> "$GITHUB_OUTPUT"
+          use:
+            needs: dlart
+            runs-on: ubuntu-latest
+            steps:
+              - run: echo '\${{ toJSON(needs.dlart.outputs) }}'
+      `,
+    });
+    expect(byCode(r, 'FP303')).toEqual([]);
+  });
+
+  it('counts whole step and workflow-output objects', () => {
+    const steps = lint({
+      [`${WF}/w.yml`]: actionUser('${{ toJSON(steps.a.outputs) }}'),
+      '.github/actions/a/action.yml': action,
+    });
+    expect(byCode(steps, 'FP303')).toEqual([]);
+    for (const value of ['${{ toJSON(jobs.j.outputs) }}', '${{ jobs.j.outputs[inputs.which] }}']) {
+      const wf = lint({
+        ...internal(
+          'echo ${{ needs.build.outputs.version }} ${{ needs.call.outputs.url }} ${{ needs.call.outputs.dead }}',
+        ),
+        [`${WF}/_lib.yml`]: lib
+          .replace('url:\n        value: ${{ jobs.j.outputs.url }}', `url:\n        value: ${value}`)
+          .replace('url: ${{ steps.s.outputs.url }}', 'url: ${{ steps.s.outputs.url }}\n      extra: x'),
+      });
+      expect({ value, symbols: byCode(wf, 'FP303').map((f) => f.symbol) }).toEqual({
+        value,
+        symbols: [`${WF}/p.yml#jobs.build.outputs.unused`],
+      });
+    }
+  });
+});
+
+describe('FP303 unused-output: whole steps and published actions', () => {
+  const setup =
+    'name: setup\noutputs:\n  a: { value: x, description: a }\n  b: { value: y, description: b }\nruns:\n  using: composite\n  steps:\n    - run: echo hi\n      shell: bash\n';
+  const job = (steps: string) => ({
+    [`${WF}/w.yml`]: `on: push\njobs:\n  j:\n    runs-on: x\n${steps}`,
+    '.github/actions/setup/action.yml': setup,
+  });
+
+  it('counts toJSON(steps) as reading only the steps that ran before', () => {
+    const before = lint(
+      job(
+        "    steps:\n      - run: echo '${{ toJSON(steps) }}'\n      - id: s\n        uses: ./.github/actions/setup\n",
+      ),
+    );
+    expect(byCode(before, 'FP303').map((f) => f.symbol)).toEqual([
+      '.github/actions/setup#outputs.a',
+      '.github/actions/setup#outputs.b',
+    ]);
+    const after = lint(
+      job(
+        "    steps:\n      - id: s\n        uses: ./.github/actions/setup\n      - run: echo '${{ toJSON(steps) }}'\n",
+      ),
+    );
+    expect(byCode(after, 'FP303')).toEqual([]);
+    // A job output is evaluated after every step.
+    const output = lint(
+      job(
+        '    outputs:\n      all: ${{ toJSON(steps) }}\n    steps:\n      - id: s\n        uses: ./.github/actions/setup\n',
+      ),
+    );
+    expect(byCode(output, 'FP303').map((f) => f.symbol)).toEqual([`${WF}/w.yml#jobs.j.outputs.all`]);
+  });
+
+  it('points at impact.publish for an action in a subdirectory that other repositories may use', () => {
+    const files = {
+      'action.yml':
+        'name: cache\noutputs:\n  cache-hit: { value: x, description: d }\nruns: { using: node20, main: dist/index.js }\n',
+      'restore/action.yml':
+        'name: restore\noutputs:\n  cache-hit: { value: x, description: d }\n  cache-key: { value: x, description: d }\nruns: { using: node20, main: dist/restore.js }\n',
+      [`${WF}/test.yml`]:
+        'on: push\njobs:\n  t:\n    runs-on: x\n    steps:\n      - uses: ./\n      - id: r\n        uses: ./restore\n      - run: echo ${{ steps.r.outputs.cache-hit }}\n',
+    };
+    const [f, ...rest] = byCode(lint(files), 'FP303');
+    expect(rest).toEqual([]);
+    expect(f?.message).toBe('Output "cache-key" of restore is not read by any of its 1 user');
+    expect(f?.fix).toBe(
+      'Remove the output, or make a user read it. If other repositories use this action, set `impact.publish` to the units they use, "restore/action.yml" included; it replaces the default (reusable workflows and the root action.yml).',
+    );
+    const listed = lint(files, { config: { impact: { publish: ['action.yml', 'restore/action.yml'] } } });
+    expect(byCode(listed, 'FP303')).toEqual([]);
+    const other = lint(files, { config: { impact: { publish: ['action.yml'] } } });
+    expect(byCode(other, 'FP303')[0]?.fix).toBe(
+      'Remove the output, or make a user read it. If other repositories use this action, add "restore/action.yml" to `impact.publish`.',
+    );
   });
 });
 
@@ -196,5 +381,116 @@ describe('FP304 step-output-never-written', () => {
       `,
     });
     expect(byCode(r, 'FP304')).toEqual([]);
+  });
+
+  /** A job whose github-script step `s` runs `script`, and a later step that reads `steps.s.outputs.wanted`. */
+  const scripted = (script: string, uses = 'actions/github-script@v8') => ({
+    [`${WF}/w.yml`]: `on: push
+jobs:
+  j:
+    runs-on: x
+    steps:
+      - id: s
+        uses: ${uses}
+        with:
+          script: |
+${script
+  .split('\n')
+  .map((l) => `            ${l}`)
+  .join('\n')}
+      - run: echo \${{ steps.s.outputs.wanted }}
+`,
+  });
+
+  it('flags github-script steps whose script sets other outputs by name', () => {
+    for (const script of [
+      "core.setOutput('other', 1);",
+      // `core` in strings and comments is not handed to anything.
+      "core.setOutput('other', 1); // core is not passed on\ncore.info('pass core along');\ncore?.notice(\"core\");",
+    ]) {
+      const [f] = byCode(lint(scripted(script)), 'FP304');
+      expect(f?.message).toBe('Step "s" never writes output "wanted" (it writes other, result)');
+    }
+    expect(byCode(lint(scripted('return 1;')), 'FP304')[0]?.message).toBe(
+      'Step "s" never writes output "wanted" (it writes result)',
+    );
+  });
+
+  it('does not judge github-script steps whose writes it cannot see', () => {
+    for (const script of [
+      // grafana detect-breaking-changes-levitate.yml
+      "const script = require('./.github/workflows/scripts/levitate/json-file-to-job-output.js');\nawait script({ core, filePath: 'result.json' });",
+      // getsentry sentry-pull-request-bot.yml
+      'const { waitForMergeCommit } = await import(`${process.env.GITHUB_WORKSPACE}/scripts/wait.js`);\nawait waitForMergeCommit({ github, context, core });',
+      // gh-aw lock files
+      "const { setupGlobals } = require(path.join(dir, 'setup_globals.cjs'));\nsetupGlobals(core, github, context);",
+      "core.setOutput('other', 1);\nawait helper(core);",
+      "core.setOutput('other', 1);\nconst c = core;\nc['setOutput']('wanted', 2);",
+      "core.setOutput('other', 1);\nconst { setOutput } = core;",
+      'for (const [k, v] of Object.entries(values)) core.setOutput(k, v);',
+      'core.setOutput(`out-${kind}`, 1);',
+      "core.setOutput('other', 1);\neval(code);",
+    ]) {
+      expect({ script, findings: byCode(lint(scripted(script)), 'FP304') }).toEqual({ script, findings: [] });
+    }
+  });
+
+  it('reads only the code of template literals and ignores Node built-ins', () => {
+    for (const script of [
+      // Prose in a template literal is not code (`core`, `import` and `require` are words there).
+      "const body = `The core team will review`;\ncore.setOutput('other', body);",
+      "const body = `Note:\nimport the new config`;\ncore.setOutput('other', body);",
+      "const url = `https://github.com/home-assistant/core/issues/new?title=${encodeURIComponent(t)}`;\ncore.setOutput('other', url);",
+      "const t = `a ${ `b ${ 'require(x)' }` } c don't`;\ncore.setOutput('other', t);",
+      // Built-ins that cannot run other code.
+      "const fs = require('fs');\nconst path = require(\"node:path\");\ncore.setOutput('other', fs.readFileSync(path.join('a', 'b'), 'utf8'));",
+      "const { readFile } = await import('fs/promises');\ncore.setOutput('other', await readFile('x', 'utf8'));",
+      "const opts = { arguments: [] };\ncore.setOutput('other', opts);",
+      // An expression inside a literal is text.
+      "const who = '${{ inputs.core }}';\nconst hi = `Hello ${{ github.actor }}`;\ncore.setOutput('other', who + hi);",
+    ]) {
+      expect({ script, messages: byCode(lint(scripted(script)), 'FP304').map((f) => f.message) }).toEqual({
+        script,
+        messages: ['Step "s" never writes output "wanted" (it writes other, result)'],
+      });
+    }
+  });
+
+  it('does not judge github-script steps whose code comes from elsewhere', () => {
+    for (const script of [
+      "const t = `${ `b` } don't`;\nconst r = require('./x.js');\ncore.setOutput('other', 1);",
+      "const { execSync } = require('child_process');\ncore.setOutput('other', execSync('./out.sh'));",
+      // fs is not delegation, but a computed write to the file is.
+      "const fs = require('fs');\nfs.appendFileSync(process.env.GITHUB_OUTPUT, line);\ncore.setOutput('other', 1);",
+      // The program inherits GITHUB_OUTPUT and may write to it.
+      "await exec.exec('./set-outputs.sh');\ncore.setOutput('other', 1);",
+      "core.setOutput('other', 1);\nconst msg = `${await helper(core)}`;",
+      // Code substituted into the script by an expression may set any output.
+      "core.setOutput('other', 1);\n${{ inputs.code }}",
+    ]) {
+      expect({ script, findings: byCode(lint(scripted(script)), 'FP304') }).toEqual({ script, findings: [] });
+    }
+    const whole = lint({
+      [`${WF}/w.yml`]: yaml`
+        on:
+          workflow_dispatch:
+            inputs:
+              code: { type: string }
+        jobs:
+          j:
+            runs-on: x
+            steps:
+              - id: s
+                uses: actions/github-script@v8
+                with:
+                  script: \${{ inputs.code }}
+              - run: echo \${{ steps.s.outputs.wanted }}
+      `,
+    });
+    expect(byCode(whole, 'FP304')).toEqual([]);
+  });
+
+  it('does not judge other actions that take a script, since they may set outputs of their own', () => {
+    expect(byCode(lint(scripted("core.setOutput('other', 1);", 'acme/run-js@v1')), 'FP304')).toEqual([]);
   });
 });

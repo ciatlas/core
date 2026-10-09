@@ -265,6 +265,50 @@ describe('SymbolLocator with $/ and workspace paths', () => {
   });
 });
 
+describe('SymbolLocator: whole outputs objects', () => {
+  const W = `${WF}/whole.yml`;
+  const text = yaml`
+    on: push
+    jobs:
+      build:
+        runs-on: x
+        outputs:
+          digest: x
+          tag: y
+        steps:
+          - id: meta
+            uses: ./.github/actions/build
+          - run: echo '\${{ toJSON(steps.meta.outputs) }}'
+      use:
+        needs: build
+        runs-on: x
+        steps:
+          - run: echo '\${{ toJSON(needs.build.outputs) }}'
+  `;
+  const whole = new SymbolLocator(lint({ [W]: text, [BUILD_FILE]: files[BUILD_FILE]! }).index);
+  const line = (needle: string) => text.slice(0, text.indexOf(needle)).split('\n').length;
+
+  it('lists a read of the whole object among the references of each output, as FP303 counts it', () => {
+    for (const name of ['digest', 'tag']) {
+      expect(
+        whole.occurrences(sym.jobOutput(W, 'build', name)).map((o) => `${o.role} ${o.loc.line}`),
+      ).toEqual([`declaration ${line(`${name}:`)}`, `read ${line('needs.build.outputs')}`]);
+    }
+    expect(
+      whole.occurrences(sym.stepOutput(W, 'build', 'meta', 'artifact')).map((o) => `${o.role} ${o.loc.line}`),
+    ).toEqual([`read ${line('steps.meta.outputs')}`]);
+  });
+
+  it('keeps the position itself for the job, or for nothing', () => {
+    const p = (needle: string) => {
+      const before = text.slice(0, text.indexOf(needle) + 2).split('\n');
+      return whole.at(W, before.length, before.at(-1)!.length + 1);
+    };
+    expect(p('needs.build.outputs')).toMatchObject({ symbol: sym.job(W, 'build'), role: 'read' });
+    expect(p('steps.meta.outputs')).toBeUndefined();
+  });
+});
+
 describe('overlayFileSystem', () => {
   const base = memoryFileSystem({
     [`${WF}/a.yml`]: 'disk',

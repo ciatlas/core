@@ -36,6 +36,7 @@ describe('RuleRegistry', () => {
     [{ name: 'Not Kebab' }, /kebab-case/],
     [{ category: 'secrets' as const }, /category digit 1 means "inputs"/],
     [{ code: 'ACME001' }, /unknown category digit 0/],
+    [{ generatedFiles: 'ignore' as 'skip' }, /generatedFiles must be "report" or "skip", got "ignore"/],
   ])('rejects %j', (over, msg) => {
     expect(() => new RuleRegistry().register(rule(over))).toThrow(msg);
   });

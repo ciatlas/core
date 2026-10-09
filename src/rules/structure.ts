@@ -220,6 +220,7 @@ export const needsWithoutData = defineRule({
   name: 'needs-without-data',
   category: 'structure',
   defaultSeverity: 'off',
+  generatedFiles: 'skip',
   docs: {
     summary: 'A job lists another job under `needs:` but never reads its outputs or result (opt-in).',
     why:
@@ -257,6 +258,7 @@ export const largeInterface = defineRule({
   name: 'large-interface',
   category: 'structure',
   defaultSeverity: 'info',
+  generatedFiles: 'skip',
   docs: {
     summary: 'A reusable workflow declares more inputs than `limits.maxInputs`.',
     why:
@@ -439,6 +441,7 @@ export const unreferencedReusableWorkflow = defineRule({
   name: 'unreferenced-reusable-workflow',
   category: 'structure',
   defaultSeverity: 'info',
+  generatedFiles: 'skip',
   docs: {
     summary: 'A workflow can only be triggered by `workflow_call`, but nothing in this repository calls it.',
     why: 'It is either dead code or called from other repositories — worth knowing before changing its interface.',

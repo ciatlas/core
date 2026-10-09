@@ -107,12 +107,14 @@ export class SymbolLocator {
     return this.bySymbol.get(symbol) ?? [];
   }
 
-  private add(symbol: string, loc: Loc, role: OccurrenceRole) {
+  /** `findable: false` lists the occurrence among the symbol's references, but `at` does not return it. */
+  private add(symbol: string, loc: Loc, role: OccurrenceRole, findable = true) {
     const list = this.bySymbol.get(symbol) ?? [];
     if (list.some((o) => o.role === role && sameLoc(o.loc, loc))) return;
     const o = { symbol, loc, role };
     list.push(o);
     this.bySymbol.set(symbol, list);
+    if (!findable) return;
     const inFile = this.byFile.get(loc.file) ?? [];
     inFile.push(o);
     this.byFile.set(loc.file, inFile);
@@ -224,7 +226,13 @@ export class SymbolLocator {
   }
 
   private indexRef(unit: UnitDecl, site: ExprSite, ref: LocatedRef) {
-    const symbol = this.index.resolveRef(unit, site, ref) ?? this.jobOf(unit, site, ref);
+    const resolved = this.index.resolveRef(unit, site, ref);
+    if (!resolved) {
+      // A whole object (`toJSON(needs.build.outputs)`, `steps.meta.outputs`) reads each output, as FP303 counts it:
+      // it is a reference to each of them, but the position itself stands for the job (or for nothing).
+      for (const s of this.index.readsOf(unit, site, ref)) this.add(s, ref.loc, 'read', false);
+    }
+    const symbol = resolved ?? this.jobOf(unit, site, ref);
     if (!symbol) return;
     this.add(symbol, ref.loc, 'read');
     // Outputs of a `run:` step (or a remote action) are not declared anywhere; the step is the closest definition.

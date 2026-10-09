@@ -63,9 +63,17 @@ export const overrideUnused = defineRule({
   check(ctx) {
     for (const u of ctx.overrides ?? []) {
       if (u.expired || u.inactive || u.matched > 0) continue;
+      const n = u.skippedInGenerated ?? 0;
       ctx.report({
-        message: `Override for ${describe(u.override)} matches no finding`,
+        message: n
+          ? `Override for ${describe(u.override)} matches no finding: ${u.override.rule} is not reported in generated files, where its ${n} finding${n === 1 ? ' is' : 's are'}`
+          : `Override for ${describe(u.override)} matches no finding`,
         loc: configLoc(u.loc),
+        ...(n
+          ? {
+              fix: 'Delete the override: flowpact no longer reports this rule in generated files. If the file is written by hand, list it under `generated.exclude` instead.',
+            }
+          : {}),
       });
     }
   },

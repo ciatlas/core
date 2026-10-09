@@ -95,6 +95,24 @@ export const configSchema = z
       .describe(
         'Declared keys of runtime-computed matrices, keyed by `<workflow path>#<job id>`. Lets flowpact verify `matrix.*` reads (FP404) instead of reporting FP403.',
       ),
+    generated: z
+      .object({
+        include: z
+          .array(z.string())
+          .default([])
+          .describe('Files or globs of workflows and actions that are generated, even without a marker.'),
+        exclude: z
+          .array(z.string())
+          .default([])
+          .describe(
+            'Files or globs of workflows and actions written by hand, even with a marker or a `.lock.yml` name. Wins over `include`.',
+          ),
+      })
+      .strict()
+      .prefault({})
+      .describe(
+        'Which workflow and action files are generated. Rules about their internals are not reported there; flowpact detects them by a header comment or the `.lock.yml` name.',
+      ),
     plugins: z
       .array(z.string())
       .default([])

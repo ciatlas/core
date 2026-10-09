@@ -20,6 +20,7 @@ describe('config', () => {
       ignore: [],
       overrides: [],
       matrixShapes: {},
+      generated: { include: [], exclude: [] },
       plugins: [],
       impact: {
         labels: { major: 'semver:major', minor: 'semver:minor', patch: 'semver:patch', none: 'semver:none' },

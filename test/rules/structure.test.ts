@@ -648,7 +648,7 @@ describe('FP606 / FP610: review cases', () => {
 });
 
 describe('$/ self-repository references', () => {
-  const r = lint({
+  const files = {
     [`${WF}/w.yml`]: yaml`
       on: push
       jobs:
@@ -694,7 +694,8 @@ describe('$/ self-repository references', () => {
             - run: echo \${{ inputs.need }}
     `,
     [A]: ACTION,
-  });
+  };
+  const r = lint(files);
 
   it('verifies $/ steps and calls like local ones, whatever the workspace holds', () => {
     expect(messages(r, 'FP101')).toEqual([
@@ -725,8 +726,11 @@ describe('$/ self-repository references', () => {
     expect(messages(r, 'FP104')).toEqual(['Input "unread" of .github/workflows/lib.yml is never read']);
     expect(messages(r, 'FP303')).toEqual([
       'Output "out" of .github/actions/a is not read by any of its 1 user',
-      'Workflow output "ignored" of .github/workflows/lib.yml is not read by any of its 1 caller',
     ]);
+    // lib.yml is a published reusable workflow, so FP303 leaves its outputs alone unless it is declared internal.
+    expect(messages(lint(files, { config: { impact: { publish: [] } } }), 'FP303')).toContain(
+      'Workflow output "ignored" of .github/workflows/lib.yml is not read by any of its 1 caller',
+    );
     expect(r.index.callersOf(`${WF}/lib.yml`).map((c) => c.job.id)).toEqual(['b']);
     expect(r.index.usersOf('.github/actions/a').map((u) => u.step.id)).toEqual(['s']);
   });

@@ -31,6 +31,8 @@ export interface RuleDocs {
   why: string;
   /** How to fix it — shown under every finding. */
   fix: string;
+  /** What the rule deliberately leaves out — shown on the docs page and by `flowpact explain`, not with findings. */
+  scope?: string;
   /** Minimal YAML examples rendered on the docs page. */
   examples?: { bad: string; good: string };
 }
@@ -91,6 +93,11 @@ export interface OverrideUsage {
   daysLeft?: number;
   /** The override's rule did not run (turned off or excluded by `--only`), so its usage cannot be judged. */
   inactive?: boolean;
+  /**
+   * When it matches no finding: how many findings it would match that are not reported because they are about the
+   * internals of generated files.
+   */
+  skippedInGenerated?: number;
 }
 
 export interface RuleContext {
@@ -125,6 +132,12 @@ export interface RuleDefinition {
    * suppressed by overrides. Default: `main`.
    */
   phase?: 'main' | 'post';
+  /**
+   * `skip` drops the rule's findings located in generated files (a `DO NOT EDIT` header, a gh-aw `.lock.yml`), which
+   * nobody edits by hand. For rules about a file's own internals, such as dead declarations or style; checks of calls
+   * between units keep `report`. Default: `report`.
+   */
+  generatedFiles?: 'report' | 'skip';
   check(ctx: RuleContext): void;
 }
 

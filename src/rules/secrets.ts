@@ -113,6 +113,7 @@ export const unusedSecret = defineRule({
   name: 'unused-secret',
   category: 'secrets',
   defaultSeverity: 'warning',
+  generatedFiles: 'skip',
   docs: {
     summary: 'A `workflow_call` secret is declared but never read.',
     why: 'Every caller must still wire the secret, widening its exposure for nothing.',
@@ -147,6 +148,7 @@ export const secretsInherit = defineRule({
   name: 'secrets-inherit',
   category: 'secrets',
   defaultSeverity: 'info',
+  generatedFiles: 'skip',
   docs: {
     summary:
       '`secrets: inherit` hands every repository secret to the callee; flowpact lists what is actually needed.',

@@ -52,6 +52,11 @@ export const reportSchema = z.object({
     byCode: z.record(z.string(), z.number().int()),
     byFile: z.record(z.string(), z.number().int()),
     suppressed: z.number().int(),
+    skippedInGenerated: z
+      .number()
+      .int()
+      .optional()
+      .describe('Findings not reported because they are about the internals of generated files.'),
   }),
   findings: z.array(findingSchema),
   suppressed: z.array(

@@ -17,7 +17,8 @@ export function readsContextDynamically(unit: UnitDecl, context: string): boolea
   if (unit.parseErrors.length > 0 || unit.sites.some((s) => s.segments.some((seg) => seg.expr.error)))
     return true;
   for (const { ref } of refsOf(unit)) {
-    if (ref.context === context && ref.dynamic) return true;
+    // `needs.build.outputs[matrix.k]` names its job: the graph counts it as a read of each output of that job.
+    if (ref.context === context && ref.dynamic && !namesOwner(ref)) return true;
     if (context === 'inputs' && ref.context === 'github' && ref.path[0] === 'event') {
       if (
         ref.path.length === 1 ||
@@ -27,6 +28,17 @@ export function readsContextDynamically(unit: UnitDecl, context: string): boolea
     }
   }
   return false;
+}
+
+/** A computed read of outputs whose job or step is named statically (see `ProjectIndex.readsOf`). */
+function namesOwner(ref: LocatedRef): boolean {
+  const owner = ref.path[0];
+  return (
+    (ref.context === 'needs' || ref.context === 'jobs' || ref.context === 'steps') &&
+    owner !== undefined &&
+    owner !== '?' &&
+    owner !== '*'
+  );
 }
 
 /** Shortest call chain from a top-level workflow down to `target` (outermost call first). */

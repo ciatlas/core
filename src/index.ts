@@ -11,7 +11,14 @@ export * from './ir';
 export * from './locate';
 export * from './logger';
 export * from './matrix';
-export { classifyUses, createParseContext, parseActionFile, parseWorkflowFile, scanRunWrites } from './parse';
+export {
+  classifyUses,
+  createParseContext,
+  generatedMarker,
+  parseActionFile,
+  parseWorkflowFile,
+  scanRunWrites,
+} from './parse';
 export * from './plugins';
 export * from './project';
 export * from './report';
