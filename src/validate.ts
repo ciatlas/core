@@ -8,15 +8,22 @@ import {
   TemplateValidationErrors,
 } from '@actions/workflow-parser/templates/template-context';
 import { isAlias, isMap, isScalar, isSeq, LineCounter, parseDocument } from 'yaml';
-import { CONTEXT_FUNCTIONS, KNOWN_CONTEXTS } from './expressions';
-import type { Diagnostic, UnitDecl } from './ir';
+import { CONTEXT_FUNCTIONS, KNOWN_CONTEXTS, UNTERMINATED_EXPRESSION } from './expressions';
+import { type Diagnostic, siteAt, type UnitDecl } from './ir';
 import type { Logger } from './logger';
 import { didYouMean } from './rules/util';
 import { mappingsAt, SCHEMA_ROOT, schemaFor, workflowSchema } from './schema';
 import type { Loc } from './source';
 
-/** Syntax problems are reported by FP502 with better positions; drop the parser's duplicates. */
-const SYNTAX_NOISE = [/Unexpected symbol/i, /Unexpected end of expression/i, /Unclosed expression/i];
+/**
+ * The parser's errors for an invalid `${{ }}`: those of the expression lexer and parser (@actions/expressions, which
+ * FP502 parses with too), and the template reader's for a `${{` without `}}`.
+ */
+const EXPRESSION_ERROR =
+  /^(?:Unexpected symbol|Unexpected end of expression|Unrecognized named-value|Unrecognized function|Too few parameters supplied|Too many parameters supplied|Even number of parameters supplied|Exceeded max expression (?:depth|length)|ErrorExceededMaxLength|The expression is not closed)\b/;
+const UNCLOSED = /^The expression is not closed\b/;
+/** The parser's type error for a value whose `${{ }}` it could not parse, so it kept the value as text. */
+const UNPARSED_VALUE = /^Unexpected value '[\s\S]*\$\{\{/;
 
 /** Action metadata that GitHub's schema requires but the runner does not need for local actions. */
 const LOCAL_ACTION_NOISE = /Required property is missing: (name|description)\b/i;
@@ -44,15 +51,59 @@ const EVENT_FILTERS = [
 
 /**
  * "Unrecognized named-value: 'env'" for a context flowpact knows means the context is not available in that field
- * (GitHub's context-availability rules); for an unknown name it is a typo already reported by FP502.
+ * (GitHub's context-availability rules), and likewise for a function only some fields allow. For an unknown name it
+ * is a typo, which FP502 reports.
  */
-function classify(message: string): 'drop' | 'context' | 'schema' {
-  if (SYNTAX_NOISE.some((re) => re.test(message))) return 'drop';
+function isContextError(message: string): boolean {
   const named = /Unrecognized named-value: '([^']+)'/i.exec(message);
-  if (named) return CONTEXT_NAMES.has(named[1]!.toLowerCase()) ? 'context' : 'drop';
+  if (named) return CONTEXT_NAMES.has(named[1]!.toLowerCase());
   const fn = /Unrecognized function: '([^']+)'/i.exec(message);
-  if (fn) return FUNCTION_NAMES.has(fn[1]!.toLowerCase()) ? 'context' : 'drop';
-  return 'schema';
+  return fn ? FUNCTION_NAMES.has(fn[1]!.toLowerCase()) : false;
+}
+
+/**
+ * How a parser expression error relates to FP502, which checks each `${{ }}` of a scalar with the same expression parser
+ * and reports the error once, with the expression and the position of the error in it:
+ * - `fp502`: FP502 reports it. In a single-line scalar both read the same text, so the messages match. In a multi-line
+ *   scalar the parser reads the source as written, with quotes still doubled and escapes not decoded, where FP502 reads
+ *   the value GitHub evaluates; an error there repeats FP502's when FP502 has one for the scalar;
+ * - `misread`: a multi-line scalar FP502 finds valid; the parser misread it, and GitHub accepts it;
+ * - `own`: a scalar FP502 does not check, such as a mapping key, or a message FP502 does not give.
+ * Contexts and functions the field does not allow (FP505) are not expression errors here: FP502 accepts them anywhere.
+ */
+function againstFP502(unit: UnitDecl, d: Diagnostic): 'fp502' | 'misread' | 'own' {
+  const site = d.at && siteAt(unit.sites, d.at);
+  if (!site) return 'own';
+  if (site.loc.endLine > site.loc.line) {
+    return site.segments.some((seg) => seg.expr.error) ? 'fp502' : 'misread';
+  }
+  const message = UNCLOSED.test(d.message) ? UNTERMINATED_EXPRESSION : d.message;
+  return site.segments.some((seg) => seg.expr.error?.message === message) ? 'fp502' : 'own';
+}
+
+const isExpressionError = (d: Diagnostic) =>
+  d.kind !== 'context' && !!d.at && EXPRESSION_ERROR.test(d.message);
+const atKey = (d: Diagnostic) => (d.at ? `${d.at.line}:${d.at.column}` : '');
+
+/**
+ * Marks the parser's expression errors that FP502 reports (FP503 then reports them only when FP502 does not run), and
+ * drops what only repeats them: a misread multi-line scalar, and the type error a boolean, number or matrix field adds
+ * for a value whose `${{ }}` did not parse ("Unexpected value '${{ ... }}'"), which goes once the expression parses.
+ */
+function classifyExpressions(unit: UnitDecl, diagnostics: Diagnostic[]): Diagnostic[] {
+  const failed = new Set(diagnostics.filter(isExpressionError).map(atKey));
+  const out: Diagnostic[] = [];
+  for (const d of diagnostics) {
+    if (!d.kind && d.at && failed.has(atKey(d)) && UNPARSED_VALUE.test(d.message)) continue;
+    if (!isExpressionError(d)) {
+      out.push(d);
+      continue;
+    }
+    const relation = againstFP502(unit, d);
+    if (relation === 'misread') continue;
+    out.push(relation === 'fp502' ? { ...d, kind: 'expression' } : d);
+  }
+  return out;
 }
 
 interface ParserError {
@@ -84,17 +135,17 @@ export function validateSchema(unit: UnitDecl, logger: Logger): Diagnostic[] {
         : parseAction(file, new NoOperationTraceWriter());
     const errors = result.context.errors.getErrors() as ParserError[];
     const diagnostics = errors
-      .filter((e) => classify(e.message) !== 'drop')
       .filter((e) => !(unit.kind === 'action' && LOCAL_ACTION_NOISE.test(e.message)))
       .map((e): Diagnostic => {
         const r = e.range;
         const at = /\(Line: (\d+), Col: (\d+)\)/.exec(e.message);
-        const message = e.message
-          .replace(/^[^:]*\.ya?ml(?: \(Line: \d+, Col: \d+\))?:\s*/, '')
+        // The parser prefixes the file name it was given; strip that exact name (a path may contain a colon).
+        const message = (e.message.startsWith(unit.file) ? e.message.slice(unit.file.length) : e.message)
+          .replace(/^(?: \(Line: \d+, Col: \d+\))?:\s*/, '')
           .replace(/\.\s*Located at position \d+ within expression:.*$/s, '');
         return {
           message,
-          ...(classify(e.message) === 'context' ? { kind: 'context' as const } : {}),
+          ...(isContextError(message) ? { kind: 'context' as const } : {}),
           ...(at ? { at: { line: Number(at[1]), column: Number(at[2]) } } : {}),
           loc: r
             ? {
@@ -107,7 +158,7 @@ export function validateSchema(unit: UnitDecl, logger: Logger): Diagnostic[] {
             : { file: unit.file, line: 1, column: 1, endLine: 1, endColumn: 1 },
         };
       });
-    return explain(unit, diagnostics);
+    return explain(unit, classifyExpressions(unit, diagnostics));
   } catch (err) {
     logger.debug(`schema validation skipped for ${unit.file}`, { reason: (err as Error).message });
     return [];

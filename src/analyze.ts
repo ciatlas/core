@@ -282,6 +282,13 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
       )
     : undefined;
 
+  const runs = (code: string): boolean => {
+    const rule = registry.get(code);
+    if (!rule) return false;
+    return (
+      (severities.get(rule.code) ?? rule.defaultSeverity) !== 'off' && (!only || only.includes(rule.code))
+    );
+  };
   const runRules = (phase: 'main' | 'post', extra: Partial<RuleContext>): Finding[] => {
     const out: Finding[] = [];
     for (const rule of registry.all()) {
@@ -297,6 +304,7 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
         config,
         logger: ruleLog.child(rule.code),
         matrix,
+        runs,
         ...(opts.configFile ? { configFile: opts.configFile } : {}),
         ...(contracts ? { contracts } : {}),
         ...(impact ? { impact } : {}),

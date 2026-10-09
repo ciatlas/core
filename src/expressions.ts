@@ -63,6 +63,9 @@ export interface TemplateSegment {
   expr: ParsedExpression;
 }
 
+/** The error of a `${{` that has no closing `}}`. */
+export const UNTERMINATED_EXPRESSION = "Unterminated expression: missing closing '}}'";
+
 /** Splits a string into literal text and `${{ }}` expressions, respecting quoted strings inside expressions. */
 export function findTemplateSegments(text: string): TemplateSegment[] {
   const segments: TemplateSegment[] = [];
@@ -97,7 +100,7 @@ export function findTemplateSegments(text: string): TemplateSegment[] {
         expr: {
           source: inner.trim(),
           refs: [],
-          error: { message: "Unterminated expression: missing closing '}}'", offset: 0 },
+          error: { message: UNTERMINATED_EXPRESSION, offset: 0 },
         },
       });
       break;

@@ -199,8 +199,9 @@ export interface Diagnostic {
   /**
    * `context`: a known context or function used where GitHub does not allow it.
    * `ignored`: a key GitHub accepts but ignores, so the file runs without the setting.
+   * `expression`: an invalid expression that FP502 reports too, with the expression and the position in it.
    */
-  kind?: 'context' | 'ignored';
+  kind?: 'context' | 'ignored' | 'expression';
   /** Start of the YAML scalar as GitHub's parser reports it (1-based). */
   at?: { line: number; column: number };
   /** How to fix this instance, when it is more specific than the rule's advice. */
@@ -253,6 +254,14 @@ export function lookup<T>(rec: Record<string, T>, key: string): T | undefined {
   const lower = key.toLowerCase();
   for (const k of Object.keys(rec)) if (k.toLowerCase() === lower) return rec[k];
   return undefined;
+}
+
+/**
+ * The site of the scalar GitHub's parser reports a problem in, by the start of the scalar it gives in the message
+ * (`Diagnostic.at`): the parser's range is off for multi-line scalars.
+ */
+export function siteAt(sites: ExprSite[], at: { line: number; column: number }): ExprSite | undefined {
+  return sites.find((s) => s.loc.line === at.line && Math.abs(s.loc.column - at.column) <= 1);
 }
 
 export function hasKey(rec: Record<string, unknown>, key: string): boolean {

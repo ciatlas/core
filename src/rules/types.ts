@@ -114,6 +114,8 @@ export interface RuleContext {
   readonly overrides?: OverrideUsage[];
   /** Cached matrix expansion of a job. */
   matrix(unit: UnitDecl, job: JobDecl): MatrixExpansion;
+  /** Whether a rule runs in this analysis: loaded, not turned off, and selected by `--only` if that is given. */
+  runs(code: string): boolean;
   report(input: ReportInput): void;
 }
 

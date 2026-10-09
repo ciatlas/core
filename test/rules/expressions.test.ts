@@ -54,6 +54,252 @@ describe('FP502 expression-parse-error', () => {
   });
 });
 
+describe('FP502 / FP503: an invalid expression is reported once', () => {
+  const report = (files: Record<string, string>) =>
+    lint(files, { schema: true })
+      .findings.filter((f) => ['FP502', 'FP503', 'FP505'].includes(f.code))
+      .map((f) => `${f.code} ${at(f)} ${f.message}`);
+
+  it('reports a workflow’s invalid expressions as FP502 only, in every field', () => {
+    expect(
+      report({
+        [`${WF}/w.yml`]: yaml`
+          on: push
+          env:
+            A: \${{ a + b }}
+          jobs:
+            j:
+              runs-on: \${{ contains(github.ref) }}
+              name: \${{ fromJSON(1, 2) }}
+              if: \${{ contains(github.event.pull_request.labels, 1, 2) }}
+              env:
+                B: \${{ foo(1) }}
+              steps:
+                - if: \${{ contains(github.event.pull_request.labels, 1, 2) }}
+                  run: echo \${{ startsWith(github.ref) }} \${{ (github.ref }}
+                - if: contains(github.ref, 1, 2)
+                  uses: some/action@v1
+                  with:
+                    x: \${{ format() }}
+                  env:
+                    C: \${{ hashFiles() }}
+                - run: echo \${{ github.ref
+        `,
+      }),
+    ).toEqual([
+      `FP502 ${WF}/w.yml:3:12 Invalid expression "a + b": Unexpected symbol: '+'`,
+      `FP502 ${WF}/w.yml:6:18 Invalid expression "contains(github.ref)": Too few parameters supplied: 'contains'`,
+      `FP502 ${WF}/w.yml:7:15 Invalid expression "fromJSON(1, 2)": Too many parameters supplied: 'fromJSON'`,
+      `FP502 ${WF}/w.yml:8:13 Invalid expression "contains(github.event.pull_request.labels, 1, 2)": Too many parameters supplied: 'contains'`,
+      `FP502 ${WF}/w.yml:10:14 Invalid expression "foo(1)": Unrecognized function: 'foo'`,
+      `FP502 ${WF}/w.yml:12:17 Invalid expression "contains(github.event.pull_request.labels, 1, 2)": Too many parameters supplied: 'contains'`,
+      `FP502 ${WF}/w.yml:13:23 Invalid expression "startsWith(github.ref)": Too few parameters supplied: 'startsWith'`,
+      `FP502 ${WF}/w.yml:13:61 Invalid expression "(github.ref": Unexpected end of expression: 'ref'`,
+      `FP502 ${WF}/w.yml:14:13 Invalid expression "contains(github.ref, 1, 2)": Too many parameters supplied: 'contains'`,
+      `FP502 ${WF}/w.yml:17:18 Invalid expression "format()": Too few parameters supplied: 'format'`,
+      `FP502 ${WF}/w.yml:19:18 Invalid expression "hashFiles()": Too few parameters supplied: 'hashFiles'`,
+      `FP502 ${WF}/w.yml:20:23 Invalid expression "github.ref": Unterminated expression: missing closing '}}'`,
+    ]);
+  });
+
+  it('reports an action’s invalid expressions as FP502 only', () => {
+    expect(
+      report({
+        '.github/actions/a/action.yml': yaml`
+          name: a
+          description: d
+          outputs:
+            o:
+              value: \${{ contains(steps.s.outputs.o) }}
+          runs:
+            using: composite
+            steps:
+              - id: s
+                if: \${{ contains(github.ref, 1, 2) }}
+                run: echo \${{ a + b }} \${{ foo(1) }}
+                shell: bash
+              - uses: some/action@v1
+                with:
+                  x: \${{ join() }}
+                env:
+                  Y: \${{ (github.ref }}
+        `,
+      }),
+    ).toEqual([
+      `FP502 .github/actions/a/action.yml:5:16 Invalid expression "contains(steps.s.outputs.o)": Too few parameters supplied: 'contains'`,
+      `FP502 .github/actions/a/action.yml:10:15 Invalid expression "contains(github.ref, 1, 2)": Too many parameters supplied: 'contains'`,
+      `FP502 .github/actions/a/action.yml:11:23 Invalid expression "a + b": Unexpected symbol: '+'`,
+      `FP502 .github/actions/a/action.yml:11:34 Invalid expression "foo(1)": Unrecognized function: 'foo'`,
+      `FP502 .github/actions/a/action.yml:15:16 Invalid expression "join()": Too few parameters supplied: 'join'`,
+      `FP502 .github/actions/a/action.yml:17:24 Invalid expression "(github.ref": Unexpected end of expression: 'ref'`,
+    ]);
+  });
+
+  it('reports invalid expressions in multi-line scalars once, and not those the parser misreads there', () => {
+    expect(
+      report({
+        [`${WF}/w.yml`]: yaml`
+          on: push
+          jobs:
+            j:
+              runs-on: x
+              steps:
+                - run: |
+                    echo \${{ contains(github.ref, 1, 2) }}
+                - run: >
+                    echo
+                    \${{ format() }}
+                - run: "echo
+                    \${{ contains(github.ref) }}"
+                - if: '\${{ github.ref == ''refs/heads/main''
+                    && github.event_name == ''push'' }}'
+                  run: x
+                - if: >-
+                    \${{ secrets.TOKEN != '' }}
+                  run: x
+        `,
+      }),
+    ).toEqual([
+      `FP502 ${WF}/w.yml:7:20 Invalid expression "contains(github.ref, 1, 2)": Too many parameters supplied: 'contains'`,
+      `FP502 ${WF}/w.yml:10:15 Invalid expression "format()": Too few parameters supplied: 'format'`,
+      `FP502 ${WF}/w.yml:12:15 Invalid expression "contains(github.ref)": Too few parameters supplied: 'contains'`,
+      `FP505 ${WF}/w.yml:17:15 \`secrets\` is not available here — GitHub rejects the workflow ("Unrecognized named-value: 'secrets'")`,
+    ]);
+  });
+
+  it('keeps schema errors that FP502 does not report, next to the expressions it does', () => {
+    expect(
+      report({
+        [`${WF}/w.yml`]: yaml`
+          on: push
+          env:
+            X: 1
+          jobs:
+            j:
+              runs-on: x
+              steps:
+                - run: echo \${{ }} \${{ contains(github.ref, 1, 2) }}
+                  env:
+                    \${{ a + b }}: x
+                  runz: x
+            k:
+              uses: ./.github/workflows/r.yml
+              with:
+                t: \${{ env.X }} \${{ contains(github.ref) }}
+        `,
+        [`${WF}/r.yml`]: yaml`
+          on:
+            workflow_call:
+              inputs:
+                t: { type: string }
+          jobs:
+            r:
+              runs-on: x
+              steps: [{ run: x }]
+        `,
+      }),
+    ).toEqual([
+      // An empty expression, and an expression in a key, which FP502 does not check.
+      `FP503 ${WF}/w.yml:8:19 An expression was expected`,
+      `FP502 ${WF}/w.yml:8:30 Invalid expression "contains(github.ref, 1, 2)": Too many parameters supplied: 'contains'`,
+      `FP503 ${WF}/w.yml:10:11 Unexpected symbol: '+'`,
+      `FP503 ${WF}/w.yml:11:9 Unexpected value 'runz'`,
+      `FP505 ${WF}/w.yml:15:14 \`env\` is not available here — GitHub rejects the workflow ("Unrecognized named-value: 'env'")`,
+      `FP502 ${WF}/w.yml:15:27 Invalid expression "contains(github.ref)": Too few parameters supplied: 'contains'`,
+    ]);
+  });
+
+  it('reports an invalid expression in a boolean, number or matrix field once, without the type error that follows', () => {
+    expect(
+      report({
+        [`${WF}/w.yml`]: yaml`
+          on: push
+          concurrency:
+            group: g
+            cancel-in-progress: \${{ contains(github.ref) }}
+          jobs:
+            j:
+              runs-on: x
+              timeout-minutes: \${{ a + b }}
+              continue-on-error: \${{ fromJSON(1, 2) }}
+              strategy:
+                fail-fast: \${{ startsWith(github.ref) }}
+                matrix:
+                  n: \${{ contains(github.ref) }}
+              steps:
+                - run: echo
+                  timeout-minutes: \${{ format() }}
+        `,
+      }),
+    ).toEqual([
+      `FP502 ${WF}/w.yml:4:27 Invalid expression "contains(github.ref)": Too few parameters supplied: 'contains'`,
+      `FP502 ${WF}/w.yml:8:28 Invalid expression "a + b": Unexpected symbol: '+'`,
+      `FP502 ${WF}/w.yml:9:28 Invalid expression "fromJSON(1, 2)": Too many parameters supplied: 'fromJSON'`,
+      `FP502 ${WF}/w.yml:11:22 Invalid expression "startsWith(github.ref)": Too few parameters supplied: 'startsWith'`,
+      `FP502 ${WF}/w.yml:13:16 Invalid expression "contains(github.ref)": Too few parameters supplied: 'contains'`,
+      `FP502 ${WF}/w.yml:16:30 Invalid expression "format()": Too few parameters supplied: 'format'`,
+    ]);
+  });
+
+  it('accepts a valid multi-line expression in a boolean field that the parser misreads', () => {
+    expect(
+      report({
+        [`${WF}/w.yml`]: yaml`
+          on: push
+          jobs:
+            j:
+              runs-on: x
+              continue-on-error: '\${{ github.ref ==
+                ''refs/heads/main'' }}'
+              steps: [{ run: echo }]
+        `,
+      }),
+    ).toEqual([]);
+  });
+
+  it('reports invalid expressions as FP503 when FP502 does not run, once each', () => {
+    const files = {
+      [`${WF}/w.yml`]: yaml`
+        on: push
+        jobs:
+          j:
+            runs-on: x
+            timeout-minutes: \${{ fromJSON(1, 2) }}
+            steps:
+              - run: echo \${{ contains(github.ref) }}
+      `,
+    };
+    const fp503 = (opts: Parameters<typeof lint>[1]) =>
+      lint(files, { schema: true, ...opts })
+        .findings.filter((f) => ['FP502', 'FP503'].includes(f.code))
+        .map((f) => `${f.code} ${at(f)} ${f.message}`);
+    const expected = [
+      `FP503 ${WF}/w.yml:5:22 Too many parameters supplied: 'fromJSON'`,
+      `FP503 ${WF}/w.yml:7:19 Too few parameters supplied: 'contains'`,
+    ];
+    expect(fp503({ config: { rules: { FP502: 'off' } } })).toEqual(expected);
+    expect(fp503({ only: ['FP503'] })).toEqual(expected);
+  });
+
+  it('reports an invalid expression once in a file whose path contains a colon', () => {
+    expect(
+      report({
+        [`${WF}/deploy:prod.yml`]: yaml`
+          on: push
+          jobs:
+            j:
+              runs-on: x
+              steps:
+                - run: echo \${{ contains(github.ref) }} \${{ a + b }}
+        `,
+      }),
+    ).toEqual([
+      `FP502 ${WF}/deploy:prod.yml:6:23 Invalid expression "contains(github.ref)": Too few parameters supplied: 'contains'`,
+      `FP502 ${WF}/deploy:prod.yml:6:53 Invalid expression "a + b": Unexpected symbol: '+'`,
+    ]);
+  });
+});
+
 describe('FP503 schema-violation / FP504 yaml-syntax-error', () => {
   it('validates against GitHub’s schema when enabled', () => {
     const r = lint(

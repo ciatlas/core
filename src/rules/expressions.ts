@@ -1,6 +1,6 @@
 import { sym } from '../graph';
 import type { Diagnostic, ExprSite } from '../ir';
-import { lookup } from '../ir';
+import { lookup, siteAt } from '../ir';
 import type { Loc } from '../source';
 import { defineRule, type RuleDefinition } from './types';
 import { quote } from './util';
@@ -148,8 +148,11 @@ runs:
   },
   check(ctx) {
     for (const unit of ctx.index.units()) {
+      // Invalid expressions are FP502's, which shows the expression and the position in it; they are reported here
+      // only when FP502 does not run.
+      const fp502 = ctx.runs('FP502');
       for (const e of unit.schemaErrors) {
-        if (e.kind === 'context') continue;
+        if (e.kind === 'context' || (e.kind === 'expression' && fp502)) continue;
         ctx.report({
           message: e.message,
           loc: e.loc,
@@ -296,7 +299,7 @@ const CONDITION_TABLES: Record<string, { label: string; contexts: Set<string>; f
 /** Maps a parser error to the offending reference: the parser's own range is off for multi-line scalars. */
 function refLocFor(sites: ExprSite[], e: Diagnostic, name: string | undefined): Loc | undefined {
   if (!e.at || !name) return undefined;
-  const site = sites.find((s) => s.loc.line === e.at!.line && Math.abs(s.loc.column - e.at!.column) <= 1);
+  const site = siteAt(sites, e.at);
   for (const seg of site?.segments ?? [])
     for (const r of seg.refs) if (r.context === name.toLowerCase()) return r.loc;
   return site?.loc;
