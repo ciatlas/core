@@ -1,7 +1,9 @@
 import {
   type ContextResolver,
+  conditionUses,
   evaluate,
   evaluateTemplate,
+  fallbacksOf,
   findTemplateSegments,
   known,
   parseExpression,
@@ -194,5 +196,72 @@ describe('evaluateTemplate', () => {
   });
   it('returns plain text unchanged', () => {
     expect(evaluateTemplate('plain', resolve)).toEqual(known('plain'));
+  });
+});
+
+describe('fallbacksOf', () => {
+  /** Each reference, marked when it is the subject of a fallback. */
+  const subjects = (src: string) => {
+    const p = parseExpression(src);
+    const byStart = fallbacksOf(p);
+    return p.refs.map((r) => `${r.context}.${r.path.join('.')}${byStart.has(r.start) ? ' ||' : ''}`);
+  };
+  /** The value of the `||` expression returned for `ref`, with every matrix key missing. */
+  const valueFor = (src: string, ref: string) => {
+    const p = parseExpression(src);
+    const r = p.refs.find((x) => `${x.context}.${x.path.join('.')}` === ref)!;
+    const node = fallbacksOf(p).get(r.start);
+    return node && evaluate(node, ({ context }) => (context === 'matrix' ? known(null) : undefined));
+  };
+
+  it('finds the non-last operands of ||, through parentheses and nested ||', () => {
+    expect(subjects("matrix.a || 'x'")).toEqual(['matrix.a ||']);
+    expect(subjects('(matrix.a) || inputs.b || matrix.c')).toEqual([
+      'matrix.a ||',
+      'inputs.b ||',
+      'matrix.c',
+    ]);
+    // The whole `||` is returned, so a nested one does not hide the fallback after it.
+    expect(valueFor("(matrix.a || matrix.b) || 'x'", 'matrix.a')).toEqual(known('x'));
+    expect(valueFor("fromJSON(matrix.a || '1')", 'matrix.a')).toEqual(known('1'));
+    expect(valueFor("matrix.a || ''", 'matrix.a')).toEqual(known(''));
+  });
+
+  it('leaves out reads that are not the subject of a fallback', () => {
+    expect(subjects("matrix.a == 'x' || 'y'")).toEqual(['matrix.a']);
+    expect(subjects("matrix.a && 'x' || 'y'")).toEqual(['matrix.a']);
+    expect(subjects("format('{0}', matrix.a) || 'x'")).toEqual(['matrix.a']);
+    expect(subjects("!matrix.a || 'x'")).toEqual(['matrix.a']);
+    expect(subjects('inputs.x || matrix.a')).toEqual(['inputs.x ||', 'matrix.a']);
+  });
+});
+
+describe('conditionUses', () => {
+  const uses = (src: string, whole = true) => {
+    const p = parseExpression(src);
+    const byStart = conditionUses(p, whole);
+    return p.refs.map((r) => `${r.context}.${r.path.join('.')}:${byStart.get(r.start)}`);
+  };
+
+  it('tells truthiness from comparisons, tests and fallbacks', () => {
+    expect(uses('inputs.a || !inputs.b')).toEqual(['inputs.a:truthiness', 'inputs.b:truthiness']);
+    expect(uses("inputs.a == 'yes' && 'x' != inputs.b")).toEqual(['inputs.a:compared', 'inputs.b:compared']);
+    expect(uses("contains(fromJSON('[1]'), inputs.a) && startsWith(inputs.b, 'v')")).toEqual([
+      'inputs.a:compared',
+      'inputs.b:compared',
+    ]);
+    expect(uses("startsWith(inputs.a || inputs.b, 'libs/')")).toEqual([
+      'inputs.a:fallback',
+      'inputs.b:compared',
+    ]);
+    expect(uses("format('{0}-x', inputs.a) == '-x'")).toEqual(['inputs.a:compared']);
+  });
+
+  it('treats other reads as values', () => {
+    expect(uses('inputs.a == github.ref')).toEqual(['inputs.a:value', 'github.ref:value']);
+    expect(uses('fromJSON(inputs.a).on')).toEqual(['inputs.a:value']);
+    expect(uses('contains(inputs.a, inputs.b)')).toEqual(['inputs.a:value', 'inputs.b:value']);
+    // A condition with text around `${{ }}` is a string: its values are only interpolated.
+    expect(uses('inputs.a', false)).toEqual(['inputs.a:value']);
   });
 });

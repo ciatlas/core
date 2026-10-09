@@ -1,9 +1,19 @@
-import type { ProjectIndex } from '../graph';
+import { type ContextResolver, definitelyFalsy, evaluateTemplate, known, UNKNOWN } from '../expressions';
+import type { CallSite, ProjectIndex } from '../graph';
 import { sym } from '../graph';
-import { lookup, type WorkflowDecl } from '../ir';
+import { type ExprSite, lookup, type WorkflowDecl } from '../ir';
 import { escapeControl } from '../text';
 import { defineRule, type RuleDefinition } from './types';
-import { chainRelated, chainTo, didYouMean, listNames, quote, readsContextDynamically, refsOf } from './util';
+import {
+  chainRelated,
+  chainTo,
+  didYouMean,
+  isWholeExpression,
+  listNames,
+  quote,
+  readsContextDynamically,
+  refsOf,
+} from './util';
 
 const BUILTIN_SECRETS = new Set(['github_token']);
 
@@ -193,22 +203,30 @@ export const undeclaredSecretRef = defineRule({
     why:
       'Inside a called workflow only declared (or inherited) secrets exist. Reading anything else yields an empty string, ' +
       'so authentication steps fail late or, worse, fall back to anonymous access.',
-    fix: 'Declare the secret under `on.workflow_call.secrets` and pass it from every caller, or use `secrets: inherit`.',
+    fix:
+      'Declare the secret under `on.workflow_call.secrets` and pass it from every caller, or use `secrets: inherit`. ' +
+      "Callers whose `with:` values make the reading job's or step's `if:` false (e.g. an omitted input in " +
+      "`if: contains(inputs.registries, 'docker.io')`) are not counted: the read never runs for them.",
   },
   check(ctx) {
     for (const wf of ctx.index.project.workflows.values()) {
       if (!wf.call) continue;
       const strictCallers = ctx.index.callersOf(wf.path).filter((c) => !c.job.secretsInherit);
       if (strictCallers.length === 0) continue;
-      for (const { ref } of refsOf(wf)) {
+      const resolvers = new Map(strictCallers.map((c) => [c, callerInputsResolver(wf, c)]));
+      for (const { site, ref } of refsOf(wf)) {
         const name = ref.path[0];
         if (ref.context !== 'secrets' || !name || name === '*' || name === '?') continue;
         if (BUILTIN_SECRETS.has(name.toLowerCase()) || lookup(wf.call.secrets, name)) continue;
+        // A caller whose inputs make the job's or step's `if:` false never runs the read.
+        const guards = guardsOf(wf, site);
+        const reached = strictCallers.filter((c) => !guards.some((g) => isFalse(g, resolvers.get(c)!)));
+        if (reached.length === 0) continue;
         ctx.report({
-          message: `${wf.path} reads secrets.${name}, which is not declared — it is empty when called from ${strictCallers.length} caller${strictCallers.length > 1 ? 's' : ''} without \`secrets: inherit\``,
+          message: `${wf.path} reads secrets.${name}, which is not declared — it is empty when called from ${reached.length} caller${reached.length > 1 ? 's' : ''} without \`secrets: inherit\``,
           loc: ref.loc,
           symbol: sym.secret(wf.path, name),
-          related: strictCallers.slice(0, 3).map((c) => ({
+          related: reached.slice(0, 3).map((c) => ({
             loc: c.job.uses?.loc ?? c.job.loc,
             message: `${c.caller.path} › jobs.${c.job.id} passes explicit secrets`,
           })),
@@ -217,6 +235,39 @@ export const undeclaredSecretRef = defineRule({
     }
   },
 });
+
+/**
+ * The called workflow's `inputs` as one caller sets them: literal `with:` values, and for omitted inputs the default
+ * (or `false`, `0`, `''` by type, as GitHub does). Values computed from expressions at runtime stay unknown.
+ */
+function callerInputsResolver(callee: WorkflowDecl, call: CallSite): ContextResolver {
+  return ({ context, path }) => {
+    if (context !== 'inputs') return undefined;
+    if (path.length !== 1 || !path[0]) return UNKNOWN;
+    const decl = lookup(callee.call?.inputs ?? {}, path[0]);
+    if (!decl) return UNKNOWN;
+    const b = lookup(call.job.with, decl.name);
+    if (b) return b.site ? evaluateTemplate(b.site.text, () => undefined) : known(b.value);
+    if (decl.hasDefault) {
+      const d = decl.default ?? null;
+      return typeof d === 'string' && d.includes('${{') ? UNKNOWN : known(d);
+    }
+    return known(decl.type === 'boolean' ? false : decl.type === 'number' ? 0 : '');
+  };
+}
+
+/** The `if:` sites that decide whether a site in a job or step is evaluated. */
+function guardsOf(wf: WorkflowDecl, site: ExprSite): ExprSite[] {
+  const job = site.job !== undefined ? wf.jobs[site.job] : undefined;
+  const step = job && site.step !== undefined ? job.steps[site.step] : undefined;
+  return [job?.ifSite, step?.ifSite].filter((g): g is ExprSite => g !== undefined && g !== site);
+}
+
+/** True when a condition is false whatever the runtime-only parts evaluate to. */
+function isFalse(guard: ExprSite, resolve: ContextResolver): boolean {
+  const ast = isWholeExpression(guard) ? guard.segments[0]!.expr.ast : undefined;
+  return ast !== undefined && definitelyFalsy(ast, resolve);
+}
 
 export const secretRules: RuleDefinition[] = [
   missingRequiredSecret,

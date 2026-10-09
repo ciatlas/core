@@ -26,7 +26,10 @@ describe('fixture repositories', () => {
       '.github/workflows/pipeline.yml',
       '.github/workflows/tests.yml',
       '.github/workflows/run-suite.yml',
+      // `if: inputs.config != ''` in the callee: why an empty optional input is still an error here
+      '.github/workflows/run-suite.yml',
     ]);
+    expect(f!.severity).toBe('error');
   });
 
   for (const name of readdirSync(FIXTURES).filter((n) => !n.startsWith('.'))) {

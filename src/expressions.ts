@@ -526,6 +526,141 @@ function evalCall(e: FunctionCall, resolve: ContextResolver): EvalValue {
 }
 
 /**
+ * How a condition uses the value of a context reference:
+ * - `truthiness`: the value decides the condition as it is (`inputs.x`, `!inputs.x`, `inputs.x && …`);
+ * - `compared`: it is compared with a constant or searched for one (`inputs.x == 'yes'`, `contains(inputs.x, 'a')`),
+ *   which answers definitely for an empty value too;
+ * - `fallback`: an empty value is replaced (`inputs.x || 'default'` inside a comparison or function argument);
+ * - `value`: anything else (an argument of `fromJSON`, a comparison with another runtime value, …).
+ */
+export type ConditionUse = 'truthiness' | 'compared' | 'fallback' | 'value';
+
+/** True when an expression reads no context and calls no runtime-only function, so its value is fixed. */
+function isConstant(e: Expr): boolean {
+  if (e instanceof Literal) return true;
+  if (e instanceof Grouping) return isConstant(e.group);
+  if (e instanceof Unary) return isConstant(e.expr);
+  if (e instanceof Binary) return isConstant(e.left) && isConstant(e.right);
+  if (e instanceof Logical) return e.args.every(isConstant);
+  if (e instanceof FunctionCall) {
+    const name = e.functionName.lexeme.toLowerCase();
+    return (
+      !['success', 'failure', 'cancelled', 'always', 'hashfiles'].includes(name) && e.args.every(isConstant)
+    );
+  }
+  return false;
+}
+
+/** Functions that test a value against another: `contains(inputs.x, 'a')` answers definitely for an empty value. */
+const TEST_FUNCTIONS = new Set(['contains', 'startswith', 'endswith']);
+/** Functions whose result is their (converted) argument, so a comparison of the result compares the argument. */
+const VALUE_FUNCTIONS = new Set(['format', 'join', 'tojson']);
+
+/**
+ * How the condition `expr` uses each context reference it reads, keyed by the reference's start offset (`ExprRef.start`).
+ * `whole` is false for a condition with text around its `${{ }}` (a string, so every value is just interpolated).
+ */
+export function conditionUses(expr: ParsedExpression, whole = true): Map<number, ConditionUse> {
+  const out = new Map<number, ConditionUse>();
+  if (!expr.ast) return out;
+  const source = expr.source;
+  const visit = (e: Expr, use: ConditionUse): void => {
+    if (e instanceof Grouping) {
+      visit(e.group, use);
+      return;
+    }
+    if (e instanceof ContextAccess || e instanceof IndexAccess) {
+      let cur: Expr = e;
+      while (cur instanceof IndexAccess) {
+        if (!(cur.index instanceof Literal) && !(cur.index instanceof Star)) visit(cur.index, 'value');
+        cur = cur.expr;
+      }
+      if (cur instanceof ContextAccess) {
+        const t = cur.name as Tok;
+        out.set(offsetOf(source, t.range.start.line, t.range.start.column), use);
+      } else visit(cur, 'value');
+      return;
+    }
+    if (e instanceof Unary) {
+      visit(e.expr, 'truthiness');
+      return;
+    }
+    if (e instanceof Logical) {
+      const isAnd = e.operator.type === TokenType.AND;
+      for (const [i, arg] of e.args.entries()) {
+        const fallback = !isAnd && i < e.args.length - 1 && use !== 'truthiness';
+        visit(arg, fallback ? 'fallback' : use);
+      }
+      return;
+    }
+    if (e instanceof Binary) {
+      const [l, r] = [isConstant(e.left), isConstant(e.right)];
+      visit(e.left, r ? 'compared' : 'value');
+      visit(e.right, l ? 'compared' : 'value');
+      return;
+    }
+    if (e instanceof FunctionCall) {
+      const name = e.functionName.lexeme.toLowerCase();
+      if (TEST_FUNCTIONS.has(name)) {
+        for (const [i, arg] of e.args.entries()) {
+          const other = e.args.some((a, j) => j !== i && isConstant(a));
+          visit(arg, other ? 'compared' : 'value');
+        }
+        return;
+      }
+      const passes = VALUE_FUNCTIONS.has(name) && use === 'compared';
+      for (const arg of e.args) visit(arg, passes ? 'compared' : 'value');
+    }
+  };
+  visit(expr.ast, whole ? 'truthiness' : 'value');
+  return out;
+}
+
+/**
+ * The context references that are the subject of a fallback: a non-last operand of `a || b` (parentheses and nested
+ * `||` included), so an empty value is replaced by the operands after it. Keyed by the reference's start offset
+ * (`ExprRef.start`), with the whole `||` expression, whose value is what the read turns into. References that are not
+ * such an operand (the last one, a comparison's, a function argument's) are absent.
+ */
+export function fallbacksOf(expr: ParsedExpression): Map<number, Expr> {
+  const out = new Map<number, Expr>();
+  if (!expr.ast) return out;
+  const unwrap = (e: Expr): Expr => (e instanceof Grouping ? unwrap(e.group) : e);
+  const isOr = (e: Expr): e is Logical => e instanceof Logical && e.operator.type === TokenType.OR;
+  const operands = (e: Expr): Expr[] => {
+    const u = unwrap(e);
+    return isOr(u) ? u.args.flatMap(operands) : [u];
+  };
+  const refStart = (e: Expr): number | undefined => {
+    let cur = e;
+    while (cur instanceof IndexAccess) cur = cur.expr;
+    if (!(cur instanceof ContextAccess)) return undefined;
+    const t = cur.name as Tok;
+    return offsetOf(expr.source, t.range.start.line, t.range.start.column);
+  };
+  const visit = (e: Expr): void => {
+    const u = unwrap(e);
+    if (isOr(u)) {
+      const ops = operands(u);
+      for (const [i, op] of ops.entries()) {
+        const start = i < ops.length - 1 ? refStart(op) : undefined;
+        if (start !== undefined) out.set(start, u);
+        visit(op);
+      }
+    } else if (u instanceof IndexAccess) {
+      visit(u.expr);
+      if (!(u.index instanceof Literal) && !(u.index instanceof Star)) visit(u.index);
+    } else if (u instanceof Unary) visit(u.expr);
+    else if (u instanceof Binary) {
+      visit(u.left);
+      visit(u.right);
+    } else if (u instanceof Logical || u instanceof FunctionCall) for (const arg of u.args) visit(arg);
+  };
+  visit(expr.ast);
+  return out;
+}
+
+/**
  * True when a condition is falsy whatever the runtime-only parts evaluate to — e.g. `always() && matrix.k` in a
  * combination without `k`. Used to decide that a guarded step or job is skipped; values are never derived from it.
  */

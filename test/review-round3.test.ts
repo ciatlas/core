@@ -406,7 +406,7 @@ describe('large matrices (#4, #8)', () => {
                   flag: \${{ matrix.extra }}\${{ matrix.other }}
       `,
       '.github/actions/act/action.yml':
-        'name: a\ndescription: b\ninputs:\n  flag: {}\nruns:\n  using: composite\n  steps: []\n',
+        'name: a\ndescription: b\ninputs:\n  flag: { required: true }\nruns:\n  using: composite\n  steps: []\n',
     });
     expect(byCode(r, 'FP401')[0]!.message).toContain(
       'empty in 2 of 4 matrix combinations — not defined there: matrix.extra (2), matrix.other (2)',

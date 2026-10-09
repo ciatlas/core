@@ -109,4 +109,68 @@ describe('FP205 undeclared-secret-ref', () => {
     });
     expect(byCode(r, 'FP205')).toEqual([]);
   });
+
+  describe('callers for which the read never runs (mastodon build-container-image.yml)', () => {
+    const files = (callers: string, guard = "contains(inputs.push_to_images, 'tootsuite')", jobIf = '') => ({
+      [`${WF}/callers.yml`]: `on: push\njobs:\n${callers}`,
+      [`${WF}/build.yml`]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              push_to_images: { type: string }
+              push: { type: boolean }
+              registry: { type: string, default: docker.io }
+        jobs:
+          build:
+            runs-on: x${jobIf}
+            steps:
+              - name: Log in to Docker Hub
+                if: ${guard}
+                uses: docker/login-action@v3
+                with:
+                  username: \${{ secrets.DOCKERHUB_USERNAME }}
+      `,
+    });
+    const call = (id: string, w = '', s = '') =>
+      `  ${id}:\n    uses: ./.github/workflows/build.yml\n${w ? `    with:\n${w}` : ''}${s}`;
+    const fp205 = (f: Record<string, string>) => byCode(lint(f), 'FP205').map((x) => x.message);
+
+    it('skips callers that omit the input the step requires', () => {
+      expect(
+        fp205(
+          files(
+            call('test', '      push_to_images: ""\n') +
+              call('test2') +
+              call('push', '      push_to_images: tootsuite/mastodon\n', '    secrets: inherit\n'),
+          ),
+        ),
+      ).toEqual([]);
+    });
+
+    it('still counts callers whose values make it run, or that pass values only known at runtime', () => {
+      expect(
+        fp205(
+          files(
+            call('test') +
+              call('nightly', '      push_to_images: tootsuite/mastodon\n') +
+              call('dyn', '      push_to_images: ${{ github.event.inputs.images }}\n'),
+          ),
+        ),
+      ).toEqual([
+        '.github/workflows/build.yml reads secrets.DOCKERHUB_USERNAME, which is not declared — it is empty when called from 2 callers without `secrets: inherit`',
+      ]);
+    });
+
+    it('applies defaults and type defaults, and job conditions', () => {
+      // `push` is a boolean: omitted means false.
+      expect(fp205(files(call('a'), 'inputs.push'))).toEqual([]);
+      // `registry` defaults to docker.io.
+      expect(fp205(files(call('a'), "inputs.registry == 'docker.io'"))).toHaveLength(1);
+      expect(fp205(files(call('a', '      registry: ghcr.io\n'), "inputs.registry == 'docker.io'"))).toEqual(
+        [],
+      );
+      expect(fp205(files(call('a'), 'always()', '\n            if: inputs.push'))).toEqual([]);
+      expect(fp205(files(call('a'), 'always()', '\n            if: inputs.registry'))).toHaveLength(1);
+    });
+  });
 });

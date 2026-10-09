@@ -168,23 +168,207 @@ describe('FP104 unused-input', () => {
 });
 
 describe('FP105 optional-input-no-default-in-condition', () => {
-  const w = (callerWith: string) =>
-    lint({
-      [`${WF}/caller.yml`]: `on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    with:\n      name: n\n${callerWith}`,
-      [`${WF}/callee.yml`]: callee.replace(
-        'if: inputs.flag && inputs.count > 0',
-        "if: inputs.optional == 'gpu'",
-      ),
-    });
+  const w = (callerWith: string, condition = 'inputs.optional', opts?: Parameters<typeof lint>[1]) =>
+    lint(
+      {
+        [`${WF}/caller.yml`]: `on: push\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n    with:\n      name: n\n${callerWith}`,
+        [`${WF}/callee.yml`]: callee.replace('if: inputs.flag && inputs.count > 0', `if: ${condition}`),
+      },
+      opts,
+    );
+  /** Nothing is published, so the local callers are all the callers there are. */
+  const internal = { config: { impact: { publish: [] } } };
 
   it('flags the condition when some caller omits the input', () => {
     const [f] = byCode(w(''), 'FP105');
-    expect(f?.message).toContain('optional input "optional"');
+    expect(f?.message).toBe(
+      `Condition reads optional input "optional", which has no default and is '' when omitted`,
+    );
     expect(f?.related.map((r) => r.message)).toContain('.github/workflows/caller.yml › jobs.call omits it');
   });
 
-  it('is quiet when every caller passes the input', () => {
-    expect(byCode(w('      optional: gpu\n'), 'FP105')).toEqual([]);
+  it('is quiet when every caller of an internal workflow passes the input', () => {
+    expect(byCode(w('      optional: gpu\n', 'inputs.optional', internal), 'FP105')).toEqual([]);
+    // `_`-prefixed reusable workflows are internal by default.
+    const r = lint({
+      [`${WF}/caller.yml`]:
+        'on: push\njobs:\n  call:\n    uses: ./.github/workflows/_callee.yml\n    with:\n      optional: gpu\n',
+      [`${WF}/_callee.yml`]: callee.replace('if: inputs.flag && inputs.count > 0', 'if: inputs.optional'),
+    });
+    expect(byCode(r, 'FP105')).toEqual([]);
+  });
+
+  it('still flags a published workflow that every local caller passes the input to', () => {
+    const [f] = byCode(w('      optional: gpu\n'), 'FP105');
+    expect(f?.related.map((r) => r.message)).toEqual([
+      'declared optional without a default; every caller here passes it, but this unit is published (see `impact.publish`), so callers in other repositories can omit it',
+    ]);
+  });
+
+  it('flags the root action.yml even when its self-test passes the input (it is published)', () => {
+    const files = (publish?: string[]) =>
+      lint(
+        {
+          'action.yml': yaml`
+            name: published
+            inputs:
+              token: { required: false }
+            runs:
+              using: composite
+              steps:
+                - if: inputs.token
+                  run: echo has token
+                  shell: bash
+          `,
+          [`${WF}/selftest.yml`]: yaml`
+            on: push
+            jobs:
+              t:
+                runs-on: x
+                steps:
+                  - uses: ./
+                    with:
+                      token: \${{ secrets.X }}
+          `,
+        },
+        publish ? { config: { impact: { publish } } } : {},
+      );
+    expect(byCode(files(), 'FP105').map((f) => at(f))).toEqual(['action.yml:7:11']);
+    expect(byCode(files([]), 'FP105')).toEqual([]);
+  });
+
+  it.each([
+    "inputs.optional == 'yes'",
+    "inputs.optional != 'true'",
+    "'gpu' == inputs.optional",
+    "inputs.optional != ''",
+    'inputs.optional == null',
+    "contains(inputs.optional, 'tootsuite')",
+    `contains(fromJSON('["core","v1"]'), inputs.optional)`,
+    "startsWith(inputs.optional, 'v')",
+    "github.repository_owner == 'pytorch' && (inputs.optional == 'H100' || inputs.optional == 'A100')",
+    // langchain _release.yml: a fallback inside a test
+    "startsWith(inputs.optional || inputs.name, 'libs/core')",
+    "format('{0}-x', inputs.optional) == '-x'",
+    // terraform-provider-aws team_working_board: the explicit check guards the other read
+    "inputs.optional != '' && inputs.optional != steps.get_status.outputs.current",
+  ])('is quiet when the condition handles the omitted case: %s', (condition) => {
+    const r = w('', `\${{ ${condition} }}`);
+    expect(codes(r).filter((c) => ['FP105', 'FP502', 'FP504'].includes(c))).toEqual([]);
+  });
+
+  it.each([
+    'inputs.optional',
+    '${{ !inputs.optional }}',
+    "inputs.optional && github.event_name == 'push'",
+    '${{ inputs.optional && always() }}',
+    'inputs.optional == github.ref',
+    "fromJSON(inputs.optional).enabled && github.event_name == 'push'",
+  ])('flags a condition decided by the value as it is: %s', (condition) => {
+    expect(byCode(w('', condition), 'FP105')).toHaveLength(1);
+  });
+
+  it('asks the users of a local action too (the identical workflow input was already quiet)', () => {
+    const files = (stepWith: string) => ({
+      [`${WF}/main.yml`]: `on: push\njobs:\n  s:\n    runs-on: x\n    steps:\n      - uses: ./.github/actions/a\n${stepWith}`,
+      '.github/actions/a/action.yml': yaml`
+        name: a
+        inputs:
+          mode: { required: false }
+        runs:
+          using: composite
+          steps:
+            - if: inputs.mode
+              run: echo fast
+              shell: bash
+      `,
+    });
+    expect(byCode(lint(files('        with: { mode: fast }\n')), 'FP105')).toEqual([]);
+    const [f] = byCode(lint(files('')), 'FP105');
+    expect(f?.related.map((r) => r.message)).toEqual([
+      'declared optional without a default',
+      '.github/workflows/main.yml › jobs.s › step #1 omits it',
+    ]);
+  });
+
+  describe('when a caller passes one of the inputs a condition reads (#38)', () => {
+    const condition = 'if: ${{ inputs.app-id || inputs.client-id }}';
+    const declared = '{ type: string, required: false }';
+
+    it('reports both for a published workflow, since other repositories can omit either', () => {
+      const r = lint({
+        [`${WF}/caller.yml`]: `on: push\njobs:\n  c:\n    uses: ./.github/workflows/token.yml\n    with:\n      client-id: \${{ vars.CLIENT_ID }}\n`,
+        [`${WF}/token.yml`]: yaml`
+          on:
+            workflow_call:
+              inputs:
+                app-id: ${declared}
+                client-id: ${declared}
+          jobs:
+            j:
+              runs-on: x
+              steps:
+                - ${condition}
+                  run: echo token
+        `,
+      });
+      expect(byCode(r, 'FP105').map((f) => f.message)).toEqual([
+        `Condition reads optional input "app-id", which has no default and is '' when omitted (so is "client-id", read by the same condition)`,
+        `Condition reads optional input "client-id", which has no default and is '' when omitted (so is "app-id", read by the same condition)`,
+      ]);
+    });
+
+    it('reports the omitted one for a local action, saying every caller passes the other', () => {
+      const r = lint({
+        [`${WF}/w.yml`]: `on: push\njobs:\n  a:\n    runs-on: x\n    steps:\n      - uses: ./.github/actions/token\n        with:\n          client-id: \${{ vars.CLIENT_ID }}\n`,
+        '.github/actions/token/action.yml': yaml`
+          name: token
+          inputs:
+            app-id: { required: false }
+            client-id: { required: false }
+          runs:
+            using: composite
+            steps:
+              - ${condition}
+                run: echo token
+                shell: bash
+        `,
+      });
+      expect(byCode(r, 'FP105').map((f) => `${at(f)} ${f.message}`)).toEqual([
+        `.github/actions/token/action.yml:8:15 Condition reads optional input "app-id", which has no default and is '' when omitted ("client-id", also read by this condition, is passed by every caller)`,
+      ]);
+    });
+  });
+
+  it('reports every optional input a condition depends on, each naming the others (#38)', () => {
+    const r = lint({
+      [`${WF}/w.yml`]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              app-id: { type: string, required: false }
+              client-id: { type: string, required: false }
+              private-key: { type: string, required: false }
+        jobs:
+          j:
+            runs-on: x
+            steps:
+              - if: \${{ inputs.app-id || inputs.client-id }}
+                run: echo token
+              - if: \${{ inputs.private-key }}
+                run: echo key
+      `,
+    });
+    expect(byCode(r, 'FP105').map((f) => `${at(f)} ${f.message}`)).toEqual([
+      `${WF}/w.yml:11:17 Condition reads optional input "app-id", which has no default and is '' when omitted (so is "client-id", read by the same condition)`,
+      `${WF}/w.yml:11:34 Condition reads optional input "client-id", which has no default and is '' when omitted (so is "app-id", read by the same condition)`,
+      `${WF}/w.yml:13:17 Condition reads optional input "private-key", which has no default and is '' when omitted`,
+    ]);
+    expect(byCode(r, 'FP105').map((f) => f.symbol)).toEqual([
+      `${WF}/w.yml#inputs.app-id`,
+      `${WF}/w.yml#inputs.client-id`,
+      `${WF}/w.yml#inputs.private-key`,
+    ]);
   });
 
   it('ignores booleans (false is a natural default)', () => {
