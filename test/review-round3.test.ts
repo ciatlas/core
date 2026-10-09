@@ -153,13 +153,12 @@ describe('config edge cases (#3, #11, #14)', () => {
   const files = {
     [`${WF}/ci.yml`]: 'on: push\njobs:\n  j:\n    runs-on: x\n    steps: [{ run: x }]\n',
   };
-  const run = (config: Record<string, unknown>, pluginsSkipped = false) =>
+  const run = (config: Record<string, unknown>) =>
     analyze({
       root: '/v',
       fs: memoryFileSystem(files),
       validateSchema: false,
       config: parseConfig(config),
-      pluginsSkipped,
       now: new Date('2026-10-08T12:00:00Z'),
       repository: 'a/b',
     });
@@ -170,7 +169,7 @@ describe('config edge cases (#3, #11, #14)', () => {
     expect(() => parseConfigText(`${lines.join('\n')}\n`)).toThrow(ConfigError);
   });
 
-  it('keeps typos of built-in rules fatal when plugins are skipped', () => {
+  it('keeps typos of built-in rules fatal, and ignores rules that are not loaded', () => {
     const base = { plugins: ['./p.mjs'] };
     const issues = (fn: () => unknown) => {
       try {
@@ -180,20 +179,17 @@ describe('config edge cases (#3, #11, #14)', () => {
       }
       return [];
     };
-    expect(issues(() => run({ ...base, rules: { 'unused-inptu': 'off' } }, true))).toEqual([
+    expect(issues(() => run({ ...base, rules: { 'unused-inptu': 'off' } }))).toEqual([
       'rules.unused-inptu: unknown rule (did you mean unused-input?)',
     ]);
     expect(() =>
-      run({ ...base, overrides: [{ rule: 'FP10l', file: WF, reason: 'typo of a built-in rule' }] }, true),
+      run({ ...base, overrides: [{ rule: 'FP10l', file: WF, reason: 'typo of a built-in rule' }] }),
     ).toThrow(ConfigError);
-    const r = run(
-      {
-        ...base,
-        rules: { 'acme-no-echo': 'error' },
-        overrides: [{ rule: 'ACME601', file: WF, reason: 'accepted for the migration' }],
-      },
-      true,
-    );
+    const r = run({
+      ...base,
+      rules: { 'acme-no-echo': 'error' },
+      overrides: [{ rule: 'ACME601', file: WF, reason: 'accepted for the migration' }],
+    });
     expect(r.unloadedRules).toEqual([
       'rules.acme-no-echo: unknown rule "acme-no-echo"',
       'overrides.0.rule: unknown rule "ACME601"',

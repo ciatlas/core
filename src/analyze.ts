@@ -55,11 +55,6 @@ export interface AnalyzeOptions {
   overrideLocs?: Loc[];
   /** Raw config text, so findings about the config can show a code frame. */
   configText?: string;
-  /**
-   * The config lists plugins that were deliberately not loaded (e.g. the action on untrusted events): rules and
-   * overrides that name unknown rules are then tolerated instead of being a config error.
-   */
-  pluginsSkipped?: boolean;
 }
 
 /** A finding that an override accepted. */
@@ -105,22 +100,22 @@ export interface AnalysisResult {
   /** Impact mode's changes and verdict, when it ran. */
   impact?: ImpactResult;
   /**
-   * With plugins skipped: config entries naming rules that are not loaded (presumably plugin rules). They are ignored
-   * for this run; the caller should show them as warnings.
+   * Config entries naming rules that are not loaded, such as the rules of a plugin that this run does not load. They
+   * are ignored for this run, and logged as a warning.
    */
   unloadedRules?: string[];
   durationMs: number;
 }
 
 /**
- * Sorts config references to unknown rules. With plugins skipped, a name may belong to a plugin rule and is tolerated —
- * unless it uses the built-in `FP` prefix or is a near miss of a built-in rule, which makes it a typo.
+ * Sorts config references to unknown rules. A name may belong to the rule of a plugin that this run does not load (the
+ * repository's plugins skipped, or organization rules that only a wrapper loads) and is tolerated — unless it uses the
+ * built-in `FP` prefix or is a near miss of a loaded rule, which makes it a typo.
  */
 function triageUnknown(
   registry: RuleRegistry,
   key: string,
   path: string,
-  allowUnknown: boolean | undefined,
   out: { hard: string[]; tolerated: string[] },
 ) {
   const guess = didYouMean(
@@ -128,7 +123,7 @@ function triageUnknown(
     registry.all().flatMap((r) => [r.code, r.name]),
   );
   const issue = `${path}: unknown rule${guess ? ` (did you mean ${guess}?)` : ` "${key}"`}`;
-  if (allowUnknown && !guess && !/^FP\d/i.test(key)) out.tolerated.push(issue);
+  if (!guess && !/^FP\d/i.test(key)) out.tolerated.push(issue);
   else out.hard.push(issue);
 }
 
@@ -137,7 +132,7 @@ const SEVERITY_ORDER: Record<Severity, number> = { error: 0, warning: 1, info: 2
 export function resolveSeverities(
   registry: RuleRegistry,
   config: FlowpactConfig,
-  opts: { allowUnknown?: boolean; logger?: Logger; unloaded?: string[] } = {},
+  opts: { logger?: Logger; unloaded?: string[] } = {},
 ): Map<string, SeveritySetting> {
   const out = new Map<string, SeveritySetting>();
   for (const rule of registry.all()) out.set(rule.code, rule.defaultSeverity);
@@ -145,7 +140,7 @@ export function resolveSeverities(
   for (const [key, setting] of Object.entries(config.rules)) {
     const rule = registry.get(key);
     if (!rule) {
-      triageUnknown(registry, key, `rules.${key}`, opts.allowUnknown, unknown);
+      triageUnknown(registry, key, `rules.${key}`, unknown);
       continue;
     }
     out.set(rule.code, setting);
@@ -233,9 +228,9 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
   for (const wf of project.workflows.values())
     for (const job of Object.values(wf.jobs)) if (job.matrix) matrix(wf, job);
 
-  const allowUnknown = opts.pluginsSkipped === true;
   const unloaded: string[] = [];
-  const severities = resolveSeverities(registry, config, { allowUnknown, logger, unloaded });
+  // Warned about once, with the overrides' entries, below.
+  const severities = resolveSeverities(registry, config, { unloaded });
   const unknownOnly = (opts.only ?? []).filter((o) => !registry.get(o));
   if (unknownOnly.length) {
     const names = registry.all().flatMap((r) => [r.code, r.name]);
@@ -341,8 +336,10 @@ export function analyze(opts: AnalyzeOptions): AnalysisResult {
     registry,
     opts.overrideLocs ?? [],
     opts.now ?? new Date(),
-    { allowUnknown, unloaded },
+    { unloaded },
   );
+  if (unloaded.length)
+    logger.warn(`ignoring config entries for rules that are not loaded: ${unloaded.join('; ')}`);
   for (const u of applied.usage) {
     const code = registry.get(u.override.rule)?.code ?? '';
     const severity = severities.get(code);
@@ -564,13 +561,13 @@ export function applyOverrides(
   registry: RuleRegistry,
   locs: Loc[],
   now: Date,
-  opts: { allowUnknown?: boolean; unloaded?: string[] } = {},
+  opts: { unloaded?: string[] } = {},
 ): { kept: Finding[]; suppressed: SuppressedFinding[]; usage: OverrideUsage[] } {
   const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const unknown = { hard: [] as string[], tolerated: [] as string[] };
   const usage: (OverrideUsage & { code: string })[] = config.overrides.map((override, index) => {
     const rule = registry.get(override.rule);
-    if (!rule) triageUnknown(registry, override.rule, `overrides.${index}.rule`, opts.allowUnknown, unknown);
+    if (!rule) triageUnknown(registry, override.rule, `overrides.${index}.rule`, unknown);
     const daysLeft = override.expires
       ? Math.round((Date.parse(`${override.expires}T00:00:00Z`) - today) / DAY)
       : undefined;

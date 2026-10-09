@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { isMap, isSeq, LineCounter, parseDocument } from 'yaml';
 import { z } from 'zod';
 import { matchesPattern } from './glob';
@@ -186,17 +186,77 @@ export class ConfigError extends Error {
 }
 
 export interface LoadedConfig {
+  /** The repository's config, on top of the base config when one was given. */
   config: FlowpactConfig;
   /** Repo-relative path of the config file, when one was found. */
   file?: string;
+  /** The base config (`--base-config`): its path as given, and its contents for `parseConfigText`. */
+  base?: { file: string; data: Record<string, unknown> };
   /** Raw text of the config file, for code frames. */
   text?: string;
   /** Location of each `overrides[i]` entry in the config file. */
   overrideLocs?: Loc[];
 }
 
-/** Finds and validates the config. An explicit `--config` path must exist; the default location is optional. */
-export function loadConfig(root: string, explicit?: string): LoadedConfig {
+/**
+ * Keys a base config cannot set: they name files of one repository, or (`plugins`) run code, which a wrapper loads
+ * with `--plugin` instead.
+ */
+const REPOSITORY_ONLY = ['repository', 'overrides', 'matrixShapes', 'plugins'] as const;
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/**
+ * The repository's raw config on top of a base config's: maps (`rules`, `limits`, `impact`, …) merge key by key and the
+ * repository's value wins; lists (`ignore`, `generated.include`, …) add up.
+ */
+export function mergeConfig(base: unknown, repo: unknown): unknown {
+  if (isPlainObject(base) && isPlainObject(repo)) {
+    const out: Record<string, unknown> = { ...base };
+    for (const [k, v] of Object.entries(repo)) out[k] = k in base ? mergeConfig(base[k], v) : v;
+    return out;
+  }
+  if (Array.isArray(base) && Array.isArray(repo)) return [...new Set([...base, ...repo])];
+  return repo === undefined ? base : repo;
+}
+
+/**
+ * Reads a base config (`--base-config`): organization defaults under the repository's config. It is validated on its
+ * own, so a problem in it names its file.
+ */
+export function loadBaseConfig(file: string): Record<string, unknown> {
+  const full = isAbsolute(file) ? file : resolve(process.cwd(), file);
+  if (!existsSync(full)) throw new ConfigError(`Base config file not found: ${file}`, file);
+  const data = readYaml(readFileSync(full, 'utf8'), file).data ?? {};
+  if (!isPlainObject(data))
+    throw new ConfigError(`Invalid base config in ${file}`, file, ['(root): expected a map']);
+  const repositoryOnly = [
+    ...REPOSITORY_ONLY.filter((k) => k in data),
+    ...(isPlainObject(data.impact) && 'publish' in data.impact ? ['impact.publish'] : []),
+  ];
+  if (repositoryOnly.length) {
+    throw new ConfigError(
+      `Invalid base config in ${file}`,
+      file,
+      repositoryOnly.map((k) =>
+        k === 'plugins'
+          ? 'plugins: not in a base config; load organization rules with --plugin'
+          : `${k}: belongs in the repository's config, not in a base config`,
+      ),
+    );
+  }
+  parseConfig(data, file);
+  return data;
+}
+
+/**
+ * Finds and validates the config. An explicit `--config` path must exist; the default location is optional. With
+ * `base`, the config found goes on top of that base config (see `mergeConfig`).
+ */
+export function loadConfig(root: string, explicit?: string, opts: { base?: string } = {}): LoadedConfig {
+  const base = opts.base !== undefined ? loadBaseConfig(opts.base) : undefined;
+  const withBase = base ? { base: { file: opts.base!, data: base } } : {};
   const candidates = explicit ? [explicit] : CONFIG_FILES.map((f) => join(root, CONFIG_DIR, f));
   for (const abs of candidates) {
     const full = explicit && !abs.startsWith('/') ? join(process.cwd(), abs) : abs;
@@ -210,30 +270,38 @@ export function loadConfig(root: string, explicit?: string): LoadedConfig {
       throw new ConfigError(`${rel} links outside the repository; flowpact does not read it`, rel);
     }
     const text = readFileSync(full, 'utf8');
-    return { ...parseConfigText(text, rel), file: rel, text };
+    return { ...parseConfigText(text, rel, base), file: rel, text, ...withBase };
   }
-  return { config: defaultConfig() };
+  return { config: base ? parseConfig(base, opts.base) : defaultConfig(), ...withBase };
 }
 
-/** Parses config YAML, keeping the location of each override for findings about it. */
-export function parseConfigText(
-  text: string,
-  file = 'flowpact.config.yml',
-): { config: FlowpactConfig; overrideLocs: Loc[] } {
+function readYaml(text: string, file: string) {
   const lineCounter = new LineCounter();
-  const lines = text.split(/\r?\n/);
   const doc = parseDocument(text, { lineCounter, prettyErrors: false });
   if (doc.errors.length) {
     throw new ConfigError(`Config file is not valid YAML: ${doc.errors[0]!.message.split('\n')[0]}`, file);
   }
-  let data: unknown;
   try {
-    data = doc.toJS() ?? {};
+    return { doc, lineCounter, data: doc.toJS() as unknown };
   } catch (err) {
     // e.g. yaml's alias limit ("Excessive alias count …").
     throw new ConfigError(`Config file cannot be read: ${(err as Error).message.split('\n')[0]}`, file);
   }
-  const config = parseConfig(data, file);
+}
+
+/**
+ * Parses config YAML, keeping the location of each override for findings about it. With `base` (from
+ * `loadBaseConfig`), the result is this config on top of it.
+ */
+export function parseConfigText(
+  text: string,
+  file = 'flowpact.config.yml',
+  base?: Record<string, unknown>,
+): { config: FlowpactConfig; overrideLocs: Loc[] } {
+  const lines = text.split(/\r?\n/);
+  const { doc, lineCounter, data: raw } = readYaml(text, file);
+  const data = raw ?? {};
+  const config = parseConfig(base ? mergeConfig(base, data) : data, file);
   const overridesNode = isMap(doc.contents) ? doc.contents.get('overrides', true) : undefined;
   const overrideLocs: Loc[] = isSeq(overridesNode)
     ? overridesNode.items.map((item) => {

@@ -287,23 +287,24 @@ describe('paths, plugins and contracts (#11, #12, #13, #15, #18)', () => {
     expect(codes(r)).toEqual(['FP104']);
   });
 
-  it('tolerates config entries for rules of skipped plugins', () => {
+  it('tolerates config entries for rules that are not loaded, such as plugin rules', () => {
     const config = parseConfig({
       plugins: ['./x.mjs'],
       rules: { 'acme-rule': 'warning' },
       overrides: [{ rule: 'ACME101', file: '.github', reason: 'accepted for the migration (JIRA-1)' }],
     });
-    const run = (pluginsSkipped: boolean) =>
-      analyze({
-        root: '/v',
-        fs: memoryFileSystem(files),
-        validateSchema: false,
-        config,
-        pluginsSkipped,
-        repository: 'a/b',
-      });
-    expect(() => run(false)).toThrow(/unknown rules/);
-    expect(codes(run(true))).toEqual(['FP104']);
+    const r = analyze({
+      root: '/v',
+      fs: memoryFileSystem(files),
+      validateSchema: false,
+      config,
+      repository: 'a/b',
+    });
+    expect(codes(r)).toEqual(['FP104']);
+    expect(r.unloadedRules).toEqual([
+      'rules.acme-rule: unknown rule "acme-rule"',
+      'overrides.0.rule: unknown rule "ACME101"',
+    ]);
   });
 
   it('keeps consumer entries of a caller that does not parse', () => {

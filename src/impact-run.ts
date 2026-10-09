@@ -12,6 +12,7 @@ import {
   ConfigError,
   defaultConfig,
   type FlowpactConfig,
+  parseConfig,
   parseConfigText,
 } from './config';
 import { type GitError, gitFileSystem, resolveCommit } from './git';
@@ -32,6 +33,8 @@ export interface ImpactRequest {
   repository?: string;
   /** The config file the head uses, relative to the root (`--config`); the same path is read from the baseline. */
   configPath?: string;
+  /** The base config the head uses (`--base-config`, from `loadBaseConfig`); the baseline's config goes on top of it too. */
+  baseConfig?: Record<string, unknown>;
   /** Called with refs (commits, `refs/tags/…`) the clone lacks, so a shallow checkout can fetch them. */
   fetch?: (refs: string[]) => void;
 }
@@ -100,25 +103,32 @@ function releaseSettings(fs: FileSystem) {
   };
 }
 
-/** The baseline's config: from `configPath` or the default locations; undefined when it has none or it is invalid. */
+/**
+ * The baseline's config: from `configPath` or the default locations, on top of the base config when there is one.
+ * Without a config (or with an invalid one), the base config alone, or undefined for the defaults.
+ */
 function baselineConfig(
   fs: FileSystem,
   configPath: string | undefined,
+  base: Record<string, unknown> | undefined,
   notes: string[],
 ): FlowpactConfig | undefined {
+  const fallback = () => (base ? parseConfig(base) : undefined);
   const candidates = configPath ? [configPath] : CONFIG_FILES.map((f) => `${CONFIG_DIR}/${f}`);
   for (const path of candidates) {
     const text = fs.read(path);
     if (text === undefined) continue;
     try {
-      return parseConfigText(text, path).config;
+      return parseConfigText(text, path, base).config;
     } catch (err) {
       if (!(err instanceof ConfigError)) throw err;
-      notes.push(`the baseline's ${path} is invalid (${err.message}); using the default impact settings`);
-      return undefined;
+      notes.push(
+        `the baseline's ${path} is invalid (${err.message}); using the ${base ? 'base config’s' : 'default'} impact settings`,
+      );
+      return fallback();
     }
   }
-  return undefined;
+  return fallback();
 }
 
 const workingTree = (root: string): FileSystem => ({
@@ -257,7 +267,7 @@ export function prepareImpact(
   const configPath = req.configPath
     ? relative(root, join(root, req.configPath)).split('\\').join('/')
     : undefined;
-  const baseConfig = baselineConfig(fs, configPath, notes);
+  const baseConfig = baselineConfig(fs, configPath, req.baseConfig, notes);
   // Policy comes from the baseline (or the defaults), never from the pull request, so it cannot relax its own check.
   const policy: ImpactPolicy = { ...(baseConfig ?? defaultConfig()).impact };
   if (JSON.stringify(policy) !== JSON.stringify(headConfig.impact)) {
