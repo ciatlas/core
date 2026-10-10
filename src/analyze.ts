@@ -8,7 +8,7 @@ import { type Logger, silentLogger } from './logger';
 import { declaredMatrix, expandMatrix, type MatrixExpansion } from './matrix';
 import { detectRepository, type FileSystem, loadProject, nodeFileSystem } from './project';
 import { createRegistry, IMPACT_CODES } from './rules/index';
-import type { RuleRegistry } from './rules/registry';
+import { CODE_PATTERN, type RuleRegistry } from './rules/registry';
 import type {
   Finding,
   OverrideUsage,
@@ -18,7 +18,7 @@ import type {
   Severity,
   SeveritySetting,
 } from './rules/types';
-import { didYouMean } from './rules/util';
+import { didYouMean, typoDistance } from './rules/util';
 import { compareLoc, type Loc, SourceFile } from './source';
 import { escapeControl } from './text';
 import { type ToolMeta, toolMeta } from './version';
@@ -107,10 +107,78 @@ export interface AnalysisResult {
   durationMs: number;
 }
 
+const compact = (s: string) => s.toLowerCase().replace(/[-_\s]/g, '');
+
+/**
+ * The loaded rule an unknown key is a typo of, if it is one:
+ * - a key with the built-in `FP` prefix and a digit (`FP10l`, `fp-101`), or a built-in code with one character
+ *   replaced or two swapped (`FPl01`, `FPO01`);
+ * - a code one edit from a loaded code with the same prefix (`ACME610`, `AB12602`);
+ * - another spelling of a loaded name (`unusedInput`, `unused_input`), or a name two edits from one (`unused-inptu`).
+ * A code with another prefix (`AC201`, `DP201`, `FPX201` beside `FP201`) or a name that adds a word to a loaded one
+ * (`no-secrets-inherit`, `secrets-inherit-banned`) belongs to a plugin.
+ */
+function typoOf(registry: RuleRegistry, key: string): { typo: boolean; rule?: string } {
+  const k = compact(key);
+  const nearest = (candidates: string[], distance: (c: string) => number, max: number) => {
+    let best: { rule: string; d: number } | undefined;
+    for (const rule of candidates) {
+      const d = distance(rule);
+      if (d <= max && (!best || d < best.d)) best = { rule, d };
+    }
+    return best?.rule;
+  };
+  const rules = registry.all();
+  const codes = rules.map((r) => r.code);
+  const fromCode = (c: string) => typoDistance(k, c.toLowerCase());
+  if (/^fp\d/.test(k)) {
+    const rule = nearest(codes, fromCode, 1);
+    return { typo: true, ...(rule ? { rule } : {}) };
+  }
+  const builtin = nearest(
+    codes.filter((c) => /^FP\d/.test(c) && c.length === k.length),
+    fromCode,
+    1,
+  );
+  if (k.startsWith('fp') && builtin) return { typo: true, rule: builtin };
+  // The prefix as CODE_PATTERN reads it (`AB12` in AB12602) when that reading is a code (category digits are 1-9);
+  // otherwise the start before the first digit (`ACME` in ACME6011, which is no code).
+  const prefix = (code: string) => CODE_PATTERN.exec(code.toUpperCase())?.[1];
+  const asCode = CODE_PATTERN.exec(k.toUpperCase());
+  const keyPrefix =
+    asCode && asCode[2] !== '0' ? asCode[1] : /^([a-z][a-z0-9]{1,9}?)\d/.exec(k)?.[1]?.toUpperCase();
+  const code = nearest(
+    codes.filter((c) => keyPrefix !== undefined && prefix(c) === keyPrefix),
+    fromCode,
+    1,
+  );
+  if (code) return { typo: true, rule: code };
+  const names = rules.map((r) => r.name);
+  // camelCase and snake_case as dashes, so a typo is measured in the name's own words; a key without any separator
+  // (`missingrequiredinptu`) is compared without them, one edit dearer.
+  const spelled = key
+    .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+    .toLowerCase()
+    .replace(/[_\s]+/g, '-');
+  const undashed = !/[-_\s]/.test(key) && !/[a-z0-9][A-Z]/.test(key);
+  const rule =
+    names.find((n) => compact(n) === k) ??
+    nearest(
+      names,
+      (n) =>
+        Math.min(
+          typoDistance(spelled, n),
+          undashed ? typoDistance(k, compact(n)) + 1 : Number.POSITIVE_INFINITY,
+        ),
+      2,
+    );
+  return rule ? { typo: true, rule } : { typo: false };
+}
+
 /**
  * Sorts config references to unknown rules. A name may belong to the rule of a plugin that this run does not load (the
  * repository's plugins skipped, or organization rules that only a wrapper loads) and is tolerated — unless it uses the
- * built-in `FP` prefix or is a near miss of a loaded rule, which makes it a typo.
+ * built-in `FP` prefix or is a typo of a loaded rule.
  */
 function triageUnknown(
   registry: RuleRegistry,
@@ -118,13 +186,9 @@ function triageUnknown(
   path: string,
   out: { hard: string[]; tolerated: string[] },
 ) {
-  const guess = didYouMean(
-    key,
-    registry.all().flatMap((r) => [r.code, r.name]),
-  );
-  const issue = `${path}: unknown rule${guess ? ` (did you mean ${guess}?)` : ` "${key}"`}`;
-  if (!guess && !/^FP\d/i.test(key)) out.tolerated.push(issue);
-  else out.hard.push(issue);
+  const { typo, rule } = typoOf(registry, key);
+  const issue = `${path}: unknown rule${rule ? ` (did you mean ${rule}?)` : ` "${key}"`}`;
+  (typo ? out.hard : out.tolerated).push(issue);
 }
 
 const SEVERITY_ORDER: Record<Severity, number> = { error: 0, warning: 1, info: 2 };
@@ -166,7 +230,10 @@ export function fingerprint(code: string, symbol: string | undefined, file: stri
 export function analyze(opts: AnalyzeOptions): AnalysisResult {
   const started = performance.now();
   const logger = opts.logger ?? silentLogger;
-  const config = opts.config ?? defaultConfig();
+  // A run without rules (generate, trace, graph, the impact baseline) has no use for rule settings and overrides, so
+  // entries for rules it does not load cannot fail it.
+  const configured = opts.config ?? defaultConfig();
+  const config = opts.only?.length === 0 ? { ...configured, rules: {}, overrides: [] } : configured;
   // Units to load even when nothing here uses them: what the config (and, in impact mode, the baseline) publishes.
   const publishPatterns = [
     ...new Set([

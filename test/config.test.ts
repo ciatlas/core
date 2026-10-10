@@ -174,6 +174,14 @@ describe('base config', () => {
     });
   });
 
+  it('rejects a __proto__ key with a base config as without one', () => {
+    const { root, base } = setup('__proto__:\n  ignore: [.github/]\n', 'rules:\n  FP105: error\n');
+    const without = issues(() => loadConfig(root));
+    const withBase = issues(() => loadConfig(root, undefined, { base }));
+    expect(withBase).toEqual(without);
+    expect(withBase.issues.join()).toContain('__proto__');
+  });
+
   it('names the file a problem is in', () => {
     const invalidBase = setup('rules: {}\n', 'rules:\n  FP105: loud\n');
     expect(issues(() => loadConfig(invalidBase.root, undefined, { base: invalidBase.base })).file).toBe(

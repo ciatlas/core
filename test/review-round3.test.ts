@@ -1,10 +1,13 @@
 /** Regression tests for the gaps found when re-verifying the round 2 fixes of the adversarial review. */
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   analyze,
+  assertSafeWritePath,
   ConfigError,
+  createRegistry,
+  defineRule,
   loadConfig,
   memoryFileSystem,
   neutralizeWorkflowCommands,
@@ -83,7 +86,51 @@ describe('untrusted names in output (#9)', () => {
       '\u001b[2m:\u200b:set-output name=a::b',
     );
     expect(neutralizeWorkflowCommands('a :: b')).toBe('a :: b');
+    // The runner's legacy parser finds `##[` anywhere in a line, and trims U+0085 like whitespace.
+    expect(neutralizeWorkflowCommands('Input "a##[set-output name=x]1" is unused')).toBe(
+      'Input "a##\u200b[set-output name=x]1" is unused',
+    );
+    expect(neutralizeWorkflowCommands('\u0085::add-mask::x')).toBe('\u0085:\u200b:add-mask::x');
   });
+});
+
+describe('report paths', () => {
+  it('refuses to write through a symlink inside the repository, and writes elsewhere as given', () => {
+    const root = mkdtempSync(join(tmpdir(), 'flowpact-write-'));
+    const outside = mkdtempSync(join(tmpdir(), 'flowpact-write-out-'));
+    writeFileSync(join(outside, 'target.txt'), 'keep');
+    symlinkSync(join(outside, 'target.txt'), join(root, 'report.sarif'));
+    symlinkSync(outside, join(root, 'out'));
+    mkdirSync(join(root, 'reports'));
+    symlinkSync(join(root, 'reports'), join(root, 'inner'));
+    expect(() => assertSafeWritePath(join(root, 'report.sarif'), [root])).toThrow(UnsafePathError);
+    expect(() => assertSafeWritePath(join(root, 'out/new.json'), [root])).toThrow(UnsafePathError);
+    // A symlinked directory that stays inside the repository, a plain file, and paths outside it are fine.
+    expect(() => assertSafeWritePath(join(root, 'inner/new.json'), [root])).not.toThrow();
+    expect(() => assertSafeWritePath(join(root, 'flowpact.json'), [root])).not.toThrow();
+    expect(() => assertSafeWritePath(join(outside, 'target.txt'), [root])).not.toThrow();
+    // Another spelling of a path into the repository is checked too: through a symlink outside that points in.
+    const door = join(mkdtempSync(join(tmpdir(), 'flowpact-write-door-')), 'repo');
+    symlinkSync(root, door);
+    expect(() => assertSafeWritePath(join(door, 'report.sarif'), [root])).toThrow(UnsafePathError);
+    expect(() => assertSafeWritePath(join(door, 'out/new.json'), [root])).toThrow(UnsafePathError);
+    expect(() => assertSafeWritePath(join(door, 'flowpact.json'), [root])).not.toThrow();
+  });
+
+  // On a case-insensitive file system (macOS by default), another letter case is another spelling of the same path.
+  const probe = mkdtempSync(join(tmpdir(), 'flowpact-Case-'));
+  it.runIf(existsSync(probe.toLowerCase()) && probe !== probe.toLowerCase())(
+    'checks a path written in another letter case',
+    () => {
+      const root = join(probe, 'repo');
+      mkdirSync(root);
+      const outside = mkdtempSync(join(tmpdir(), 'flowpact-case-out-'));
+      symlinkSync(outside, join(root, 'link'));
+      expect(() => assertSafeWritePath(join(probe.toUpperCase(), 'REPO', 'link', 'x.json'), [root])).toThrow(
+        UnsafePathError,
+      );
+    },
+  );
 });
 
 describe('symlinks and .git (#10)', () => {
@@ -193,6 +240,91 @@ describe('config edge cases (#3, #11, #14)', () => {
     expect(r.unloadedRules).toEqual([
       'rules.acme-no-echo: unknown rule "acme-no-echo"',
       'overrides.0.rule: unknown rule "ACME601"',
+    ]);
+  });
+
+  it('tells organization rules from typos of loaded rules', () => {
+    const issues = (config: Record<string, unknown>) => {
+      try {
+        run(config);
+      } catch (err) {
+        return (err as ConfigError).issues;
+      }
+      return [];
+    };
+    // Another prefix, even one letter from FP, or a name that only starts like a built-in one, belongs to a plugin.
+    const r = run({
+      rules: {
+        AC201: 'off',
+        DP201: 'off',
+        PF401: 'off',
+        FPX201: 'off',
+        'fpga-deploy': 'off',
+        'secrets-inherit-banned': 'error',
+        'no-secrets-inherit': 'error',
+        'secrets-inherit-v2': 'error',
+        noSecretsInherit: 'error',
+        nosecretsinherit: 'error',
+        'unused-input-legacy': 'warning',
+      },
+      overrides: [{ rule: 'XY604', file: WF, reason: 'an organization rule' }],
+    });
+    expect(r.unloadedRules).toHaveLength(12);
+    // The built-in prefix in any spelling, or a name two edits from a loaded one in any case: a typo.
+    expect(issues({ rules: { FP10l: 'off' } })).toEqual(['rules.FP10l: unknown rule (did you mean FP101?)']);
+    expect(issues({ rules: { 'FP-101': 'off' } })).toEqual([
+      'rules.FP-101: unknown rule (did you mean FP101?)',
+    ]);
+    expect(issues({ rules: { FPl01: 'off' } })).toEqual(['rules.FPl01: unknown rule (did you mean FP101?)']);
+    for (const typo of [
+      'missingRequiredInptu',
+      'MissingRequiredInptu',
+      'missingrequiredinptu',
+      'missing_required_inptu',
+    ])
+      expect(issues({ rules: { [typo]: 'off' } })).toEqual([
+        `rules.${typo}: unknown rule (did you mean missing-required-input?)`,
+      ]);
+    expect(issues({ rules: { 'unused-inptu': 'off' } })).toEqual([
+      'rules.unused-inptu: unknown rule (did you mean unused-input?)',
+    ]);
+    expect(issues({ rules: { unusedInput: 'off' } })).toEqual([
+      'rules.unusedInput: unknown rule (did you mean unused-input?)',
+    ]);
+    expect(issues({ rules: { fp999: 'off' } })[0]).toMatch(/^rules\.fp999: unknown rule/);
+  });
+
+  it('tells a typo of a loaded plugin code by its prefix', () => {
+    const rule = (code: string, name: string) =>
+      defineRule({
+        code,
+        name,
+        category: 'structure',
+        defaultSeverity: 'warning',
+        docsUrl: `https://example.com/${code}`,
+        docs: { summary: 'A plugin rule', why: 'Because.', fix: 'Do it.' },
+        check() {},
+      });
+    const registry = createRegistry()
+      .register(rule('ACME601', 'acme-check'))
+      .register(rule('AB12601', 'ab-check'))
+      .register(rule('FPX601', 'fpx-check'));
+    const analyzeWith = (rules: Record<string, string>) =>
+      analyze({
+        root: '/v',
+        fs: memoryFileSystem(files),
+        validateSchema: false,
+        config: parseConfig({ rules }),
+        registry,
+        repository: 'a/b',
+      });
+    expect(() => analyzeWith({ ACME610: 'off' })).toThrow(ConfigError);
+    expect(() => analyzeWith({ AB12602: 'off' })).toThrow(ConfigError);
+    // An extra digit makes no code (category 0): a typo of ACME601. Another FP-led prefix is another plugin.
+    expect(() => analyzeWith({ ACME6011: 'off' })).toThrow(ConfigError);
+    expect(analyzeWith({ FPY601: 'off' }).unloadedRules).toEqual(['rules.FPY601: unknown rule "FPY601"']);
+    expect(analyzeWith({ ACME601: 'off', OTHER601: 'off' }).unloadedRules).toEqual([
+      'rules.OTHER601: unknown rule "OTHER601"',
     ]);
   });
 

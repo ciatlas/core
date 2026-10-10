@@ -105,6 +105,23 @@ export function editDistance(a: string, b: string): number {
   return dp[x.length]![y.length]!;
 }
 
+/** Edit distance that counts swapping two neighbouring characters as one edit (optimal string alignment). */
+export function typoDistance(x: string, y: string): number {
+  const d: number[][] = Array.from({ length: x.length + 1 }, (_, i) =>
+    Array.from({ length: y.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)),
+  );
+  for (let i = 1; i <= x.length; i++) {
+    for (let j = 1; j <= y.length; j++) {
+      const cost = x[i - 1] === y[j - 1] ? 0 : 1;
+      let best = Math.min(d[i - 1]![j]! + 1, d[i]![j - 1]! + 1, d[i - 1]![j - 1]! + cost);
+      if (i > 1 && j > 1 && x[i - 1] === y[j - 2] && x[i - 2] === y[j - 1])
+        best = Math.min(best, d[i - 2]![j - 2]! + 1);
+      d[i]![j] = best;
+    }
+  }
+  return d[x.length]![y.length]!;
+}
+
 /** Suggests the closest name, treating `-`/`_` as equivalent. */
 export function didYouMean(name: string, candidates: string[]): string | undefined {
   const norm = (s: string) => s.toLowerCase().replace(/[-_]/g, '');

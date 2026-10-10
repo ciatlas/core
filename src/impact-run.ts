@@ -274,6 +274,7 @@ export function prepareImpact(
     notes.push('this pull request changes impact settings; they apply after it is merged');
   }
   logger?.debug('impact baseline', { ref: baseRef, commit, kind });
+  // No rules run on the baseline (only: []), so its rule settings cannot fail it.
   const base = analyze({
     root,
     fs,

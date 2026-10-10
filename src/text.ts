@@ -13,11 +13,24 @@ export function escapeControl(s: string, keepNewlines = false): string {
 
 /**
  * Stops output lines from being read as GitHub workflow commands. The runner treats a line starting with `::` (after
- * leading whitespace) as a command; names from the analyzed YAML can land there, e.g. through word wrapping. A zero-width
- * space after the first colon keeps the text readable.
+ * leading whitespace, which for it includes U+0085) as a command, and a legacy `##[command]` anywhere in a line; names
+ * from the analyzed YAML can land in either, e.g. through word wrapping or a code frame. A zero-width space keeps the
+ * text readable.
  */
 export function neutralizeWorkflowCommands(s: string): string {
-  return s.replace(/^((?:\s|\u001b\[[\d;]*m)*):(?=:)/gm, '$1:​');
+  return s.replace(/^((?:\s|\u0085|\u001b\[[\d;]*m)*):(?=:)/gm, '$1:\u200b').replace(/##\[/g, '##\u200b[');
+}
+
+/**
+ * JSON text that no CI log can read as a workflow command, with the same data: `##[` (a legacy command anywhere in a
+ * line) is written `##\u005b`, and U+2028/U+2029 (which the stdout guard takes for line breaks) as escapes. In JSON
+ * these can only occur inside strings, where the escapes are valid.
+ */
+export function jsonSafe(json: string): string {
+  return json
+    .replace(/##\[/g, '##\\u005b')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
 }
 
 /**

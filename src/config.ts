@@ -213,9 +213,12 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> =>
  */
 export function mergeConfig(base: unknown, repo: unknown): unknown {
   if (isPlainObject(base) && isPlainObject(repo)) {
-    const out: Record<string, unknown> = { ...base };
-    for (const [k, v] of Object.entries(repo)) out[k] = k in base ? mergeConfig(base[k], v) : v;
-    return out;
+    // Own keys only, and entries rather than assignments, so a `__proto__` key stays a key (which the strict schema
+    // rejects) instead of setting the merged object's prototype.
+    return Object.fromEntries([
+      ...Object.entries(base).filter(([k]) => !Object.hasOwn(repo, k)),
+      ...Object.entries(repo).map(([k, v]) => [k, Object.hasOwn(base, k) ? mergeConfig(base[k], v) : v]),
+    ]);
   }
   if (Array.isArray(base) && Array.isArray(repo)) return [...new Set([...base, ...repo])];
   return repo === undefined ? base : repo;
@@ -232,8 +235,8 @@ export function loadBaseConfig(file: string): Record<string, unknown> {
   if (!isPlainObject(data))
     throw new ConfigError(`Invalid base config in ${file}`, file, ['(root): expected a map']);
   const repositoryOnly = [
-    ...REPOSITORY_ONLY.filter((k) => k in data),
-    ...(isPlainObject(data.impact) && 'publish' in data.impact ? ['impact.publish'] : []),
+    ...REPOSITORY_ONLY.filter((k) => Object.hasOwn(data, k)),
+    ...(isPlainObject(data.impact) && Object.hasOwn(data.impact, 'publish') ? ['impact.publish'] : []),
   ];
   if (repositoryOnly.length) {
     throw new ConfigError(

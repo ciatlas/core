@@ -1,5 +1,5 @@
-import { existsSync, lstatSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { formatPatch, structuredPatch } from 'diff';
 import { parse as parseYaml, stringify } from 'yaml';
 import { z } from 'zod';
@@ -654,10 +654,6 @@ export function contractPatch(plan: ContractPlan): string {
   return parts.join('');
 }
 
-/**
- * Applies a plan to disk. With `outDir`, files are written there (same relative paths) instead of the repository,
- * and deletions are skipped — used to hand regenerated contracts to people who cannot run flowpact.
- */
 /** A contract path that flowpact refuses to write (a symlink, or outside the repository). */
 export class UnsafePathError extends Error {}
 
@@ -669,9 +665,70 @@ function isSymlink(abs: string): boolean {
   }
 }
 
-export function writeContracts(root: string, plan: ContractPlan, outDir?: string): string[] {
+/**
+ * The real path of `p`: its nearest existing ancestor resolved, with the rest appended. `native` gives the canonical
+ * letter case on case-insensitive file systems (macOS), so another spelling of the same directory compares equal.
+ */
+function realpathNearest(p: string): string {
+  const rest: string[] = [];
+  let at = resolve(p);
+  for (;;) {
+    try {
+      return join(realpathSync.native(at), ...rest.reverse());
+    } catch {
+      const parent = dirname(at);
+      if (parent === at) return resolve(p);
+      rest.push(basename(at));
+      at = parent;
+    }
+  }
+}
+
+const withinOrAt = (root: string, p: string) => {
+  const rel = relative(root, p);
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+};
+
+/**
+ * Refuses to write a file (a report, a patch, a contract) at a path that leads into one of `trees` (the repository, the
+ * CI workspace) and then through a symlink: one that is the file itself, or that leads out of the tree again. A pull
+ * request can commit those. Whether a path leads into a tree is decided from the real path of each of its ancestors, so
+ * no other spelling of it (`/tmp` for `/private/tmp`, a symlink outside pointing in) skips the check. Paths that never
+ * enter a tree, such as `$GITHUB_STEP_SUMMARY`, are written as given.
+ */
+export function assertSafeWritePath(abs: string, trees: string[]): void {
+  const target = resolve(abs);
+  const realParent = realpathNearest(dirname(target));
+  const ancestors: string[] = [];
+  for (let at = target; ; at = dirname(at)) {
+    ancestors.push(at);
+    if (dirname(at) === at) break;
+  }
+  for (const tree of trees) {
+    const realTree = realpathNearest(tree);
+    const enters = ancestors.some((a) => existsSync(a) && withinOrAt(realTree, realpathSync.native(a)));
+    if (!enters && !withinOrAt(resolve(tree), target)) continue;
+    if (isSymlink(target) || !withinOrAt(realTree, realParent))
+      throw new UnsafePathError(`Not writing ${abs}: it is a symlink, or links outside ${tree}`);
+  }
+}
+
+/**
+ * Applies a plan to disk. With `outDir`, files are written there (same relative paths) instead of the repository,
+ * and deletions are skipped — used to hand regenerated contracts to people who cannot run flowpact. `trees` are where
+ * such a write must not go through a symlink (default: the repository).
+ */
+export function writeContracts(
+  root: string,
+  plan: ContractPlan,
+  outDir?: string,
+  trees: string[] = [root],
+): string[] {
   const written: string[] = [];
   const base = outDir ?? root;
+  // An output directory inside the repository is checked like a report path, every file before any is written.
+  if (outDir)
+    for (const e of plan.entries) if (e.status !== 'delete') assertSafeWritePath(join(outDir, e.file), trees);
   // Contracts are written into the checkout; a symlink there must not redirect a write (or delete) elsewhere. Every
   // target is checked before anything is written, so a refusal leaves the directory as it was.
   if (!outDir) {
