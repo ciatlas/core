@@ -1,6 +1,6 @@
 {
   "name": "@flowpact/core",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "private": true,
   "description": "Workflow data-flow engine: IR, expression analysis, matrix expansion, graph and rules.",
   "type": "module",
