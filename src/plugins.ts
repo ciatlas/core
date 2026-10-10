@@ -30,7 +30,9 @@ export async function loadPlugins(
       throw new ConfigError(`Plugin not found: ${spec}`, undefined, [`plugins: ${abs} does not exist`]);
     let mod: Record<string, unknown>;
     try {
-      mod = (await import(pathToFileURL(abs).href)) as Record<string, unknown>;
+      // A plugin is a file next to whatever runs flowpact, never part of a bundle: webpack (and @vercel/ncc, which
+      // bundles actions with it) would otherwise replace this import with an empty context that fails at run time.
+      mod = (await import(/* webpackIgnore: true */ pathToFileURL(abs).href)) as Record<string, unknown>;
     } catch (err) {
       throw new ConfigError(`Plugin ${spec} failed to load: ${(err as Error).message}`);
     }
