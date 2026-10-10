@@ -690,6 +690,15 @@ const withinOrAt = (root: string, p: string) => {
 };
 
 /**
+ * Whether `p` is `tree` or inside it, decided from canonical real paths (symlinks resolved, the file system's letter
+ * case), also for paths that do not exist yet. Unlike `insideRepository`, nothing (such as `.git`) is left out: use it
+ * where "inside" is the cautious answer, such as deciding that a file came with the checkout.
+ */
+export function pathInside(tree: string, p: string): boolean {
+  return withinOrAt(realpathNearest(tree), realpathNearest(p));
+}
+
+/**
  * Refuses to write a file (a report, a patch, a contract) at a path that leads into one of `trees` (the repository, the
  * CI workspace) and then through a symlink: one that is the file itself, or that leads out of the tree again. A pull
  * request can commit those. Whether a path leads into a tree is decided from the real path of each of its ancestors, so

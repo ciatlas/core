@@ -27,6 +27,15 @@ function git(root: string, args: string[], input?: string): Buffer {
   }
 }
 
+/** The top directory of the git work tree `root` is in, or undefined outside one. */
+export function gitTopLevel(root: string): string | undefined {
+  try {
+    return git(root, ['rev-parse', '--show-toplevel']).toString().trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The commit a ref points at, or a GitError naming the ref. Refs starting with `-` are rejected. */
 export function resolveCommit(root: string, ref: string): string {
   if (!ref || ref.startsWith('-')) throw new GitError(`invalid ref: ${JSON.stringify(ref)}`);

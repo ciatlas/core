@@ -14,6 +14,7 @@ import {
   nodeFileSystem,
   parseConfig,
   parseConfigText,
+  pathInside,
   planContracts,
   UnsafePathError,
   writeContracts,
@@ -115,6 +116,20 @@ describe('report paths', () => {
     expect(() => assertSafeWritePath(join(door, 'report.sarif'), [root])).toThrow(UnsafePathError);
     expect(() => assertSafeWritePath(join(door, 'out/new.json'), [root])).toThrow(UnsafePathError);
     expect(() => assertSafeWritePath(join(door, 'flowpact.json'), [root])).not.toThrow();
+  });
+
+  it('tells whether a path is inside a tree, cautiously', () => {
+    const root = mkdtempSync(join(tmpdir(), 'flowpact-inside-'));
+    const outside = mkdtempSync(join(tmpdir(), 'flowpact-inside-out-'));
+    mkdirSync(join(root, '..hidden'));
+    mkdirSync(join(root, '.git'));
+    symlinkSync(root, join(outside, 'door'));
+    for (const p of ['a.mjs', '..hidden/a.mjs', '.git/a.mjs', 'new/dir/a.mjs', '.'])
+      expect({ p, inside: pathInside(root, join(root, p)) }).toEqual({ p, inside: true });
+    // Through a symlink outside that points in: still inside. Next to the tree or above it: outside.
+    expect(pathInside(root, join(outside, 'door', 'a.mjs'))).toBe(true);
+    expect(pathInside(root, join(outside, 'a.mjs'))).toBe(false);
+    expect(pathInside(root, `${root}-sibling/a.mjs`)).toBe(false);
   });
 
   // On a case-insensitive file system (macOS by default), another letter case is another spelling of the same path.

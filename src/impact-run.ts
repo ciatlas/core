@@ -15,7 +15,8 @@ import {
   parseConfig,
   parseConfigText,
 } from './config';
-import { type GitError, gitFileSystem, resolveCommit } from './git';
+import { pathInside } from './contracts';
+import { type GitError, gitFileSystem, gitTopLevel, resolveCommit } from './git';
 import { type DeclaredInput, type ImpactLevel, type ImpactPolicy, isPublished } from './impact';
 import type { Logger } from './logger';
 import type { FileSystem } from './project';
@@ -35,6 +36,11 @@ export interface ImpactRequest {
   configPath?: string;
   /** The base config the head uses (`--base-config`, from `loadBaseConfig`); the baseline's config goes on top of it too. */
   baseConfig?: Record<string, unknown>;
+  /**
+   * Where the base config was read from. A file inside the repository is the pull request's own version of it, so the
+   * baseline's impact settings leave it out: a pull request cannot relax its own check through it.
+   */
+  baseConfigFile?: string;
   /** Called with refs (commits, `refs/tags/…`) the clone lacks, so a shallow checkout can fetch them. */
   fetch?: (refs: string[]) => void;
 }
@@ -267,10 +273,17 @@ export function prepareImpact(
   const configPath = req.configPath
     ? relative(root, join(root, req.configPath)).split('\\').join('/')
     : undefined;
-  const baseConfig = baselineConfig(fs, configPath, req.baseConfig, notes);
+  const top = req.baseConfig && req.baseConfigFile ? gitTopLevel(root) : undefined;
+  const baseInRepository = top !== undefined && pathInside(top, req.baseConfigFile!);
+  if (baseInRepository) {
+    notes.push(
+      "the base config is a file of this repository, so the baseline's impact settings leave it out",
+    );
+  }
+  const baseConfig = baselineConfig(fs, configPath, baseInRepository ? undefined : req.baseConfig, notes);
   // Policy comes from the baseline (or the defaults), never from the pull request, so it cannot relax its own check.
   const policy: ImpactPolicy = { ...(baseConfig ?? defaultConfig()).impact };
-  if (JSON.stringify(policy) !== JSON.stringify(headConfig.impact)) {
+  if (!baseInRepository && JSON.stringify(policy) !== JSON.stringify(headConfig.impact)) {
     notes.push('this pull request changes impact settings; they apply after it is merged');
   }
   logger?.debug('impact baseline', { ref: baseRef, commit, kind });
