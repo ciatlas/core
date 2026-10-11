@@ -48,7 +48,10 @@ export function jsonEqual(a: Json, b: Json): boolean {
   const kb = Object.keys(b as Record<string, Json>);
   return (
     ka.length === kb.length &&
-    ka.every((k) => jsonEqual((a as Record<string, Json>)[k]!, (b as Record<string, Json>)[k] ?? null))
+    ka.every(
+      (k) =>
+        Object.hasOwn(b, k) && jsonEqual((a as Record<string, Json>)[k]!, (b as Record<string, Json>)[k]!),
+    )
   );
 }
 
@@ -69,7 +72,7 @@ function minJobsAfterExclude(m: MatrixDecl, productSize: number): number | undef
   if (m.dims.some((d) => d.values === null || d.unknownIndexes.length > 0)) return undefined;
   if (m.exclude.some((e) => e.dynamicKeys.length > 0)) return undefined;
   const size = new Map(m.dims.map((d) => [d.name, Math.max(1, d.values!.length)]));
-  const named = m.dims.filter((d) => m.exclude.some((e) => d.name in e.values));
+  const named = m.dims.filter((d) => m.exclude.some((e) => Object.hasOwn(e.values, d.name)));
   const subSize = named.reduce((n, d) => n * size.get(d.name)!, 1);
   // An entry naming a key that is not a dimension never matches a product combination.
   const effective = m.exclude.filter((e) => Object.keys(e.values).every((k) => size.has(k)));
@@ -234,7 +237,7 @@ export function expandMatrix(m: MatrixDecl | undefined): MatrixExpansion {
 export function comboLabel(combo: Combination, keys?: string[]): string {
   const shown = keys ?? Object.keys(combo.values);
   const parts = shown
-    .filter((k) => k in combo.values)
+    .filter((k) => Object.hasOwn(combo.values, k))
     .map((k) => {
       const c = combo.values[k]!;
       return `${k}: ${c.known ? (typeof c.value === 'string' ? c.value : JSON.stringify(c.value)) : '<expr>'}`;
@@ -252,9 +255,10 @@ export function matrixResolver(combo: Combination): ContextResolver {
     if (!cell) return known(null, [{ kind: 'missing-matrix-key', key }]);
     if (!cell.known) return UNKNOWN;
     let value: Json = cell.value;
+    // GitHub rounds a fractional array index down; below zero it is out of range.
     for (const seg of path.slice(1)) {
       if (value && typeof value === 'object' && !Array.isArray(value)) value = lookup(value, seg) ?? null;
-      else if (Array.isArray(value)) value = value[Number(seg)] ?? null;
+      else if (Array.isArray(value)) value = value[Math.floor(Number(seg))] ?? null;
       else value = null;
     }
     return known(value);

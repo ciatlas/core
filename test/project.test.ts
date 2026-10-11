@@ -415,10 +415,15 @@ describe('loadProject: published actions', () => {
     );
   });
 
-  // Suspected bug: a published file is appended without checking whether it is listed already, so the root action, or
-  // an action two patterns match, is listed and counted twice in "discovered N local action(s)" (it is loaded once).
-  it.skip('lists each published action once', () => {
+  // The root action, or an action two patterns match, is listed and counted once in "discovered N local action(s)".
+  it('treats `./dir` and `dir` as the same published unit, and keeps .github/actions out either way', () => {
+    expect(listed(['tools/b', './tools/b'])).toEqual(listed(['tools/b']));
+    expect(listed(['./.github/actions/e'])).toEqual(listed([]));
+  });
+
+  it('lists each published action once', () => {
     expect(listed(['action.yml'])).toEqual(['.github/actions/e/action.yml', 'action.yml']);
+    expect(listed(['.', './'])).toEqual(['.github/actions/e/action.yml', 'action.yml']);
     expect(listed(['other/*', 'other/d/action.yml'])).toEqual([
       '.github/actions/e/action.yml',
       'action.yml',
@@ -426,9 +431,8 @@ describe('loadProject: published actions', () => {
     ]);
   });
 
-  // BUG: an exact directory only looks for action.yml, so a published action written as action.yaml is not loaded
-  // (a glob matching the same directory loads it). Skipped until project.ts tries both names.
-  it.skip('loads a published directory whose action is action.yaml', () => {
+  // Like a glob matching the same directory.
+  it('loads a published directory whose action is action.yaml', () => {
     expect(loaded(['tools/b'])).toEqual(['tools/b']);
     expect(loaded(['tools/b/'])).toEqual(['tools/b']);
   });
@@ -440,6 +444,16 @@ describe('loadProject: published actions', () => {
 });
 
 describe('memoryFileSystem', () => {
+  it('reads `./` spellings, and never Object.prototype members', () => {
+    const fs = memoryFileSystem({ 'a/x.yml': '1' });
+    expect(fs.read('./a/x.yml')).toBe('1');
+    expect(['constructor', 'toString', '__proto__'].map((p) => fs.read(p))).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+  });
+
   const fs = memoryFileSystem({
     './a/one.yml': '1',
     'a\\two.yml': '2',
@@ -469,15 +483,15 @@ describe('memoryFileSystem', () => {
     expect(fs.isDir('missing')).toBe(false);
   });
 
-  // BUG: `list('.')` and `isDir('.')` do not treat `.` as the repository root (walk does, and so do nodeFileSystem
-  // and gitFileSystem): they return [] and false. The loader never asks for `.`, so nothing breaks yet. `list` does
-  // not normalise other spellings of a directory either (`a/`, `./a`), though isDir accepts `a/`.
-  it.skip('lists the files at the repository root as `.`, and a directory however it is spelled', () => {
+  // Like nodeFileSystem and gitFileSystem.
+  it('lists the files at the repository root as `.`, and a directory however it is spelled', () => {
     expect(fs.list('.')).toEqual(['top.md']);
     expect(fs.list('')).toEqual(['top.md']);
     expect(fs.isDir('.')).toBe(true);
     expect(fs.list('a/')).toEqual(['a/one.yml', 'a/two.yml']);
     expect(fs.list('./a')).toEqual(['a/one.yml', 'a/two.yml']);
+    expect(fs.walk('./a/')).toEqual(fs.walk('a'));
+    expect(fs.isDir('./a')).toBe(true);
   });
 });
 
@@ -510,7 +524,7 @@ describe('overlayFileSystem', () => {
 
   it('lists overlaid files once, next to the base files', () => {
     expect(fs.list(WF).sort()).toEqual([`${WF}/a.yml`, `${WF}/new.yml`, `${WF}/only-base.yml`]);
-    // The overlay's own files under other spellings of the directory (the base's are dropped there: skipped test below).
+    // The overlay's own files under other spellings of the directory (and the base's: see below).
     expect(fs.list(`./${WF}/`)).toContain(`${WF}/new.yml`);
     expect(fs.list('.')).toContain('notes.md');
     expect(fs.list('drafts')).toEqual(['drafts/x.yml']);
@@ -537,9 +551,8 @@ describe('overlayFileSystem', () => {
     expect(fs.isDir('notes.md')).toBe(false);
   });
 
-  // Suspected bug: memoryFileSystem.list does not normalise `.` or `./dir/` (see its skipped test), so over a memory
-  // base the overlay lists only its own files there and drops the base's. Production overlays wrap nodeFileSystem.
-  it.skip('lists the base’s files under any spelling of a directory', () => {
+  // Over a memory base as over nodeFileSystem (what production overlays wrap).
+  it('lists the base’s files under any spelling of a directory', () => {
     expect(fs.list(`./${WF}/`).sort()).toEqual([`${WF}/a.yml`, `${WF}/new.yml`, `${WF}/only-base.yml`]);
     expect(fs.list('.').sort()).toEqual(['README.md', 'notes.md']);
   });
@@ -556,6 +569,34 @@ describe('overlayFileSystem', () => {
 });
 
 describe('nodeFileSystem', () => {
+  it('walks a directory linked into itself once, and every other link to a directory', () => {
+    const root = disk({ '.github/actions/x/action.yml': 'a', 'shared/action.yml': 'b' });
+    symlinkSync('.', join(root, '.github/actions/self'));
+    symlinkSync('.', join(root, '.github/actions/self2'));
+    symlinkSync('../../shared', join(root, '.github/actions/one'));
+    symlinkSync('../../shared', join(root, '.github/actions/two'));
+    expect(nodeFileSystem(root).walk('.github/actions').sort()).toEqual([
+      '.github/actions/one/action.yml',
+      '.github/actions/two/action.yml',
+      '.github/actions/x/action.yml',
+    ]);
+  });
+
+  it('bounds linked directories that fan out, keeping the shallowest paths', () => {
+    const root = disk({ 'w/F24/f.txt': '24' });
+    // 24 levels of directories that each link twice to the next: 2^24 paths if every link were followed.
+    for (let i = 0; i < 24; i++) {
+      mkdirSync(join(root, `w/F${i}`), { recursive: true });
+      writeFileSync(join(root, `w/F${i}`, 'f.txt'), `${i}`);
+      symlinkSync(`../F${i + 1}`, join(root, `w/F${i}/a`));
+      symlinkSync(`../F${i + 1}`, join(root, `w/F${i}/b`));
+    }
+    const walked = nodeFileSystem(root).walk('w/F0');
+    expect(walked.length).toBeLessThan(5_000);
+    expect(walked).toContain('w/F0/a/f.txt');
+    expect(walked).toContain('w/F0/b/a/b/f.txt');
+  });
+
   const outside = disk({ 'secret.yml': 'TOP SECRET: [\n', 'dir/x.yml': 'outside' });
 
   /** A repository on disk with workflows, an action, git internals, dependencies and symlinks in and out. */
@@ -696,9 +737,8 @@ describe('insideRepository', () => {
     expect(insideRepository(root, join(root, path))).toBe(expected);
   });
 
-  // BUG: `rel.startsWith('..')` takes a directory or file whose name starts with `..` (`..hidden/`, `...`) for the
-  // parent directory, so nodeFileSystem never reads it. Skipped until insideRepository checks `..` as a whole segment.
-  it.skip('keeps a name that starts with `..` inside the repository', () => {
+  // Only `..` as a whole segment leaves it.
+  it('keeps a name that starts with `..` inside the repository', () => {
     expect(insideRepository(root, join(root, '..hidden/a.yml'))).toBe(true);
   });
 
@@ -760,9 +800,8 @@ describe('detectRepository', () => {
     ).toBe('me/fork');
   });
 
-  // Suspected bug: the pattern also finds `url =` inside `pushurl = …`, so an origin whose push URL comes first
-  // reads as the push URL's repository.
-  it.skip('reads origin’s url, not its pushurl', () => {
+  // Even when the push URL comes first.
+  it('reads origin’s url, not its pushurl', () => {
     const root = withConfig(
       '[remote "origin"]\n\tpushurl = git@github.com:me/push.git\n\turl = https://github.com/acme/fetch.git\n',
     );

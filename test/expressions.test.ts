@@ -208,10 +208,9 @@ describe('evaluate', () => {
     expect(ev("fromJSON('1').x")).toEqual(known(null));
   });
 
-  // Suspected bug: GitHub rounds a fractional array index down (actions/runner's IndexHelper and @actions/expressions'
-  // idxHelper floor it, so `[0.5]` reads the first element), but indexInto in expressions.ts requires an integer and
-  // reads null. Below zero it is still out of range.
-  it.skip('rounds a fractional array index down, like GitHub', () => {
+  // GitHub rounds a fractional array index down (actions/runner's IndexHelper and @actions/expressions' idxHelper floor
+  // it, so `[0.5]` reads the first element). Below zero it is out of range.
+  it('rounds a fractional array index down, like GitHub', () => {
     expect(ev("fromJSON('[1,2]')[0.5]")).toEqual(known(1));
     expect(ev("fromJSON('[1,2]')[1.9]")).toEqual(known(2));
     expect(ev("fromJSON('[1,2]')[-0.5]")).toEqual(known(null));
@@ -355,9 +354,8 @@ describe('definitelyFalsy / definitelyTruthy', () => {
     expect(decide('!github.ref')).toEqual({ falsy: false, truthy: false });
   });
 
-  // Suspected bug: `always()` is true in every `if:` that may call it, but evaluate leaves it unknown like `success()`,
-  // so a condition that only depends on it is never decided (`!always()` never runs, yet is not definitely falsy).
-  it.skip('decides a condition on always(), which is always true', () => {
+  // `always()` is true in every `if:` that may call it, unlike `success()`, so `!always()` is definitely falsy.
+  it('decides a condition on always(), which is always true', () => {
     expect(decide('always() && matrix.on')).toEqual({ falsy: false, truthy: true });
     expect(decide('!(always() && matrix.on)')).toEqual({ falsy: true, truthy: false });
     expect(decide('!always()')).toEqual({ falsy: true, truthy: false });

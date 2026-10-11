@@ -747,17 +747,26 @@ describe('steps and jobs that mix two shapes', () => {
     ]);
   });
 
-  // Suspected bug (upstream, surfaced here): a key named like an Object.prototype member (`toString`, `constructor`)
-  // makes @actions/workflow-parser 0.3.61 throw while reading the file (TemplateSchema.matchPropertyAndFilter reads
-  // `definition.properties[name]`, which finds the prototype member). The loader records the TypeError's text at 1:1
-  // instead of the unknown key, and the file's other errors are lost.
-  it.skip('reports a key named like an Object.prototype member as an unknown key', () => {
+  // @actions/workflow-parser 0.3.61 looks a key up with `definition.properties[name]`, which finds an Object.prototype
+  // member (`toString`, `constructor`) and fails the whole file. Validated against mappings whose properties have no
+  // prototype, such a key is unknown, and the file's other errors stay.
+  it('reports a key named like an Object.prototype member as an unknown key', () => {
     expect(
       schemaErrors({
         [`${WF}/w.yml`]:
           'on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: x\n        toString: 1\n',
       }),
     ).toEqual([`- ${WF}/w.yml:7:9 Unexpected value 'toString'`]);
+    expect(
+      schemaErrors({
+        [`${WF}/w.yml`]: 'on: push\nconstructor: 1\njobs:\n  j:\n    runs-on: x\n    stepz: 1\n',
+        '.github/actions/a/action.yml': 'runs:\n  using: composite\n  valueOf: 1\n  steps: []\n',
+      }),
+    ).toEqual([
+      "- .github/actions/a/action.yml:3:3 Unexpected value 'valueOf'",
+      `- ${WF}/w.yml:2:1 Unexpected value 'constructor'`,
+      `- ${WF}/w.yml:6:5 Unexpected value 'stepz'`,
+    ]);
   });
 });
 

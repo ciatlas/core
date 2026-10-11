@@ -51,9 +51,8 @@ describe('SourceFile', () => {
     expect(source.loc(12, 3)).toMatchObject({ line: 2, column: 4, endLine: 2, endColumn: 4 });
   });
 
-  // Suspected bug: the end is clamped to the unclamped start (`Math.max(start, end)`), so a range that ends before the
-  // beginning keeps its negative end: `loc(-5)` ends at 0:-5.
-  it.skip('clamps the end of a range that ends before the beginning', () => {
+  // The end is clamped against the clamped start, so a range that ends before the beginning ends there too.
+  it('clamps the end of a range that ends before the beginning', () => {
     const source = parsed('a.yml', 'on: push\njobs: {}\n');
     expect(source.loc(-5)).toMatchObject({ line: 1, column: 1, endLine: 1, endColumn: 1 });
     expect(source.loc(-5, -3)).toMatchObject({ line: 1, column: 1, endLine: 1, endColumn: 1 });

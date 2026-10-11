@@ -410,9 +410,8 @@ describe('matrixResolver — nested values', () => {
     expect(value('inputs.name').known).toBe(false);
   });
 
-  // Suspected bug: GitHub rounds a fractional array index down, but matrixResolver reads `value[Number(seg)]`, so
-  // `matrix.list[0.5]` is null instead of the first element (the same gap as indexInto in expressions.ts).
-  it.skip('rounds a fractional array index down, like GitHub', () => {
+  // GitHub rounds a fractional array index down, so `matrix.list[0.5]` is the first element (as in expressions.ts).
+  it('rounds a fractional array index down, like GitHub', () => {
     expect(value('matrix.list[0.5]')).toEqual(known('x'));
     expect(value('matrix.list[1.9]')).toEqual(known('y'));
   });
@@ -428,10 +427,9 @@ describe('matrix helpers', () => {
     expect(jsonEqual(null, {})).toBe(false);
   });
 
-  // Suspected bug: a key missing from the second object is compared as `null` (`b[k] ?? null` in jsonEqual), so objects
-  // with the same number of keys, whose differing keys are all null, compare equal; include and exclude entries then
-  // match object-valued cells they should not.
-  it.skip('tells objects with different keys apart', () => {
+  // A key missing from one object is not a `null` value, so include and exclude entries do not match object-valued
+  // cells with other keys.
+  it('tells objects with different keys apart', () => {
     expect(jsonEqual({ a: null }, { b: null })).toBe(false);
   });
 

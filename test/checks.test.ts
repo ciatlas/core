@@ -119,6 +119,11 @@ describe('suffix values', () => {
     [1e14, '100000000000000'],
     // Rounding to 15 digits carries into the next power of ten, which switches to the exponent form.
     [999999999999999.9, '1E+15'],
+    // ...and stays fixed when the rounded value keeps 15 digits, although log10 of it rounds up to 15.
+    [999999999999999, '999999999999999'],
+    [999999999999998, '999999999999998'],
+    [0.0000999999999999999, '9.99999999999999E-05'],
+    [Number.MAX_SAFE_INTEGER + 1, '9.00719925474099E+15'],
     [-1.5e-7, '-1.5E-07'],
     [0.1 + 0.2, '0.3'],
   ])('formats %s at the edges of the fixed-point range (%s)', (n, text) => {
@@ -215,10 +220,8 @@ describe('job names', () => {
     ).toEqual([['In ${{ inputs.cfg.os }}', false]]);
   });
 
-  // Suspected bug: inside a template with text around the expression, numbers are printed by JavaScript (`String`,
-  // through `toStr` in expressions.ts), not like GitHub's "G15" that `formatNumber` implements and the rest of the
-  // name uses: flowpact computes `N 1000000000000000` and `N 1e-7`.
-  it.skip('formats numbers inside a name like GitHub', () => {
+  // Inside a template with text around the expression, numbers convert to strings like GitHub's "G15" too.
+  it('formats numbers inside a name like GitHub', () => {
     const matrix = 'runs-on: x\nstrategy:\n  matrix:\n    n: [1e15, 1e-7]';
     expect(segments(`name: N \${{ matrix.n }}\n${matrix}`)).toEqual([
       ['N 1E+15', true],
@@ -344,9 +347,8 @@ describe('composition', () => {
     ).toEqual([['T ${{ inputs.os }} ${{ inputs.label }}', false]]);
   });
 
-  // Suspected bug: GitHub documents that an input without a default is `false` for a boolean and `0` for a number
-  // (`""` for a string); workflowChecks gives every such input `null`, so these names read `N` and `B`.
-  it.skip('uses GitHub’s defaults for number and boolean inputs without one', () => {
+  // GitHub documents that an input without a default is `false` for a boolean and `0` for a number (`""` for a string).
+  it('uses GitHub’s defaults for number and boolean inputs without one', () => {
     const files = {
       [`${WF}/r.yml`]: yaml`
         on:
@@ -366,6 +368,25 @@ describe('composition', () => {
       `,
     };
     expect(checksOf(files, `${WF}/r.yml`).map((c) => c.name)).toEqual(['N 0', 'B false']);
+  });
+
+  it('is uncertain when an omitted input’s default is an expression', () => {
+    const files = {
+      [`${WF}/r.yml`]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              target: { type: string, default: '\${{ github.ref_name }}' }
+        jobs:
+          build:
+            name: Build \${{ inputs.target }}
+            runs-on: x
+            steps: [{ run: x }]
+      `,
+    };
+    const [check] = checksOf(files, `${WF}/r.yml`);
+    expect(check).toMatchObject({ stem: 'Build …', certain: false });
+    expect(check!.name).not.toContain('github.ref_name');
   });
 
   it('stops at a call cycle', () => {

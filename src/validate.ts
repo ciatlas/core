@@ -1,6 +1,7 @@
 import { FeatureFlags } from '@actions/expressions/features';
 import { NoOperationTraceWriter, parseWorkflow } from '@actions/workflow-parser';
 import { parseAction } from '@actions/workflow-parser/actions/action-parser';
+import { DefinitionType } from '@actions/workflow-parser/templates/schema/definition-type';
 import type { MappingDefinition } from '@actions/workflow-parser/templates/schema/mapping-definition';
 import type { TemplateSchema } from '@actions/workflow-parser/templates/schema/template-schema';
 import {
@@ -11,7 +12,7 @@ import { isAlias, isMap, isScalar, isSeq, LineCounter, parseDocument } from 'yam
 import { CONTEXT_FUNCTIONS, KNOWN_CONTEXTS, UNTERMINATED_EXPRESSION } from './expressions';
 import { type Diagnostic, siteAt, type UnitDecl } from './ir';
 import type { Logger } from './logger';
-import { mappingsAt, SCHEMA_ROOT, schemaFor, workflowSchema } from './schema';
+import { mappingsAt, SCHEMA_ROOT, schemaFor } from './schema';
 import type { Loc } from './source';
 import { didYouMean } from './text';
 
@@ -111,13 +112,39 @@ interface ParserError {
   range?: { start: { line: number; column: number }; end: { line: number; column: number } };
 }
 
-function workflowContext(): TemplateContext {
+const parserSchemas = new Map<UnitDecl['kind'], TemplateSchema>();
+
+/**
+ * The schema the parser validates with: `schemaFor`'s, with mapping properties that have no prototype. The parser
+ * looks a key up with `properties[key]`, so a key named like an Object.prototype member (`toString`, `constructor`)
+ * would find the prototype's and fail the whole file; this way it is an unknown key, as GitHub reports it.
+ */
+function parserSchema(kind: UnitDecl['kind']): TemplateSchema {
+  const cached = parserSchemas.get(kind);
+  if (cached) return cached;
+  const base = schemaFor(kind);
+  const definitions = { ...base.definitions };
+  for (const [name, def] of Object.entries(definitions)) {
+    if (def.definitionType !== DefinitionType.Mapping) continue;
+    const { properties } = def as MappingDefinition;
+    definitions[name] = clone(def, { properties: Object.assign(Object.create(null), properties) });
+  }
+  const schema = clone(base, { definitions });
+  parserSchemas.set(kind, schema);
+  return schema;
+}
+
+function clone<T extends object>(value: T, overrides: object): T {
+  return Object.assign(Object.create(Object.getPrototypeOf(value) as object) as T, value, overrides);
+}
+
+function parserContext(kind: UnitDecl['kind']): TemplateContext {
   const context = new TemplateContext(
     new TemplateValidationErrors(),
-    workflowSchema(),
+    parserSchema(kind),
     new NoOperationTraceWriter(),
   );
-  context.state.featureFlags = WORKFLOW_FEATURES;
+  if (kind === 'workflow') context.state.featureFlags = WORKFLOW_FEATURES;
   return context;
 }
 
@@ -129,10 +156,8 @@ function workflowContext(): TemplateContext {
 export function validateSchema(unit: UnitDecl, logger: Logger): Diagnostic[] {
   try {
     const file = { name: unit.file, content: unit.source.text };
-    const result =
-      unit.kind === 'workflow'
-        ? parseWorkflow(file, workflowContext())
-        : parseAction(file, new NoOperationTraceWriter());
+    const context = parserContext(unit.kind);
+    const result = unit.kind === 'workflow' ? parseWorkflow(file, context) : parseAction(file, context);
     const errors = result.context.errors.getErrors() as ParserError[];
     const diagnostics = errors
       .filter((e) => !(unit.kind === 'action' && LOCAL_ACTION_NOISE.test(e.message)))
@@ -246,7 +271,7 @@ function explain(unit: UnitDecl, diagnostics: Diagnostic[]): Diagnostic[] {
   if (!diagnostics.some((d) => !d.kind)) return diagnostics;
   const shape = shapeOf(unit);
   if (!shape) return diagnostics;
-  const schema = schemaFor(unit.kind);
+  const schema = parserSchema(unit.kind);
   const root = SCHEMA_ROOT[unit.kind];
 
   // The key an `Unexpected value 'k'` diagnostic is about.

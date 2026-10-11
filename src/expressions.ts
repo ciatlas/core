@@ -310,10 +310,22 @@ export function toNumber(v: Json): number {
   return Number.NaN;
 }
 
+/** Formats a number like .NET's `ToString("G15")`, which GitHub uses to convert numbers to strings. */
+export function formatNumber(n: number): string {
+  if (!Number.isFinite(n)) return String(n);
+  if (n === 0) return '0';
+  const trim = (s: string) => (s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s);
+  // G15 picks the notation from the exponent after rounding to 15 digits (999999999999999.9 is 1E+15).
+  const [m, x] = n.toExponential(14).split('e') as [string, string];
+  const power = Number(x);
+  if (power > -5 && power < 15) return trim(n.toPrecision(15));
+  return `${trim(m)}E${power < 0 ? '-' : '+'}${String(Math.abs(power)).padStart(2, '0')}`;
+}
+
 export function toStr(v: Json): string {
   if (v === null) return '';
   if (typeof v === 'boolean') return v ? 'true' : 'false';
-  if (typeof v === 'number') return Number.isInteger(v) ? String(v) : String(v);
+  if (typeof v === 'number') return formatNumber(v);
   if (typeof v === 'string') return v;
   return Array.isArray(v) ? 'Array' : 'Object';
 }
@@ -457,8 +469,9 @@ function refChain(e: Expr, resolve: ContextResolver): { context: string; path: s
 
 function indexInto(base: Json, idx: Json): Json {
   if (Array.isArray(base)) {
-    const n = toNumber(idx);
-    return Number.isInteger(n) && n >= 0 && n < base.length ? (base[n] ?? null) : null;
+    // GitHub rounds a fractional index down; below zero it is out of range.
+    const n = Math.floor(toNumber(idx));
+    return n >= 0 && n < base.length ? (base[n] ?? null) : null;
   }
   if (base && typeof base === 'object') {
     const key = toStr(idx).toLowerCase();
@@ -468,14 +481,17 @@ function indexInto(base: Json, idx: Json): Json {
   return null;
 }
 
+/** Functions whose value depends on the run: the job status and the workspace files. `always()` is always true. */
+const RUNTIME_FUNCTIONS = new Set(['success', 'failure', 'cancelled', 'hashfiles']);
+
 function evalCall(e: FunctionCall, resolve: ContextResolver): EvalValue {
   const name = e.functionName.lexeme.toLowerCase();
   const args = e.args.map((a) => evaluate(a, resolve));
   const taint = mergeTaint(...args);
   const allKnown = args.every((a) => a.known);
   const vals = args.map((a) => (a.known ? a.value : null));
-  if (['success', 'failure', 'cancelled', 'always', 'hashfiles'].includes(name))
-    return { known: false, taint };
+  if (name === 'always') return known(true, taint);
+  if (RUNTIME_FUNCTIONS.has(name)) return { known: false, taint };
   if (!allKnown) return { known: false, taint };
   switch (name) {
     case 'format': {
@@ -547,9 +563,7 @@ function isConstant(e: Expr): boolean {
   if (e instanceof Logical) return e.args.every(isConstant);
   if (e instanceof FunctionCall) {
     const name = e.functionName.lexeme.toLowerCase();
-    return (
-      !['success', 'failure', 'cancelled', 'always', 'hashfiles'].includes(name) && e.args.every(isConstant)
-    );
+    return !RUNTIME_FUNCTIONS.has(name) && e.args.every(isConstant);
   }
   return false;
 }

@@ -189,9 +189,9 @@ describe('resolveCommit', () => {
     expect(() => resolveCommit(outside, 'main')).toThrow(/^main is not available in this clone/);
   });
 
-  // Suspected bug: for a remote-tracking ref the hint repeats the remote, and `git fetch origin origin/main` fails
-  // ("couldn't find remote ref origin/main"). `origin/main` is the base flowpact itself suggests.
-  it.skip('suggests fetching a remote-tracking ref’s branch from its remote', () => {
+  // `git fetch origin origin/main` would fail ("couldn't find remote ref origin/main"); `origin/main` is the base
+  // flowpact itself suggests.
+  it('suggests fetching a remote-tracking ref’s branch from its remote', () => {
     expect(() => resolveCommit(root, 'origin/main')).toThrow('(for example `git fetch origin main`,');
     expect(() => resolveCommit(root, 'refs/remotes/origin/main')).toThrow(
       '(for example `git fetch origin main`,',
@@ -269,10 +269,8 @@ describe('gitFileSystem', () => {
     expect(fs.isDir('vendor')).toBe(false);
   });
 
-  // Suspected bug: each link is resolved once, in ls-tree order, against the files found so far, so a link to a link
-  // does not resolve like in the working tree. When the next link sorts later the file is missing; when it sorts
-  // earlier, read() returns that link's target text; a link through a symlinked directory makes read() throw.
-  it.skip('follows links to links, and links through a linked directory, like the working tree', () => {
+  // Whatever order ls-tree lists them in: the next link may sort later (a.yml → b.yml) or earlier (e.yml → b.yml).
+  it('follows links to links, and links through a linked directory, like the working tree', () => {
     const chains = join(tmp, 'chains');
     mkdirSync(chains);
     run(chains, 'init', '-q', '-b', 'main');
@@ -284,6 +282,10 @@ describe('gitFileSystem', () => {
     write(chains, '.github/actions/build/action.yml', ACTION);
     link(chains, 'linked', '.github/actions');
     link(chains, 'via.yml', 'linked/build/action.yml');
+    // Loops: between two links, and a directory linked into itself.
+    link(chains, 'ping.yml', 'pong.yml');
+    link(chains, 'pong.yml', 'ping.yml');
+    link(chains, 'd/up', '..');
     run(chains, 'add', '-A');
     run(chains, 'commit', '-q', '-m', 'chains');
     const fs = gitFileSystem(chains, resolveCommit(chains, 'HEAD'));
@@ -292,6 +294,47 @@ describe('gitFileSystem', () => {
       Object.fromEntries(paths.map((p) => [p, 'hello\n'])),
     );
     expect(fs.read('via.yml')).toBe(ACTION);
+    expect(fs.read('ping.yml')).toBeUndefined();
+    expect(fs.walk('d')).toEqual(['d/z.yml']);
+  });
+
+  it('nests linked directories only as deep as the OS follows links', () => {
+    const deep = join(tmp, 'deep');
+    mkdirSync(deep);
+    run(deep, 'init', '-q', '-b', 'main');
+    // A chain of 41 linked directories; the OS gives up after 40 links in one path (ELOOP).
+    for (let i = 0; i < 41; i++) {
+      write(deep, `L${i}/f.txt`, `${i}\n`);
+      link(deep, `L${i}/next`, `../L${i + 1}`);
+    }
+    write(deep, 'L41/f.txt', '41\n');
+    run(deep, 'add', '-A');
+    run(deep, 'commit', '-q', '-m', 'deep');
+    const fs = gitFileSystem(deep, resolveCommit(deep, 'HEAD'));
+    expect(fs.read('L0/next/f.txt')).toBe('1\n');
+    expect(fs.read(`L0/${'next/'.repeat(40)}f.txt`)).toBe('40\n');
+    expect(fs.read(`L0/${'next/'.repeat(41)}f.txt`)).toBeUndefined();
+  });
+
+  it('bounds linked directories that fan out, keeping the shallowest paths', () => {
+    const wide = join(tmp, 'wide');
+    mkdirSync(wide);
+    run(wide, 'init', '-q', '-b', 'main');
+    // 24 levels of directories that each link twice to the next: 2^24 paths if every link were expanded.
+    for (let i = 0; i < 24; i++) {
+      write(wide, `F${i}/f.txt`, `${i}\n`);
+      link(wide, `F${i}/a`, `../F${i + 1}`);
+      link(wide, `F${i}/b`, `../F${i + 1}`);
+    }
+    write(wide, 'F24/f.txt', '24\n');
+    write(wide, 'Z/plain.txt', 'z\n');
+    run(wide, 'add', '-A');
+    run(wide, 'commit', '-q', '-m', 'wide');
+    const fs = gitFileSystem(wide, resolveCommit(wide, 'HEAD'));
+    expect(fs.walk('.').length).toBeLessThan(5_000);
+    expect(fs.read('F0/a/f.txt')).toBe('1\n');
+    expect(fs.read('F0/b/a/b/f.txt')).toBe('3\n');
+    expect(fs.read('Z/plain.txt')).toBe('z\n');
   });
 
   it('reads paths relative to a subdirectory of the repository, and nothing outside it', () => {

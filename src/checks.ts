@@ -19,6 +19,7 @@ import {
   evaluate,
   evaluateTemplate,
   findTemplateSegments,
+  formatNumber,
   type Json,
   known,
   type TemplateSegment,
@@ -42,19 +43,7 @@ export interface CheckName {
   jobs: string[];
 }
 
-/** Formats a number like .NET's `ToString("G15")`, which GitHub uses for matrix values. */
-export function formatNumber(n: number): string {
-  if (!Number.isFinite(n)) return String(n);
-  if (n === 0) return '0';
-  const exp = Math.floor(Math.log10(Math.abs(n)));
-  const [mantissa, e] = n.toPrecision(15).split('e') as [string, string | undefined];
-  const trim = (s: string) => (s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s);
-  if (exp > -5 && exp < 15 && e === undefined) return trim(mantissa);
-  const sci = n.toExponential(14);
-  const [m, x] = sci.split('e') as [string, string];
-  const power = Number(x);
-  return `${trim(m)}E${power < 0 ? '-' : '+'}${String(Math.abs(power)).padStart(2, '0')}`;
-}
+export { formatNumber };
 
 /** A matrix value as it appears in the suffix: flattened, with `null` and `''` left out. */
 export function suffixValues(value: Json): string[] {
@@ -214,9 +203,12 @@ export function workflowChecks(
   const values: InputValues = {};
   for (const [name, input] of Object.entries(wf.call?.inputs ?? {})) {
     const given = inputs === 'consumer' ? { known: false as const } : lookup(inputs, name);
-    if (given) values[name] = given;
-    else if (input.hasDefault) values[name] = { known: true, value: input.default as Json };
-    else values[name] = { known: true, value: null };
+    // Without a default, GitHub gives a boolean input `false`, a number `0` and anything else `''`.
+    const empty = input.type === 'boolean' ? false : input.type === 'number' ? 0 : '';
+    const value = input.hasDefault ? (input.default as Json) : empty;
+    // A default can be an expression (`${{ github.ref_name }}`), evaluated when the workflow is called.
+    const computed = typeof value === 'string' && value.includes('${{');
+    values[name] = given ?? (computed ? { known: false } : { known: true, value });
   }
   const out: CheckName[] = [];
   for (const job of Object.values(wf.jobs)) {

@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { matchesPattern } from './glob';
 import type { Project, UnverifiedUse } from './graph';
@@ -10,6 +10,9 @@ import { validateSchema } from './validate';
 import { workspaceResolver } from './workspace';
 
 export const WORKFLOWS_DIR = '.github/workflows';
+/** How many links one path may go through (the OS's ELOOP limit), and how many linked directories one walk expands. */
+const MAX_LINKS = 40;
+const MAX_LINKED_DIRS = 1_000;
 export const ACTIONS_DIR = '.github/actions';
 
 /** Read-only file access, so the loader runs on disk and against in-memory fixtures alike. */
@@ -51,7 +54,8 @@ export function insideRepository(root: string, abs: string): boolean {
   }
   const rel = toPosix(relative(realRoot, target));
   if (rel === '') return true;
-  if (rel.startsWith('..') || isAbsolute(rel)) return false;
+  // `..` as a whole segment: `..hidden` is a name inside the repository.
+  if (escapesRoot(rel)) return false;
   return rel !== '.git' && !rel.startsWith('.git/');
 }
 
@@ -92,16 +96,45 @@ export function nodeFileSystem(root: string): FileSystem {
     },
     walk: (dir) => {
       if (!inside(dir) || !statSync(abs(dir)).isDirectory()) return [];
-      return (
-        (readdirSync(abs(dir), { recursive: true, withFileTypes: true }) as import('node:fs').Dirent[])
-          .map((e) => toPosix(relative(root, join(e.parentPath, e.name))))
+      // Breadth first, like readdirSync's `recursive`, which follows linked directories without noticing a link to a
+      // directory that holds it: such a loop is not entered again (other links to the same directory still are). As in
+      // gitFileSystem, linked directories nest no deeper than the OS follows links and are expanded a bounded number of
+      // times, so links that fan out cannot multiply the walk; the shallowest paths are kept.
+      const out: string[] = [];
+      let linked = 0;
+      const queue: { dir: string; above: Set<string>; links: number }[] = [
+        { dir: toPosix(dir), above: new Set(), links: 0 },
+      ];
+      for (let i = 0; i < queue.length; i++) {
+        const next = queue[i]!;
+        const real = realpathSync(abs(next.dir));
+        if (next.above.has(real)) continue;
+        const above = new Set(next.above).add(real);
+        for (const name of readdirSync(abs(next.dir))) {
           // Dependencies and git internals never hold workflows or published actions.
-          .filter((f) => !/(^|\/)(node_modules|\.git)\//.test(f) && isFile(f))
-      );
+          if (name === 'node_modules' || name === '.git') continue;
+          const p = toPosix(join(next.dir, name));
+          if (isFile(p)) out.push(p);
+          else if (inside(p) && statSync(abs(p)).isDirectory()) {
+            const link = lstatSync(abs(p)).isSymbolicLink();
+            if (link && (next.links >= MAX_LINKS || linked++ >= MAX_LINKED_DIRS)) continue;
+            queue.push({ dir: p, above, links: next.links + (link ? 1 : 0) });
+          }
+        }
+      }
+      return out;
     },
     isDir: (p) => inside(p) && statSync(abs(p)).isDirectory(),
   };
 }
+
+/** The prefix of the paths below `dir`: `a/` for `a`, `a/`, `./a` or `./a/`, and `` for the root (`.`, `./`, ``). */
+const dirPrefix = (dir: string) => {
+  const d = toPosix(dir)
+    .replace(/^\.(\/|$)/, '')
+    .replace(/\/$/, '');
+  return d ? `${d}/` : '';
+};
 
 export function memoryFileSystem(files: Record<string, string>): FileSystem {
   const norm = Object.fromEntries(
@@ -109,10 +142,14 @@ export function memoryFileSystem(files: Record<string, string>): FileSystem {
   );
   const keys = Object.keys(norm);
   return {
-    read: (p) => norm[toPosix(p)],
-    list: (dir) => keys.filter((k) => k.startsWith(`${dir}/`) && !k.slice(dir.length + 1).includes('/')),
-    walk: (dir) => (dir === '.' || dir === '' ? [...keys] : keys.filter((k) => k.startsWith(`${dir}/`))),
-    isDir: (p) => keys.some((k) => k.startsWith(`${toPosix(p).replace(/\/$/, '')}/`)),
+    read: (p) => {
+      const key = toPosix(p).replace(/^\.\//, '');
+      return Object.hasOwn(norm, key) ? norm[key] : undefined;
+    },
+    list: (dir) =>
+      keys.filter((k) => k.startsWith(dirPrefix(dir)) && !k.slice(dirPrefix(dir).length).includes('/')),
+    walk: (dir) => keys.filter((k) => k.startsWith(dirPrefix(dir))),
+    isDir: (p) => keys.some((k) => k.startsWith(dirPrefix(p))),
   };
 }
 
@@ -123,26 +160,20 @@ export function memoryFileSystem(files: Record<string, string>): FileSystem {
 export function overlayFileSystem(base: FileSystem, files: ReadonlyMap<string, string>): FileSystem {
   const norm = new Map([...files].map(([k, v]) => [toPosix(k).replace(/^\.\//, ''), v]));
   const keys = [...norm.keys()];
-  const prefix = (dir: string) => {
-    const d = toPosix(dir)
-      .replace(/^\.(\/|$)/, '')
-      .replace(/\/$/, '');
-    return d ? `${d}/` : '';
-  };
   const union = (a: string[], b: string[]) => [...new Set([...a, ...b])];
   return {
     read: (p) => norm.get(toPosix(p).replace(/^\.\//, '')) ?? base.read(p),
     list: (dir) =>
       union(
         base.list(dir),
-        keys.filter((k) => k.startsWith(prefix(dir)) && !k.slice(prefix(dir).length).includes('/')),
+        keys.filter((k) => k.startsWith(dirPrefix(dir)) && !k.slice(dirPrefix(dir).length).includes('/')),
       ),
     walk: (dir) =>
       union(
         base.walk(dir),
-        keys.filter((k) => k.startsWith(prefix(dir))),
+        keys.filter((k) => k.startsWith(dirPrefix(dir))),
       ),
-    isDir: (p) => base.isDir(p) || (prefix(p) !== '' && keys.some((k) => k.startsWith(prefix(p)))),
+    isDir: (p) => base.isDir(p) || (dirPrefix(p) !== '' && keys.some((k) => k.startsWith(dirPrefix(p)))),
   };
 }
 
@@ -177,7 +208,8 @@ export function detectRepository(
   const gitConfig = join(root, '.git', 'config');
   if (!existsSync(gitConfig)) return undefined;
   const text = readFileSync(gitConfig, 'utf8');
-  const origin = /\[remote "origin"\][^[]*?url\s*=\s*(\S+)/.exec(text)?.[1];
+  // `url` at the start of a line, not the end of `pushurl`.
+  const origin = /\[remote "origin"\][^[]*?^[ \t]*url\s*=\s*(\S+)/m.exec(text)?.[1];
   const m = origin && /github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/.exec(origin);
   return m ? m[1] : undefined;
 }
@@ -205,11 +237,16 @@ export function loadProject(opts: LoadProjectOptions): Project {
     return wf;
   };
 
+  /** The metadata file of the action in `dir`: action.yml, else action.yaml. */
+  const actionFile = (dir: string): string | undefined => {
+    const base = dir === '.' ? '' : `${dir}/`;
+    return [`${base}action.yml`, `${base}action.yaml`].find((f) => fs.read(f) !== undefined);
+  };
+
   const loadAction = (dir: string): ActionDecl | undefined => {
     if (actions.has(dir)) return actions.get(dir);
     if (escapesRoot(dir)) return undefined;
-    const base = dir === '.' ? '' : `${dir}/`;
-    const file = [`${base}action.yml`, `${base}action.yaml`].find((f) => fs.read(f) !== undefined);
+    const file = actionFile(dir);
     if (!file) return undefined;
     const action = logger.time(`parse ${file}`, () => parseActionFile(dir, file, fs.read(file)!, ctx));
     actions.set(dir, action);
@@ -218,16 +255,18 @@ export function loadProject(opts: LoadProjectOptions): Project {
   };
 
   const discovered = fs.list(WORKFLOWS_DIR).filter(isYaml).sort();
-  const actionFiles = fs.walk(ACTIONS_DIR).filter(isActionFile).sort();
+  const actionFiles = new Set(fs.walk(ACTIONS_DIR).filter(isActionFile).sort());
   // The repository's own action (what `uses: owner/repo@ref` runs) is part of the project even when no workflow here
-  // uses it, and so are the actions `impact.publish` lists.
-  if (['action.yml', 'action.yaml'].some((f) => fs.read(f) !== undefined)) actionFiles.push('action.yml');
-  for (const pattern of opts.publish ?? []) {
-    // An exact file is loaded directly; a glob walks the directory before its first wildcard.
+  // uses it, and so are the actions `impact.publish` lists (each once, however many patterns match it).
+  const rootAction = actionFile('.');
+  if (rootAction) actionFiles.add(rootAction);
+  for (const raw of opts.publish ?? []) {
+    // One spelling per path, so `./tools/b` and `tools/b` are the same unit.
+    const pattern = toPosix(raw).replace(/^\.\//, '') || '.';
+    // An exact file or directory is loaded directly; a glob walks the directory before its first wildcard.
     if (!/[*?[]/.test(pattern)) {
-      const file = isActionFile(pattern) ? pattern : `${pattern.replace(/\/$/, '')}/action.yml`;
-      if (isActionFile(file) && !file.startsWith('.github/actions/') && fs.read(file) !== undefined)
-        actionFiles.push(file);
+      const file = isActionFile(pattern) ? pattern : actionFile(pattern.replace(/\/$/, ''));
+      if (file && !file.startsWith('.github/actions/') && fs.read(file) !== undefined) actionFiles.add(file);
       continue;
     }
     const literal = pattern.split(/[*?[]/)[0]!;
@@ -235,11 +274,11 @@ export function loadProject(opts: LoadProjectOptions): Project {
     for (const f of dir ? fs.walk(dir) : fs.walk('.')) {
       if (!isActionFile(f) || f.startsWith('.github/actions/')) continue;
       const unitDir = f.replace(/\/?action\.ya?ml$/i, '') || '.';
-      if (matchesPattern(f, pattern) || matchesPattern(unitDir, pattern)) actionFiles.push(f);
+      if (matchesPattern(f, pattern) || matchesPattern(unitDir, pattern)) actionFiles.add(f);
     }
   }
-  logger.info(`discovered ${discovered.length} workflow(s) and ${actionFiles.length} local action(s)`);
-  logger.debug('files', { workflows: discovered, actions: actionFiles });
+  logger.info(`discovered ${discovered.length} workflow(s) and ${actionFiles.size} local action(s)`);
+  logger.debug('files', { workflows: discovered, actions: [...actionFiles] });
 
   const targets = new Set<string>();
   const missingTargets: string[] = [];

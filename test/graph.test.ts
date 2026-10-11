@@ -906,10 +906,9 @@ describe('ProjectIndex.resolveRef and readsOf', () => {
     expect(index.jobOutputNames(jobs.use!)).toEqual([]);
   });
 
-  // Suspected bug in graph.ts: a step's own `env:` shadows the job's (and the workflow's) in that step's `with:` and
-  // `run:`, but resolveRef('env') never looks at the step, so the step below is recorded as reading the job's MODE.
-  // Skipped until step env is modeled; the step's MODE is not a graph symbol, so the read should resolve to nothing.
-  it.skip('does not resolve env a step redefines to the job’s variable', () => {
+  // A step's own `env:` shadows the job's (and the workflow's) in that step's `with:` and `run:`. The step's MODE is not
+  // a graph symbol, so the read resolves to nothing.
+  it('does not resolve env a step redefines to the job’s variable', () => {
     const E = `${WF}/shadow.yml`;
     const { index: shadow } = load({
       [E]: yaml`
@@ -926,5 +925,70 @@ describe('ProjectIndex.resolveRef and readsOf', () => {
       `,
     });
     expect(shadow.usagesOf(sym.env(E, 'a', 'MODE'))).toEqual([]);
+  });
+
+  // A read of a step's own env value reads what that value reads, so a value the step re-wraps keeps flowing.
+  it('follows a step’s own env value to what it reads', () => {
+    const E = `${WF}/wrap.yml`;
+    const A = '.github/actions/a';
+    const { index: wrap } = load({
+      [E]: yaml`
+        on:
+          workflow_dispatch:
+            inputs:
+              x: { type: string }
+        jobs:
+          j:
+            runs-on: x
+            env:
+              FOO: \${{ inputs.x }}
+            steps:
+              - uses: ./.github/actions/a
+                env:
+                  FOO: \${{ env.FOO }}-s
+                with:
+                  a: \${{ env.FOO }}
+              - uses: ./.github/actions/a
+                env:
+                  FOO: literal
+                with:
+                  a: \${{ env.FOO }}
+      `,
+      [`${A}/action.yml`]: yaml`
+        name: a
+        description: d
+        inputs:
+          a: { description: a }
+        runs:
+          using: composite
+          steps:
+            - run: echo
+              shell: bash
+      `,
+    });
+    // Only the first step's input comes from the job's FOO (through the step's own FOO); the second is a literal.
+    expect(wrap.incoming(sym.input(A, 'a'), 'flows').map((e) => e.from)).toEqual([sym.env(E, 'j', 'FOO')]);
+  });
+
+  // The step's env values are evaluated before the step's env applies, so they read the job's.
+  it('resolves env in a step’s own env values to the job’s variable', () => {
+    const E = `${WF}/outer.yml`;
+    const { index: outer } = load({
+      [E]: yaml`
+        on: push
+        jobs:
+          a:
+            runs-on: x
+            env:
+              MODE: job
+            steps:
+              - run: echo
+                env:
+                  MODE: \${{ env.MODE }}-step
+      `,
+    });
+    expect(outer.usagesOf(sym.env(E, 'a', 'MODE')).map((u) => `${u.site.field} ${u.site.key}`)).toEqual([
+      'step.env MODE',
+    ]);
   });
 });

@@ -724,10 +724,9 @@ describe('IR lookups', () => {
     expect(hasKey(rec, 'test')).toBe(false);
   });
 
-  // Suspected bug: `key in rec` in ir.ts also finds Object.prototype members: lookup({}, 'toString') returns
-  // Object.prototype.toString, so `matrix.constructor` in a combination without that key reads as unknown instead of
-  // missing, and matrixResolver's nested lookup can return a function as a JSON value.
-  it.skip('finds only the record’s own keys', () => {
+  // Object.prototype members are not keys: `matrix.constructor` in a combination without that key is missing, and a
+  // nested lookup never returns a function as a JSON value.
+  it('finds only the record’s own keys', () => {
     const rec: Record<string, number> = { a: 1 };
     expect(lookup(rec, 'toString')).toBeUndefined();
     expect(hasKey(rec, 'constructor')).toBe(false);

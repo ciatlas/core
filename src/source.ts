@@ -23,8 +23,9 @@ export class SourceFile {
 
   /** Converts a [start, end) character offset range to a {@link Loc}. Requires the line counter to be populated by the YAML parser. */
   loc(start: number, end: number = start): Loc {
-    const a = this.lineCounter.linePos(Math.max(0, start));
-    const b = this.lineCounter.linePos(Math.max(start, end));
+    const from = Math.max(0, start);
+    const a = this.lineCounter.linePos(from);
+    const b = this.lineCounter.linePos(Math.max(from, end));
     return { file: this.path, line: a.line, column: a.col, endLine: b.line, endColumn: b.col };
   }
 }

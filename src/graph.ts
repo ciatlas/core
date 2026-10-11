@@ -521,6 +521,10 @@ export class ProjectIndex {
       }
       case 'env': {
         if (!a || a === '*' || a === '?') return undefined;
+        // A step's own `env:` shadows the job's and the workflow's in the rest of the step (it is not a symbol); its
+        // values are evaluated before it applies, so they read the outer env.
+        const step = site.field === 'step.env' ? undefined : this.stepOf(unit, site);
+        if (step && lookup(step.env, a)) return undefined;
         if (unit.kind === 'workflow' && site.job) {
           const job = unit.jobs[site.job];
           if (job && lookup(job.env, a)) return sym.env(unit.path, job.id, lookup(job.env, a)!.name);
@@ -545,6 +549,11 @@ export class ProjectIndex {
     if (one) return [one];
     const [a, b, c] = ref.path;
     const computed = (s: string | undefined) => s === undefined || s === '*' || s === '?';
+    // A step's own env value is not a symbol: a read of it reads what the value reads (from the outer env).
+    if (ref.context === 'env' && !computed(a) && site.field !== 'step.env') {
+      const own = lookup(this.stepOf(unit, site)?.env ?? {}, a!)?.site;
+      return own ? own.segments.flatMap((s) => s.refs.flatMap((r) => this.readsOf(unit, own, r))) : [];
+    }
     /** The outputs `<job or step>.<b>.<c>` reads: all of them, one by name, or none (`needs.build.result`). */
     const pick = (names: string[]): string[] => {
       if (computed(b)) return names;

@@ -250,9 +250,9 @@ export interface ActionDecl extends BaseDecl {
 
 export type UnitDecl = WorkflowDecl | ActionDecl;
 
-/** Case-insensitive lookup, matching how GitHub resolves context property names. */
+/** Case-insensitive lookup of an own key, matching how GitHub resolves context property names. */
 export function lookup<T>(rec: Record<string, T>, key: string): T | undefined {
-  if (key in rec) return rec[key];
+  if (Object.hasOwn(rec, key)) return rec[key];
   const lower = key.toLowerCase();
   for (const k of Object.keys(rec)) if (k.toLowerCase() === lower) return rec[k];
   return undefined;

@@ -11,6 +11,10 @@ import { trimChar } from './text';
 export class GitError extends Error {}
 
 const MAX_BUFFER = 256 * 1024 * 1024;
+/** Like Linux, more links than this in one path is taken for a loop. */
+const MAX_LINKS = 40;
+/** Linked directories one commit's file system expands, as nodeFileSystem.walk does (see gitFileSystem). */
+const MAX_LINKED_DIRS = 1_000;
 
 function git(root: string, args: string[], input?: string): Buffer {
   try {
@@ -44,8 +48,10 @@ export function resolveCommit(root: string, ref: string): string {
       .toString()
       .trim();
   } catch {
+    // A remote-tracking ref (`origin/main`) is fetched as the remote's branch (`main`).
+    const branch = ref.replace(/^(refs\/remotes\/)?origin\//, '');
     throw new GitError(
-      `${ref} is not available in this clone. Fetch it first (for example \`git fetch origin ${ref}\`, or check out with fetch-depth: 0).`,
+      `${ref} is not available in this clone. Fetch it first (for example \`git fetch origin ${branch}\`, or check out with fetch-depth: 0).`,
     );
   }
 }
@@ -63,42 +69,84 @@ export function isGitRepository(root: string): boolean {
 export function gitFileSystem(root: string, commit: string): FileSystem & { commit: string } {
   // `ls-tree` paths are relative to the repository top level; flowpact paths are relative to `root`.
   const prefix = git(root, ['rev-parse', '--show-prefix']).toString().trim();
-  const files = new Set<string>();
-  const links: string[] = [];
+  // Tree paths, relative to the top level.
+  const blobs = new Set<string>();
+  const links = new Set<string>();
   const out = git(root, ['ls-tree', '-r', '-z', '--full-tree', commit]).toString();
   for (const entry of out.split('\0')) {
     if (!entry) continue;
     const tab = entry.indexOf('\t');
     const [mode, type] = entry.slice(0, tab).split(' ');
     const path = entry.slice(tab + 1);
-    if (prefix && !path.startsWith(prefix)) continue;
-    if (type === 'blob' && mode === '120000') links.push(path);
+    if (type === 'blob' && mode === '120000') links.add(path);
     // Regular files; submodules (commit entries) are skipped.
-    else if (type === 'blob' && (mode === '100644' || mode === '100755'))
-      files.add(path.slice(prefix.length));
+    else if (type === 'blob' && (mode === '100644' || mode === '100755')) blobs.add(path);
   }
   // In-repository symlinks resolve like they do in the working tree (a symlinked action is the same unit on both
-  // sides); links that leave the repository or point into .git are ignored, as nodeFileSystem does.
-  const alias = new Map<string, string>();
-  for (const link of links) {
-    const target = posix.normalize(
-      posix.join(posix.dirname(link), git(root, ['cat-file', 'blob', `${commit}:${link}`]).toString()),
-    );
-    if (target.startsWith('../') || target === '..' || target === '.git' || target.startsWith('.git/'))
-      continue;
-    if (prefix && !target.startsWith(prefix)) continue;
-    const from = link.slice(prefix.length);
-    const to = target.slice(prefix.length);
-    if (files.has(to)) {
-      alias.set(from, to);
-      files.add(from);
-      continue;
+  // sides), through other links and linked directories too; links that leave the repository (or `root`), point into
+  // .git or loop are ignored, as nodeFileSystem does.
+  const targets = new Map<string, string>();
+  const target = (link: string) => {
+    if (!targets.has(link))
+      targets.set(link, git(root, ['cat-file', 'blob', `${commit}:${link}`]).toString());
+    return targets.get(link)!;
+  };
+  /** The tree path `path` stands for once every link in it is followed, or undefined. */
+  const resolve = (path: string): string | undefined => {
+    let p = path;
+    for (let followed = 0; ; followed++) {
+      const parts = p.split('/');
+      const end = parts.findIndex((_, i) => links.has(parts.slice(0, i + 1).join('/')));
+      if (end < 0) return p;
+      if (followed === MAX_LINKS) return undefined;
+      const link = parts.slice(0, end + 1).join('/');
+      const to = target(link);
+      if (!to || posix.isAbsolute(to)) return undefined;
+      p = trimChar(posix.join(posix.dirname(link), to, ...parts.slice(end + 1)), '/');
+      if (p === '..' || p.startsWith('../') || p === '.git' || p.startsWith('.git/')) return undefined;
+      if (p === '.') p = '';
     }
-    for (const f of [...files]) {
-      if (!f.startsWith(`${to}/`)) continue;
-      const virtual = `${from}/${f.slice(to.length + 1)}`;
-      alias.set(virtual, f);
-      files.add(virtual);
+  };
+  const top = trimChar(prefix, '/');
+  const inRoot = (p: string) => top === '' || p === top || p.startsWith(`${top}/`);
+  /** The files `root` shows, by path relative to it, with the tree path each reads. */
+  const files = new Map<string, string>();
+  const sortedBlobs = [...blobs].sort();
+  const sortedLinks = [...links].sort();
+  /** The paths in sorted `paths` that start with `prefix`, found by binary search: an expansion costs what it adds. */
+  const within = (paths: string[], prefix: string): string[] => {
+    let lo = 0;
+    let hi = paths.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (paths[mid]! < prefix) lo = mid + 1;
+      else hi = mid;
+    }
+    const out: string[] = [];
+    for (let i = lo; i < paths.length && paths[i]!.startsWith(prefix); i++) out.push(paths[i]!);
+    return out;
+  };
+  /**
+   * The files `root` shows, by path relative to it, with the tree path each reads: tree directory `dir` shows as `as`.
+   * Breadth first, through the links in `via`: a link to a directory that holds it or one of them loops, and is not
+   * expanded. Like nodeFileSystem.walk, linked directories nest no deeper than the OS follows links (ELOOP) and at most
+   * MAX_LINKED_DIRS of them are expanded, so links that fan out cannot multiply the tree; the shallowest are kept.
+   */
+  let expanded = 0;
+  const queue: { dir: string; as: string; via: string[] }[] = [{ dir: top, as: '', via: [] }];
+  for (let i = 0; i < queue.length; i++) {
+    const { dir, as, via } = queue[i]!;
+    if (via.length && expanded++ >= MAX_LINKED_DIRS) continue;
+    const d = dir ? `${dir}/` : '';
+    for (const f of within(sortedBlobs, d)) files.set(`${as}${f.slice(d.length)}`, f);
+    for (const link of within(sortedLinks, d)) {
+      const to = resolve(link);
+      if (to === undefined || !inRoot(to)) continue;
+      const at = `${as}${link.slice(d.length)}`;
+      const chain = [...via, link];
+      if (blobs.has(to)) files.set(at, to);
+      else if (chain.length <= MAX_LINKS && !chain.some((l) => to === '' || l.startsWith(`${to}/`)))
+        queue.push({ dir: to, as: `${at}/`, via: chain });
     }
   }
   const cache = new Map<string, string | undefined>();
@@ -113,23 +161,20 @@ export function gitFileSystem(root: string, commit: string): FileSystem & { comm
       const p = norm(path);
       if (!files.has(p)) return undefined;
       if (!cache.has(p))
-        cache.set(
-          p,
-          git(root, ['cat-file', 'blob', `${commit}:${prefix}${alias.get(p) ?? p}`]).toString('utf8'),
-        );
+        cache.set(p, git(root, ['cat-file', 'blob', `${commit}:${files.get(p)}`]).toString('utf8'));
       return cache.get(p);
     },
     list(dir) {
       const d = under(dir);
-      return [...files].filter((f) => f.startsWith(d) && !f.slice(d.length).includes('/')).sort();
+      return [...files.keys()].filter((f) => f.startsWith(d) && !f.slice(d.length).includes('/')).sort();
     },
     walk(dir) {
       const d = under(dir);
-      return [...files].filter((f) => f.startsWith(d)).sort();
+      return [...files.keys()].filter((f) => f.startsWith(d)).sort();
     },
     isDir(path) {
       const d = under(path);
-      return [...files].some((f) => f.startsWith(d));
+      return [...files.keys()].some((f) => f.startsWith(d));
     },
   };
 }
