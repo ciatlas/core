@@ -438,6 +438,8 @@ function steps(
     const name = str(get(item, 'name'));
     const usesRaw = str(usesNode);
     const ifSite = unit.siteByPath.get(pathKey([...p, 'if']));
+    const ifNode = get(item, 'if');
+    const ifValue = isScalar(ifNode) && typeof ifNode.value === 'boolean' ? ifNode.value : undefined;
     void at;
     return {
       index,
@@ -448,6 +450,7 @@ function steps(
       ...(run !== undefined ? { run, runLoc: nodeLoc(unit.source, runNode) } : {}),
       with: bindings(unit, get(item, 'with'), [...p, 'with']),
       env: bindings(unit, get(item, 'env'), [...p, 'env']),
+      ...(ifValue !== undefined ? { ifValue } : {}),
       ...(ifSite ? { ifSite } : {}),
       writesOutputs:
         run !== undefined ? scanRunWrites(run, 'GITHUB_OUTPUT') : scriptWrites(item, 'GITHUB_OUTPUT'),

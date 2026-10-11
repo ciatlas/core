@@ -177,10 +177,14 @@ describe('expression locations', () => {
 
   it('classifies bare if: as a condition and boolean if: as a literal', () => {
     const wf = parse(
-      'on: push\njobs:\n  j:\n    if: false\n    runs-on: x\n    steps:\n      - if: success()\n        run: x\n',
+      'on: push\njobs:\n  j:\n    if: false\n    runs-on: x\n    steps:\n      - if: success()\n        run: x\n      - if: false\n        run: y\n',
     );
     expect(wf.jobs.j!.ifSite).toBeUndefined();
+    expect(wf.jobs.j!.ifValue).toBe(false);
     expect(wf.jobs.j!.steps[0]!.ifSite!.segments[0]!.expr.source).toBe('success()');
+    expect(wf.jobs.j!.steps[0]!.ifValue).toBeUndefined();
+    expect(wf.jobs.j!.steps[1]!.ifSite).toBeUndefined();
+    expect(wf.jobs.j!.steps[1]!.ifValue).toBe(false);
   });
 });
 

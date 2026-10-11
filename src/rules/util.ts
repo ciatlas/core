@@ -17,6 +17,14 @@ export function isWholeExpression(site: ExprSite): boolean {
   );
 }
 
+/** A job's or step's `if:` that decides whether a site is evaluated: its expression, or `false` for a literal `if: false`. */
+export type Guard = ExprSite | false;
+
+/** The guard a job's or step's `if:` sets, if any. A literal `if: false` (a YAML boolean) has no site but never runs. */
+export function guardOf(decl: { ifValue?: boolean; ifSite?: ExprSite }): Guard | undefined {
+  return decl.ifValue === false ? false : decl.ifSite;
+}
+
 /** How a condition site uses a reference: only the value of a whole-expression `if:` decides by truthiness. */
 export function useInCondition(site: ExprSite, ref: LocatedRef): ConditionUse | undefined {
   const seg = site.segments.find((s) => s.refs.includes(ref));

@@ -161,6 +161,8 @@ export interface StepDecl {
   runLoc?: Loc;
   with: Record<string, Binding>;
   env: Record<string, Binding>;
+  /** `if:` written as a YAML boolean (`if: false`), which has no expression site. */
+  ifValue?: boolean;
   ifSite?: ExprSite;
   /** Output names an inline `run` script writes to `$GITHUB_OUTPUT`; `dynamic` when it cannot tell. */
   writesOutputs: { names: string[]; dynamic: boolean; mentions: boolean };

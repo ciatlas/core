@@ -15,12 +15,12 @@ const callee = yaml`
 `;
 
 describe('FP401 empty-binding-for-matrix-combo — the shipped-without-a-variant incident', () => {
-  const files = (binding: string, extraEntry = '') => ({
+  const files = (binding: string, extraEntry = '', jobIf = '') => ({
     [`${WF}/root.yml`]: 'on: push\njobs:\n  t:\n    uses: ./.github/workflows/tests.yml\n',
     [`${WF}/tests.yml`]: yaml`
       on: workflow_call
       jobs:
-        run:
+        run:${jobIf}
           strategy:
             matrix:
               include:
@@ -34,6 +34,13 @@ describe('FP401 empty-binding-for-matrix-combo — the shipped-without-a-variant
     `,
     // As in the incident: the callee skips its work when the optional config is empty.
     [`${WF}/callee.yml`]: callee.replace('runs-on: x', "runs-on: x\n    if: inputs.config != ''"),
+  });
+
+  it('skips a call that never runs: if: false, quoted or not', () => {
+    const fp401 = (jobIf: string) => byCode(lint(files('${{ matrix.config }}', '', jobIf)), 'FP401');
+    expect(fp401('\n          if: true')).toHaveLength(1);
+    for (const cond of ['false', "'false'", '${{ false }}'])
+      expect(fp401(`\n          if: ${cond}`), cond).toEqual([]);
   });
 
   it('names the combination, the include entry, the chain and the receiving input', () => {
@@ -215,13 +222,13 @@ describe('FP401 empty-binding-for-matrix-combo — the shipped-without-a-variant
 });
 
 describe('FP402 matrix-key-missing-in-combo', () => {
-  const w = (step: string) =>
+  const w = (step: string, jobIf = '') =>
     lint({
       [`${WF}/w.yml`]: yaml`
         on: push
         jobs:
           j:
-            runs-on: x
+            runs-on: x${jobIf}
             continue-on-error: \${{ matrix.experimental }}
             strategy:
               matrix:
@@ -244,8 +251,28 @@ describe('FP402 matrix-key-missing-in-combo', () => {
   });
 
   it('exempts conditions and continue-on-error', () => {
-    const r = w('if: matrix.experimental\n          run: echo x');
+    const r = w('if: matrix.experimental\n                run: echo x');
     expect(byCode(r, 'FP402')).toEqual([]);
+  });
+
+  it('skips steps and jobs that never run: if: false, quoted or not', () => {
+    const step = 'run: ./test --shard ${{ matrix.shard }}';
+    expect(byCode(w(step), 'FP402')).toHaveLength(1);
+    for (const cond of ['false', "'false'", '${{ false }}']) {
+      expect(byCode(w(`if: ${cond}\n                ${step}`), 'FP402'), `step if: ${cond}`).toEqual([]);
+      expect(byCode(w(step, `\n            if: ${cond}`), 'FP402'), `job if: ${cond}`).toEqual([]);
+    }
+  });
+
+  it('counts only if:s that are always false: not if: true, text around ${{ }}, or a job if: that reads matrix', () => {
+    const step = 'run: ./test --shard ${{ matrix.shard }}';
+    // Text around `${{ }}` makes a non-empty string, which is always true.
+    for (const cond of ['true', "${{ false }} && github.event_name == 'push'"]) {
+      expect(byCode(w(`if: ${cond}\n                ${step}`), 'FP402'), `step if: ${cond}`).toHaveLength(1);
+      expect(byCode(w(step, `\n            if: ${cond}`), 'FP402'), `job if: ${cond}`).toHaveLength(1);
+    }
+    // GitHub rejects `matrix` in a job's if: (FP505), so it skips no combinations.
+    expect(byCode(w(step, '\n            if: matrix.shard'), 'FP402')).toHaveLength(1);
   });
 
   describe('treats quoted shell tests in run scripts as explicit handling', () => {
@@ -361,13 +388,13 @@ describe('FP404 undefined-matrix-key', () => {
   });
 
   describe('reads with a fallback that always applies (envoy _check_build_openssl.yml)', () => {
-    const w = (value: string, extra = '') =>
+    const w = (value: string, extra = '', jobIf = '') =>
       lint({
         [`${WF}/w.yml`]: yaml`
           on: push
           jobs:
             build:
-              runs-on: x
+              runs-on: x${jobIf}
               strategy:
                 matrix:
                   include:
@@ -379,8 +406,19 @@ describe('FP404 undefined-matrix-key', () => {
       });
     const fp404 = (value: string, extra?: string) =>
       byCode(w(value, extra), 'FP404').map((f) => `${f.severity} ${f.loc.column} ${f.message}`);
-    const severities = (value: string, extra?: string) =>
-      byCode(w(value, extra), 'FP404').map((f) => f.severity);
+    const severities = (value: string, extra?: string, jobIf?: string) =>
+      byCode(w(value, extra, jobIf), 'FP404').map((f) => f.severity);
+
+    it('judges reads that never run as written: if: false keeps the severity', () => {
+      const stepIf = 'if: false\n                  ';
+      const jobIf = '\n              if: false';
+      expect(severities("${{ matrix.docker-ci || 'x' }}", stepIf)).toEqual(['info']);
+      expect(severities("${{ matrix.docker-ci || '' }}", stepIf)).toEqual(['error']);
+      expect(severities("${{ matrix.docker-ci || '' }}", undefined, jobIf)).toEqual(['error']);
+      expect(severities('x', "if: (matrix.os || 'linux') == 'linux'\n                  ", jobIf)).toEqual([
+        'info',
+      ]);
+    });
 
     it.each([
       ['a fallback', '${{ matrix.docker-ci || false }}'],

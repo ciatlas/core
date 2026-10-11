@@ -31,7 +31,16 @@ import {
 } from '../matrix';
 import type { Loc } from '../source';
 import { defineRule, type RelatedLocation, type RuleContext, type RuleDefinition } from './types';
-import { chainRelated, chainTo, didYouMean, isWholeExpression, quote, useInCondition } from './util';
+import {
+  chainRelated,
+  chainTo,
+  didYouMean,
+  type Guard,
+  guardOf,
+  isWholeExpression,
+  quote,
+  useInCondition,
+} from './util';
 
 const hasMatrixRef = (site: ExprSite) =>
   site.segments.some((s) => s.refs.some((r) => r.context === 'matrix'));
@@ -101,17 +110,26 @@ function unhandledReads(site: ExprSite, key: string): { text: string; tested: Se
   return { text: text + site.text.slice(at), tested };
 }
 
-/** True when an `if:` site is false for this combination whatever runtime state says (the step is skipped there). */
-function skippedIn(guard: ExprSite, combo: Combination): boolean {
-  const seg = guard.segments[0];
-  if (guard.segments.length !== 1 || !seg?.expr.ast) return false;
-  return definitelyFalsy(seg.expr.ast, matrixResolver(combo));
+/** True when an `if:` is false for this combination whatever runtime state says (the job or step is skipped there). */
+function skippedIn(guard: Guard, combo: Combination): boolean {
+  if (guard === false) return true;
+  // Text around `${{ }}` makes the condition a non-empty string, which is always true.
+  const ast = isWholeExpression(guard) ? guard.segments[0]?.expr.ast : undefined;
+  return ast !== undefined && definitelyFalsy(ast, matrixResolver(combo));
 }
 
-/** The step's `if:` decides whether a step-level site is evaluated (`matrix` is not available in a job's `if:`). */
-function guardsOf(job: JobDecl, site: ExprSite): ExprSite[] {
+/**
+ * The `if:`s that decide whether a site is evaluated: the step's, and the job's. `matrix` is not available in a job's
+ * `if:` (GitHub rejects the workflow, FP505), so a job's `if:` that reads it is no guard, and only a constant one
+ * (`if: false`) skips combinations there.
+ */
+function guardsOf(job: JobDecl, site: ExprSite): Guard[] {
   const step = site.step !== undefined ? job.steps[site.step] : undefined;
-  return [step?.ifSite].filter((g): g is ExprSite => g !== undefined && g !== site);
+  const jobGuard = guardOf(job);
+  return [
+    jobGuard !== false && jobGuard && hasMatrixRef(jobGuard) ? undefined : jobGuard,
+    step && guardOf(step),
+  ].filter((g): g is Guard => g !== undefined && g !== site);
 }
 
 /** Combinations in which `site` evaluates with a missing matrix key, grouped with the keys that were missing. */
@@ -119,7 +137,7 @@ function affectedCombos(
   site: ExprSite,
   exp: MatrixExpansion,
   predicate: (v: ReturnType<typeof evaluateTemplate>) => boolean,
-  guards: ExprSite[] = [],
+  guards: Guard[] = [],
   onlyKey?: string,
   text = site.text,
 ): { combos: Combination[]; keys: string[]; perKey: Map<string, number> } {
@@ -498,7 +516,10 @@ function onlyFallbacks(site: ExprSite, key: string, job: JobDecl, exp: MatrixExp
   if (exp && didYouMean(key, exp.keys)) return false;
   const lower = key.toLowerCase();
   const guards = guardsOf(job, site);
-  const combos = combosOf(exp).filter((c) => !guards.some((g) => skippedIn(g, c)));
+  const all = combosOf(exp);
+  const live = all.filter((c) => !guards.some((g) => skippedIn(g, c)));
+  // When the job or step never runs, judge the read as written: the key is a typo either way.
+  const combos = live.length > 0 ? live : all;
   if (site.isCondition && isWholeExpression(site)) {
     const ast = site.segments[0]!.expr.ast;
     if (!ast) return false;

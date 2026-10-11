@@ -172,5 +172,15 @@ describe('FP205 undeclared-secret-ref', () => {
       expect(fp205(files(call('a'), 'always()', '\n            if: inputs.push'))).toEqual([]);
       expect(fp205(files(call('a'), 'always()', '\n            if: inputs.registry'))).toHaveLength(1);
     });
+
+    it('skips reads that never run: if: false, quoted or not', () => {
+      expect(fp205(files(call('a'), 'always()'))).toHaveLength(1);
+      for (const cond of ['false', "'false'", '${{ false }}']) {
+        expect(fp205(files(call('a'), cond)), `step if: ${cond}`).toEqual([]);
+        expect(fp205(files(call('a'), 'always()', `\n            if: ${cond}`)), `job if: ${cond}`).toEqual(
+          [],
+        );
+      }
+    });
   });
 });

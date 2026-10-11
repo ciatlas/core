@@ -8,6 +8,8 @@ import {
   chainRelated,
   chainTo,
   didYouMean,
+  type Guard,
+  guardOf,
   isWholeExpression,
   listNames,
   quote,
@@ -206,7 +208,8 @@ export const undeclaredSecretRef = defineRule({
     fix:
       'Declare the secret under `on.workflow_call.secrets` and pass it from every caller, or use `secrets: inherit`. ' +
       "Callers whose `with:` values make the reading job's or step's `if:` false (e.g. an omitted input in " +
-      "`if: contains(inputs.registries, 'docker.io')`) are not counted: the read never runs for them.",
+      "`if: contains(inputs.registries, 'docker.io')`) are not counted: the read never runs for them. Neither are reads " +
+      'under an `if:` that is always false (`if: false`).',
   },
   check(ctx) {
     for (const wf of ctx.index.project.workflows.values()) {
@@ -256,15 +259,18 @@ function callerInputsResolver(callee: WorkflowDecl, call: CallSite): ContextReso
   };
 }
 
-/** The `if:` sites that decide whether a site in a job or step is evaluated. */
-function guardsOf(wf: WorkflowDecl, site: ExprSite): ExprSite[] {
+/** The guards that decide whether a site in a job or step is evaluated: `if:` sites, or `false` for a literal `if: false`. */
+function guardsOf(wf: WorkflowDecl, site: ExprSite): Guard[] {
   const job = site.job !== undefined ? wf.jobs[site.job] : undefined;
   const step = job && site.step !== undefined ? job.steps[site.step] : undefined;
-  return [job?.ifSite, step?.ifSite].filter((g): g is ExprSite => g !== undefined && g !== site);
+  return [job && guardOf(job), step && guardOf(step)].filter(
+    (g): g is Guard => g !== undefined && g !== site,
+  );
 }
 
 /** True when a condition is false whatever the runtime-only parts evaluate to. */
-function isFalse(guard: ExprSite, resolve: ContextResolver): boolean {
+function isFalse(guard: Guard, resolve: ContextResolver): boolean {
+  if (guard === false) return true;
   const ast = isWholeExpression(guard) ? guard.segments[0]!.expr.ast : undefined;
   return ast !== undefined && definitelyFalsy(ast, resolve);
 }
