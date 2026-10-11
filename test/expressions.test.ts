@@ -1,6 +1,8 @@
 import {
   type ContextResolver,
   conditionUses,
+  definitelyFalsy,
+  definitelyTruthy,
   evaluate,
   evaluateTemplate,
   fallbacksOf,
@@ -79,6 +81,23 @@ describe('parseExpression references', () => {
     const src = "github.ref == 'x' && steps.meta.outputs.version";
     const r = parseExpression(src).refs[1]!;
     expect(src.slice(r.start, r.end)).toBe('steps.meta.outputs.version');
+  });
+
+  it('records offsets in a multi-line expression', () => {
+    const src = "inputs.a ==\n  inputs.b &&\n    matrix['os']";
+    expect(parseExpression(src).refs.map((r) => src.slice(r.start, r.end))).toEqual([
+      'inputs.a',
+      'inputs.b',
+      "matrix['os']",
+    ]);
+  });
+
+  it('reads number indexes as path segments', () => {
+    const src = "github.event.commits[0].message == steps.s.outputs['x']";
+    const [commits, x] = parseExpression(src).refs;
+    expect(commits).toMatchObject({ path: ['event', 'commits', '0', 'message'], dynamic: false });
+    expect(src.slice(commits!.start, commits!.end)).toBe('github.event.commits[0].message');
+    expect(src.slice(x!.start, x!.end)).toBe("steps.s.outputs['x']");
   });
 
   it('accepts context-specific functions', () => {
@@ -172,6 +191,44 @@ describe('evaluate', () => {
     );
   });
 
+  it('evaluates boolean literals, and compares arrays and objects by identity like GitHub', () => {
+    expect(ev('true')).toEqual(known(true));
+    expect(ev('false == 0')).toEqual(known(true));
+    expect(ev("true && 'x'")).toEqual(known('x'));
+    expect(ev("fromJSON('[1]') == fromJSON('[1]')")).toEqual(known(false));
+    expect(ev('fromJSON(\'{"a":1}\') != fromJSON(\'{"a":1}\')')).toEqual(known(true));
+    expect(ev("fromJSON('[1]') == 1")).toEqual(known(false));
+  });
+
+  it('indexes into arrays and objects, and reads null for anything else', () => {
+    expect(ev("fromJSON('[1,2]')[5]")).toEqual(known(null));
+    expect(ev("fromJSON('[1,2]')[-1]")).toEqual(known(null));
+    expect(ev("fromJSON('{\"Key\":1}')['KEY']")).toEqual(known(1));
+    expect(ev('fromJSON(\'"abc"\')[0]')).toEqual(known(null));
+    expect(ev("fromJSON('1').x")).toEqual(known(null));
+  });
+
+  // Suspected bug: GitHub rounds a fractional array index down (actions/runner's IndexHelper and @actions/expressions'
+  // idxHelper floor it, so `[0.5]` reads the first element), but indexInto in expressions.ts requires an integer and
+  // reads null. Below zero it is still out of range.
+  it.skip('rounds a fractional array index down, like GitHub', () => {
+    expect(ev("fromJSON('[1,2]')[0.5]")).toEqual(known(1));
+    expect(ev("fromJSON('[1,2]')[1.9]")).toEqual(known(2));
+    expect(ev("fromJSON('[1,2]')[-0.5]")).toEqual(known(null));
+  });
+
+  it('is unknown when a computed index or its base is unknown', () => {
+    const resolve: ContextResolver = ({ context }) => (context === 'inputs' ? known({ a: 1 }) : undefined);
+    expect(ev('inputs[github.sha]', resolve).known).toBe(false);
+    expect(ev('github[github.sha]', resolve).known).toBe(false);
+    expect(ev("inputs[fromJSON('[1]')]", resolve)).toEqual(known(null));
+  });
+
+  it('leaves functions it does not model, like case(), unknown', () => {
+    expect(parseExpression("case(true, 'a', 'b')").error).toBeUndefined();
+    expect(ev("case(true, 'a', 'b')").known).toBe(false);
+  });
+
   it('resolves computed indexes through the resolver', () => {
     const resolve: ContextResolver = ({ context, path }) => {
       if (context === 'matrix' && path[0] === 'k') return known('a');
@@ -257,11 +314,52 @@ describe('conditionUses', () => {
     expect(uses("format('{0}-x', inputs.a) == '-x'")).toEqual(['inputs.a:compared']);
   });
 
+  it('looks through parentheses', () => {
+    expect(uses("(inputs.a) && (inputs.b == 'x')")).toEqual(['inputs.a:truthiness', 'inputs.b:compared']);
+  });
+
   it('treats other reads as values', () => {
     expect(uses('inputs.a == github.ref')).toEqual(['inputs.a:value', 'github.ref:value']);
     expect(uses('fromJSON(inputs.a).on')).toEqual(['inputs.a:value']);
     expect(uses('contains(inputs.a, inputs.b)')).toEqual(['inputs.a:value', 'inputs.b:value']);
     // A condition with text around `${{ }}` is a string: its values are only interpolated.
     expect(uses('inputs.a', false)).toEqual(['inputs.a:value']);
+  });
+});
+
+describe('definitelyFalsy / definitelyTruthy', () => {
+  /** `matrix.on` is 'yes', `matrix.off` is missing (null); every other context is runtime-only. */
+  const resolve: ContextResolver = ({ context, path }) => {
+    if (context !== 'matrix') return undefined;
+    return path[0] === 'on' ? known('yes') : known(null, [{ kind: 'missing-matrix-key', key: path[0]! }]);
+  };
+  const decide = (src: string) => {
+    const p = parseExpression(src);
+    if (!p.ast) throw new Error(p.error?.message);
+    return { falsy: definitelyFalsy(p.ast, resolve), truthy: definitelyTruthy(p.ast, resolve) };
+  };
+
+  it('decides a condition whatever its runtime-only parts evaluate to', () => {
+    expect(decide('always() && matrix.off')).toEqual({ falsy: true, truthy: false });
+    expect(decide('success() || matrix.on')).toEqual({ falsy: false, truthy: true });
+    expect(decide('matrix.off || (matrix.off && github.ref)')).toEqual({ falsy: true, truthy: false });
+    expect(decide('matrix.on && (!matrix.off)')).toEqual({ falsy: false, truthy: true });
+    expect(decide('!matrix.on')).toEqual({ falsy: true, truthy: false });
+    expect(decide("matrix.on == 'yes'")).toEqual({ falsy: false, truthy: true });
+  });
+
+  it('decides nothing when the outcome depends on runtime state', () => {
+    expect(decide('success() && matrix.on')).toEqual({ falsy: false, truthy: false });
+    expect(decide('success() || matrix.off')).toEqual({ falsy: false, truthy: false });
+    expect(decide("github.ref == 'refs/heads/main'")).toEqual({ falsy: false, truthy: false });
+    expect(decide('!github.ref')).toEqual({ falsy: false, truthy: false });
+  });
+
+  // Suspected bug: `always()` is true in every `if:` that may call it, but evaluate leaves it unknown like `success()`,
+  // so a condition that only depends on it is never decided (`!always()` never runs, yet is not definitely falsy).
+  it.skip('decides a condition on always(), which is always true', () => {
+    expect(decide('always() && matrix.on')).toEqual({ falsy: false, truthy: true });
+    expect(decide('!(always() && matrix.on)')).toEqual({ falsy: true, truthy: false });
+    expect(decide('!always()')).toEqual({ falsy: true, truthy: false });
   });
 });

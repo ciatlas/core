@@ -1,13 +1,20 @@
 import {
   classifyUses,
   createParseContext,
+  evaluateTemplate,
+  expandMatrix,
+  generatedMarker,
+  hasKey,
   type Loc,
+  lookup,
+  matrixResolver,
   parseActionFile,
   parseWorkflowFile,
   scanRunWrites,
+  siteAt,
 } from '@flowpact/core';
 import { describe, expect, it } from 'vitest';
-import { yaml } from './helpers';
+import { WF, yaml } from './helpers';
 
 const parse = (text: string, repo?: string) =>
   parseWorkflowFile('.github/workflows/w.yml', text, createParseContext(repo));
@@ -319,6 +326,14 @@ describe('scanRunWrites', () => {
     ['echo "$name=1" >> $GITHUB_OUTPUT', [], true],
     ['{\n  echo a=1\n} >> "$GITHUB_OUTPUT"', [], true],
     ["core.setOutput('f', 1)", ['f'], false],
+    ['core.setOutput(\'f\', 1); core.setOutput("g", 2); core.setOutput(`h`, 3)', ['f', 'g', 'h'], false],
+    ['echo "a=1" >> $GITHUB_OUTPUT; echo "b=2" >> $GITHUB_OUTPUT', ['a', 'b'], false],
+    // Writes through an alias of the file, and outputs named by a computed value, are not followed.
+    ['OUT=$GITHUB_OUTPUT\necho "a=1" >> "$OUT"', [], true],
+    ['export OUT="${GITHUB_OUTPUT}"', [], true],
+    ['core.setOutput(name, 1)', [], true],
+    ['core.setOutput(`out-${kind}`, 1)', [], true],
+    ["core.setOutput('a' + suffix, 1)", [], true],
   ])('%s', (script, names, dynamic) => {
     const r = scanRunWrites(script, 'GITHUB_OUTPUT');
     expect(r.names).toEqual(names);
@@ -336,5 +351,408 @@ describe('scanRunWrites', () => {
 
   it('scans $GITHUB_ENV writes', () => {
     expect(scanRunWrites('echo "TOKEN=abc" >> $GITHUB_ENV', 'GITHUB_ENV').names).toEqual(['TOKEN']);
+  });
+});
+
+describe('permissions', () => {
+  it('reads a shorthand or a scope map, and skips what GitHub does not accept', () => {
+    const wf = parse(yaml`
+      on: push
+      permissions: read-all
+      jobs:
+        map:
+          runs-on: x
+          permissions:
+            contents: read
+            issues: write
+            pages: none
+            packages: admin
+          steps: []
+        none:
+          runs-on: x
+          permissions: {}
+          steps: []
+        all:
+          runs-on: x
+          permissions: write-all
+          steps: []
+        level:
+          runs-on: x
+          permissions: read
+          steps: []
+        list:
+          runs-on: x
+          permissions: [contents]
+          steps: []
+        unset:
+          runs-on: x
+          steps: []
+    `);
+    expect(wf.permissions).toBe('read-all');
+    expect(wf.jobs.map!.permissions).toEqual({ contents: 'read', issues: 'write', pages: 'none' });
+    expect(wf.jobs.none!.permissions).toEqual({});
+    expect(wf.jobs.all!.permissions).toBe('write-all');
+    expect(wf.jobs.level!.permissions).toBeUndefined();
+    expect(wf.jobs.list!.permissions).toBeUndefined();
+    expect(wf.jobs.unset!.permissions).toBeUndefined();
+  });
+});
+
+describe('YAML anchors and aliases', () => {
+  const wf = parse(yaml`
+    on: push
+    env:
+      DEF: &def ci-default.json
+      EXPR: &e \${{ inputs.x }}
+      AGAIN: *e
+    jobs:
+      a:
+        runs-on: x
+        strategy: &strat
+          matrix:
+            os: [&u ubuntu-latest, windows-latest]
+            include:
+              - &linux { os: *u, config: *def }
+        steps: [{ run: echo }]
+      b:
+        runs-on: x
+        strategy: *strat
+        steps: [{ run: echo }]
+      c:
+        runs-on: x
+        strategy:
+          matrix:
+            include: [*linux, { os: windows-latest, config: ci-windows.json }]
+        steps: [{ run: echo }]
+  `);
+
+  it('resolves them the way GitHub does, so an aliased strategy, entry or value keeps its keys', () => {
+    expect(wf.jobs.b!.matrix!.dims.map((d) => [d.name, d.values])).toEqual([
+      ['os', ['ubuntu-latest', 'windows-latest']],
+    ]);
+    expect(wf.jobs.a!.matrix!.include.map((e) => e.values)).toEqual([
+      { os: 'ubuntu-latest', config: 'ci-default.json' },
+    ]);
+    expect(wf.jobs.c!.matrix!.include.map((e) => e.values)).toEqual([
+      { os: 'ubuntu-latest', config: 'ci-default.json' },
+      { os: 'windows-latest', config: 'ci-windows.json' },
+    ]);
+  });
+
+  it('locates aliased content at its anchor, and finds an aliased expression at each use', () => {
+    expect(lineCol(wf.jobs.b!.matrix!.loc)).toBe(lineCol(wf.jobs.a!.matrix!.loc));
+    expect(wf.env.AGAIN).toMatchObject({
+      value: '${{ inputs.x }}',
+      site: { field: 'workflow.env', key: 'AGAIN' },
+    });
+    expect(lineCol(wf.env.AGAIN!.site!.loc)).toBe('4:12-4:27');
+    expect(wf.sites.map((s) => s.yamlPath.join('.'))).toEqual(['env.EXPR', 'env.AGAIN']);
+  });
+
+  it('leaves aliases unresolved in a file with YAML errors', () => {
+    const bad = parse('on: push\nenv:\n  A: &a x\n  B: *a\n  C: [\n');
+    expect(bad.parseErrors).toHaveLength(1);
+    // What the parser recovers for the unclosed `C: [` is its own business; only the alias matters here.
+    expect(bad.env.A!.value).toBe('x');
+    expect(bad.env.B!.value).toBeNull();
+  });
+});
+
+describe('expression sites of an action', () => {
+  it('classifies each field, with its key, step and whether it is a condition', () => {
+    const action = parseActionFile(
+      '.github/actions/x',
+      '.github/actions/x/action.yml',
+      yaml`
+        name: \${{ inputs.n }}
+        inputs:
+          dir:
+            default: \${{ github.workspace }}
+        outputs:
+          o:
+            value: \${{ steps.s.outputs.o }}
+        runs:
+          using: composite
+          pre-if: runner.os == 'Linux'
+          post-if: \${{ always() }}
+          steps:
+            - id: s
+              if: inputs.dir != ''
+              working-directory: \${{ inputs.dir }}
+              run: echo \${{ inputs.dir }}
+              shell: bash
+              env:
+                D: \${{ inputs.dir }}
+            - uses: some/action@v1
+              with:
+                w: \${{ inputs.dir }}
+      `,
+      createParseContext(),
+    );
+    expect(
+      action.sites.map(
+        (s) =>
+          `${s.yamlPath.join('.')}: ${s.field}${s.key ? ` [${s.key}]` : ''}${s.step !== undefined ? ` #${s.step}` : ''}${s.isCondition ? ' (condition)' : ''}`,
+      ),
+    ).toEqual([
+      'name: other',
+      'inputs.dir.default: input.default [dir]',
+      'outputs.o.value: action.output [o]',
+      'runs.pre-if: action.runs-if (condition)',
+      'runs.post-if: action.runs-if (condition)',
+      'runs.steps.0.if: step.if #0 (condition)',
+      'runs.steps.0.working-directory: step.other #0',
+      'runs.steps.0.run: step.run #0',
+      'runs.steps.0.env.D: step.env [D] #0',
+      'runs.steps.1.with.w: step.with [w] #1',
+    ]);
+    expect(action.steps[0]!.ifSite!.segments[0]!.expr.source).toBe("inputs.dir != ''");
+  });
+});
+
+describe('reference locations', () => {
+  it('falls back to the expression’s own offsets when the source spells a reference with escapes', () => {
+    // `\u0062` is `b`: the reference reads `inputs.ab`, which the source does not contain as written.
+    const wf = parse(
+      'on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: "echo ${{ inputs.a\\u0062 }} ${{ inputs.c }}"\n',
+    );
+    const [site] = wf.sites;
+    expect(site!.text).toBe('echo ${{ inputs.ab }} ${{ inputs.c }}');
+    expect(site!.segments.map((s) => s.refs.map((r) => `${r.path[0]} ${lineCol(r.loc)}`))).toEqual([
+      ['ab 6:24-6:33'],
+      ['c 6:46-6:54'],
+    ]);
+  });
+});
+
+describe('scripts of actions/github-script', () => {
+  /** The step `s` of a job, which runs `script` with `uses`. */
+  const step = (script: string, uses = 'actions/github-script@v8') =>
+    parse(
+      `on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - id: s\n        uses: ${uses}\n        with:\n          script: |\n${script
+        .split('\n')
+        .map((l) => `            ${l}`)
+        .join('\n')}\n`,
+    ).jobs.j!.steps[0]!;
+
+  it('names the outputs a script sets, and the `result` github-script always sets', () => {
+    expect(step("core.setOutput('other', 1);").writesOutputs).toEqual({
+      names: ['other', 'result'],
+      dynamic: false,
+      mentions: true,
+    });
+    expect(step('return 1;').writesOutputs).toEqual({ names: ['result'], dynamic: false, mentions: true });
+    // `core` in strings and comments is not handed to anything.
+    expect(
+      step(
+        "core.setOutput('other', 1); // core is not passed on\ncore.info('pass core along');\ncore?.notice(\"core\");",
+      ).writesOutputs,
+    ).toEqual({ names: ['other', 'result'], dynamic: false, mentions: true });
+  });
+
+  it('reads the variables a script exports', () => {
+    expect(step("core.exportVariable('TOKEN', t);\ncore.setOutput('o', 1);").writesEnv).toEqual({
+      names: ['TOKEN'],
+      dynamic: false,
+    });
+  });
+
+  it.each([
+    // grafana detect-breaking-changes-levitate.yml
+    "const script = require('./.github/workflows/scripts/levitate/json-file-to-job-output.js');\nawait script({ core, filePath: 'result.json' });",
+    // getsentry sentry-pull-request-bot.yml
+    'const { waitForMergeCommit } = await import(`${process.env.GITHUB_WORKSPACE}/scripts/wait.js`);\nawait waitForMergeCommit({ github, context, core });',
+    // gh-aw lock files
+    "const { setupGlobals } = require(path.join(dir, 'setup_globals.cjs'));\nsetupGlobals(core, github, context);",
+    "core.setOutput('other', 1);\nawait helper(core);",
+    "core.setOutput('other', 1);\nconst c = core;\nc['setOutput']('wanted', 2);",
+    "core.setOutput('other', 1);\nconst { setOutput } = core;",
+    'for (const [k, v] of Object.entries(values)) core.setOutput(k, v);',
+    "core.setOutput('other', 1);\neval(code);",
+    "core.setOutput('other', 1);\nconst f = new Function('core', body);",
+    // A static import cannot run inside github-script's function wrapper (it is a SyntaxError there), so the script
+    // is taken as one flowpact cannot follow, even for a built-in it would otherwise allow.
+    "import fs from 'fs';\ncore.setOutput('other', 1);",
+    "const t = `${ `b` } don't`;\nconst r = require('./x.js');\ncore.setOutput('other', 1);",
+    "const { execSync } = require('child_process');\ncore.setOutput('other', execSync('./out.sh'));",
+    // fs is not delegation, but a computed write to the file is.
+    "const fs = require('fs');\nfs.appendFileSync(process.env.GITHUB_OUTPUT, line);\ncore.setOutput('other', 1);",
+    // The program inherits GITHUB_OUTPUT and may write to it.
+    "await exec.exec('./set-outputs.sh');\ncore.setOutput('other', 1);",
+    "core.setOutput('other', 1);\nconst msg = `${await helper(core)}`;",
+    // Code substituted into the script by an expression may set any output.
+    "core.setOutput('other', 1);\n${{ inputs.code }}",
+  ])('marks a script whose writes it cannot see as dynamic: %s', (script) => {
+    expect(step(script).writesOutputs.dynamic).toBe(true);
+  });
+
+  it.each([
+    // Prose in a template literal is not code (`core`, `import` and `require` are words there).
+    "const body = `The core team will review`;\ncore.setOutput('other', body);",
+    "const body = `Note:\nimport the new config`;\ncore.setOutput('other', body);",
+    "const url = `https://github.com/home-assistant/core/issues/new?title=${encodeURIComponent(t)}`;\ncore.setOutput('other', url);",
+    "const t = `a ${ `b ${ 'require(x)' }` } c don't`;\ncore.setOutput('other', t);",
+    "/* require('x') and core */ const s = 'it\\'s core';\ncore.setOutput('other', s);",
+    "const s = `a \\` require('x') core`;\ncore.setOutput('other', s);",
+    "core.setOutput('other', 1);\nconst s = `an unclosed template with core in it",
+    // Built-ins that cannot run other code.
+    "const fs = require('fs');\nconst path = require(\"node:path\");\ncore.setOutput('other', fs.readFileSync(path.join('a', 'b'), 'utf8'));",
+    "const { readFile } = await import('fs/promises');\ncore.setOutput('other', await readFile('x', 'utf8'));",
+    "const opts = { arguments: [] };\ncore.setOutput('other', opts);",
+    // An expression inside a literal is text.
+    "const who = '${{ inputs.core }}';\nconst hi = `Hello ${{ github.actor }}`;\ncore.setOutput('other', who + hi);",
+  ])('reads only the code of a script: %s', (script) => {
+    expect(step(script).writesOutputs).toEqual({
+      names: ['other', 'result'],
+      dynamic: false,
+      mentions: true,
+    });
+  });
+
+  it('marks a whole script from an expression as dynamic', () => {
+    const wf = parse(yaml`
+      on: workflow_dispatch
+      jobs:
+        j:
+          runs-on: x
+          steps:
+            - id: s
+              uses: actions/github-script@v8
+              with:
+                script: \${{ inputs.code }}
+    `);
+    expect(wf.jobs.j!.steps[0]!.writesOutputs).toEqual({ names: ['result'], dynamic: true, mentions: true });
+  });
+
+  it('lets other actions that take a script set outputs of their own', () => {
+    expect(step("core.setOutput('other', 1);", 'acme/run-js@v1').writesOutputs).toEqual({
+      names: ['other'],
+      dynamic: true,
+      mentions: true,
+    });
+    expect(step("core.exportVariable('A', 1);", 'acme/run-js@v1').writesEnv).toEqual({
+      names: ['A'],
+      dynamic: false,
+    });
+  });
+
+  it('finds no writes in a step without a script', () => {
+    const wf = parse(
+      'on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - uses: actions/checkout@v4\n',
+    );
+    expect(wf.jobs.j!.steps[0]).toMatchObject({
+      writesOutputs: { names: [], dynamic: false, mentions: false },
+      writesEnv: { names: [], dynamic: false },
+    });
+  });
+});
+
+describe('generatedMarker', () => {
+  it.each([
+    [
+      '# This file was automatically generated by gh-aw (v0.87.10). DO NOT EDIT.\nname: x\n',
+      'This file was automatically generated',
+    ],
+    ['# AUTOGENERATED FILE - DO NOT EDIT MANUALLY\nname: x\n', 'AUTOGENERATED FILE'],
+    ['# Owner(s): ["oncall: releng"]\n# @generated DO NOT EDIT MANUALLY\n\nname: x\n', '@generated'],
+    ['# generated by praktika\n\nname: x\n', 'generated by praktika'],
+    ['# Generated from xtask::workflows::danger\nname: x\n', 'Generated from xtask::workflows::danger'],
+    ['# This workflow was generated from ci.yml.j2\nname: x\n', 'This workflow was generated'],
+    ['---\n# Code generated by gen-ci. DO NOT EDIT.\nname: x\n', 'Code generated by gen-ci.'],
+    ['# This is an auto-generated file.\nname: x\n', 'This is an auto-generated file'],
+    ['# Please do not edit this file by hand.\nname: x\n', 'do not edit this file'],
+    ['# DO NOT EDIT\nname: x\n', 'DO NOT EDIT'],
+    ['# DO NOT MODIFY. Rendered from templates/ci.yml\nname: x\n', 'DO NOT MODIFY'],
+    ['%YAML 1.2\n---\n# DO NOT EDIT - rendered by make workflows\nname: x\n', 'DO NOT EDIT'],
+    // gh-aw puts long metadata lines first.
+    [
+      '# gh-aw-metadata: {"a":1}\n# gh-aw-manifest: {"b":2}\n# This file was automatically generated by gh-aw. DO NOT EDIT.\non: push\n',
+      'This file was automatically generated',
+    ],
+    ['\uFEFF# auto-generated from ci.yml.j2\r\non: push\r\n', 'auto-generated from ci.yml.j2'],
+  ])('finds the marker in %j', (text, marker) => {
+    expect(generatedMarker(`${WF}/w.yml`, text)).toBe(marker);
+  });
+
+  it.each([
+    ['name: x\n# DO NOT EDIT the job names, they are required checks\non: push\n'],
+    ['# Owner(s): x\nname: linux-binary-test\n\n# /run.sh is generated by binary_linux_test.sh\non: push\n'],
+    [
+      '# The real workflow is generated by praktika from ci/workflows/x.py, which replaces this file.\nname: x\n',
+    ],
+    [`${'# license\n'.repeat(10)}# DO NOT EDIT\nname: x\n`],
+    ['on: push\n'],
+    ['name: x # DO NOT EDIT\non: push\n'],
+    // Hand-written headers that talk about generated things, or ask not to edit something specific.
+    ['# Generated docs are published to GitHub Pages by this workflow.\non: push\n'],
+    ['# Please do not edit the deploy keys without asking #infra.\non: push\n'],
+    ['# Builds the autogenerated API client\non: push\n'],
+    ['# Generated-by: none; this is hand written\non: push\n'],
+    ['# Generated files are uploaded to the release by this workflow\non: push\n'],
+    ['# DO NOT EDIT the job names, they are required checks\non: push\n'],
+    ['# DO NOT MODIFY the cron schedule without asking #infra\non: push\n'],
+    ['# Deploys the site generated by Hugo\non: push\n'],
+  ])('ignores %j', (text) => {
+    expect(generatedMarker(`${WF}/w.yml`, text)).toBeUndefined();
+  });
+
+  it('recognizes GitHub Agentic Workflows lock files by name, and generated actions', () => {
+    expect(generatedMarker(`${WF}/triage.lock.yml`, 'on: push\n')).toBe('.lock.yml');
+    expect(generatedMarker('.github/actions/x/action.yml', '# DO NOT EDIT\nruns: {}\n')).toBe('DO NOT EDIT');
+  });
+
+  it('records the marker on the parsed workflow or action', () => {
+    expect(parse('# DO NOT EDIT\non: push\njobs: {}\n').generated).toBe('DO NOT EDIT');
+    expect(parse('on: push\njobs: {}\n').generated).toBeUndefined();
+    const action = parseActionFile(
+      '.github/actions/x',
+      '.github/actions/x/action.yml',
+      '# @generated\nruns: { using: composite, steps: [] }\n',
+      createParseContext(),
+    );
+    expect(action.generated).toBe('@generated');
+  });
+});
+
+describe('IR lookups', () => {
+  it('looks keys up case-insensitively, as GitHub resolves context properties, exact spelling first', () => {
+    const rec: Record<string, number> = { Build: 1, build: 2, zero: 0 };
+    expect(lookup(rec, 'build')).toBe(2);
+    expect(lookup(rec, 'BUILD')).toBe(1);
+    expect(lookup(rec, 'test')).toBeUndefined();
+    expect(hasKey(rec, 'ZERO')).toBe(true);
+    expect(hasKey(rec, 'test')).toBe(false);
+  });
+
+  // Suspected bug: `key in rec` in ir.ts also finds Object.prototype members: lookup({}, 'toString') returns
+  // Object.prototype.toString, so `matrix.constructor` in a combination without that key reads as unknown instead of
+  // missing, and matrixResolver's nested lookup can return a function as a JSON value.
+  it.skip('finds only the record’s own keys', () => {
+    const rec: Record<string, number> = { a: 1 };
+    expect(lookup(rec, 'toString')).toBeUndefined();
+    expect(hasKey(rec, 'constructor')).toBe(false);
+    expect(hasKey(rec, '__proto__')).toBe(false);
+    const [combo] = expandMatrix(
+      parse(
+        'on: push\njobs:\n  j:\n    runs-on: x\n    strategy:\n      matrix:\n        os: [linux]\n    steps: []\n',
+      ).jobs.j!.matrix,
+    ).combos;
+    expect(evaluateTemplate('${{ matrix.constructor }}', matrixResolver(combo!))).toEqual({
+      known: true,
+      value: null,
+      taint: [{ kind: 'missing-matrix-key', key: 'constructor' }],
+    });
+  });
+
+  it('finds the site a parser diagnostic points at, by the start of its scalar', () => {
+    const wf = parse(
+      'on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: "echo ${{ inputs.a }}"\n      - run: echo ${{ inputs.b }}\n',
+    );
+    // The first scalar starts at its quote (6:14); the parser may count from the quote or the text after it.
+    expect(siteAt(wf.sites, { line: 6, column: 14 })?.text).toBe('echo ${{ inputs.a }}');
+    expect(siteAt(wf.sites, { line: 6, column: 15 })?.text).toBe('echo ${{ inputs.a }}');
+    expect(siteAt(wf.sites, { line: 6, column: 16 })).toBeUndefined();
+    expect(siteAt(wf.sites, { line: 7, column: 14 })?.text).toBe('echo ${{ inputs.b }}');
+    expect(siteAt(wf.sites, { line: 5, column: 14 })).toBeUndefined();
   });
 });

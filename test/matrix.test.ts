@@ -2,15 +2,19 @@ import {
   type Combination,
   comboLabel,
   createParseContext,
+  declaredMatrix,
   evaluateTemplate,
   expandMatrix,
+  isEmptyValue,
   type Json,
   jsonEqual,
+  known,
   type Loc,
   MAX_COMBINATIONS,
   type MatrixDecl,
   matrixResolver,
   parseWorkflowFile,
+  UNKNOWN,
 } from '@flowpact/core';
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
@@ -286,6 +290,172 @@ describe('expandMatrix — properties', () => {
         const exp = expandMatrix(m);
         for (const c of exp.combos) for (const k of Object.keys(c.values)) expect(exp.keys).toContain(k);
       }),
+    );
+  });
+});
+
+describe('expandMatrix — products above the limit', () => {
+  const values = (p: string, n: number) => `[${Array.from({ length: n }, (_, i) => `${p}${i}`).join(', ')}]`;
+  const excluding = (key: string, n: number) =>
+    Array.from({ length: n }, (_, i) => `    - ${key}: ${key}${i}`).join('\n');
+
+  it('lists a product above the limit when exclude brings it within', () => {
+    // 200 × 200 = 40000 combinations; excluding half of the `a` values leaves 20000.
+    const exp = expandMatrix(
+      matrixOf(
+        `matrix:\n  a: ${values('a', 200)}\n  b: ${values('b', 200)}\n  exclude:\n${excluding('a', 100)}`,
+      ),
+    );
+    expect(exp).toMatchObject({ truncated: false, exact: true, productSize: 40000 });
+    expect(exp.combos).toHaveLength(MAX_COMBINATIONS);
+    expect(exp.combos[0]!.values).toEqual({
+      a: { known: true, value: 'a100' },
+      b: { known: true, value: 'b0' },
+    });
+  });
+
+  it('counts the jobs left after exclude without listing them, enumerating only the excluded dimensions', () => {
+    // 5^7 = 78125 combinations; `a` keeps 2 of 5 values and `b` 4 of 5: 78125 × 8/25 = 25000 jobs.
+    const dims = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((k) => `  ${k}: ${values(k, 5)}`).join('\n');
+    const exp = expandMatrix(
+      matrixOf(
+        `matrix:\n${dims}\n  exclude: [{ a: a0 }, { a: a1 }, { a: a2 }, { b: b0 }, { x: 1 }]\n  include: [{ a: a4, extra: x }]`,
+      ),
+    );
+    expect(exp).toMatchObject({ truncated: true, combos: [], productSize: 78125, minJobs: 25000 });
+    expect(exp.keys).toEqual(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'extra']);
+  });
+
+  it('falls back to a lower bound when the excluded dimensions are too many to enumerate', () => {
+    // 150 × 150 × 2 = 45000; the excluded dimensions alone have 22500 combinations. Each entry removes 300 jobs.
+    const big = `matrix:\n  a: ${values('a', 150)}\n  b: ${values('b', 150)}\n  c: [x, y]\n  exclude:\n`;
+    expect(expandMatrix(matrixOf(`${big}    - a: a0\n    - b: b0`))).toMatchObject({
+      truncated: true,
+      productSize: 45000,
+      minJobs: 44400,
+    });
+    // 84 entries bring the bound to 19800, so the product is listed, but the entries overlap and 23328 jobs remain:
+    // listing stops as soon as it passes the limit.
+    const overlapping = expandMatrix(matrixOf(`${big}${excluding('a', 42)}\n${excluding('b', 42)}`));
+    expect(overlapping).toMatchObject({ truncated: true, combos: [], productSize: 45000, minJobs: 19800 });
+  });
+
+  it('does not count jobs when part of the matrix is an expression', () => {
+    const exp = expandMatrix(
+      matrixOf(
+        `matrix:\n  a: ${values('a', 200)}\n  b: ${values('b', 200)}\n  c: \${{ fromJSON(inputs.c) }}`,
+      ),
+    );
+    expect(exp).toMatchObject({ truncated: true, productSize: 40000 });
+    expect(exp.minJobs).toBeUndefined();
+  });
+});
+
+describe('expandMatrix — expressions in exclude and include', () => {
+  it('keeps the combinations an exclude entry with an expression may remove, and marks the expansion inexact', () => {
+    const exp = expandMatrix(
+      matrixOf(yaml`
+        matrix:
+          os: [linux, mac]
+          node: [20, 22]
+          exclude:
+            - os: linux
+              node: \${{ inputs.skip }}
+      `),
+    );
+    expect(exp.exact).toBe(false);
+    expect(exp.combos).toHaveLength(4);
+  });
+
+  it('merges an include entry whose dimension value is an expression into every combination', () => {
+    const exp = expandMatrix(
+      matrixOf(yaml`
+        matrix:
+          os: [linux, mac]
+          include:
+            - os: \${{ inputs.os }}
+              extra: 1
+      `),
+    );
+    expect(exp.exact).toBe(false);
+    expect(plain(exp.combos)).toEqual([
+      { os: 'linux', extra: 1 },
+      { os: 'mac', extra: 1 },
+    ]);
+    expect(exp.combos.map((c) => c.includes)).toEqual([[0], [0]]);
+  });
+});
+
+describe('matrixResolver — nested values', () => {
+  const [combo] = expandMatrix(
+    matrixOf(yaml`
+      matrix:
+        include:
+          - name: Linux
+            list: [x, y]
+            cfg: { nested: { Deep: 1 } }
+    `),
+  ).combos;
+  const value = (expr: string) => evaluateTemplate(`\${{ ${expr} }}`, matrixResolver(combo!));
+
+  it('indexes arrays, walks objects case-insensitively, and reads null past the end or below a scalar', () => {
+    expect(value('matrix.list[1]')).toEqual(known('y'));
+    expect(value('matrix.cfg.nested.deep')).toEqual(known(1));
+    expect(value('matrix.list[5]')).toEqual(known(null));
+    expect(value('matrix.name.first')).toEqual(known(null));
+  });
+
+  it('leaves the whole matrix and other contexts unknown', () => {
+    expect(value('matrix')).toEqual(UNKNOWN);
+    expect(value('inputs.name').known).toBe(false);
+  });
+
+  // Suspected bug: GitHub rounds a fractional array index down, but matrixResolver reads `value[Number(seg)]`, so
+  // `matrix.list[0.5]` is null instead of the first element (the same gap as indexInto in expressions.ts).
+  it.skip('rounds a fractional array index down, like GitHub', () => {
+    expect(value('matrix.list[0.5]')).toEqual(known('x'));
+    expect(value('matrix.list[1.9]')).toEqual(known('y'));
+  });
+});
+
+describe('matrix helpers', () => {
+  it('compares JSON values deeply', () => {
+    expect(jsonEqual([1, [2, { a: 'x' }]], [1, [2, { a: 'x' }]])).toBe(true);
+    expect(jsonEqual([1], [1, 2])).toBe(false);
+    expect(jsonEqual([1], { 0: 1 })).toBe(false);
+    expect(jsonEqual({ a: 1 }, { a: 1, b: null })).toBe(false);
+    expect(jsonEqual('1', 1)).toBe(false);
+    expect(jsonEqual(null, {})).toBe(false);
+  });
+
+  // Suspected bug: a key missing from the second object is compared as `null` (`b[k] ?? null` in jsonEqual), so objects
+  // with the same number of keys, whose differing keys are all null, compare equal; include and exclude entries then
+  // match object-valued cells they should not.
+  it.skip('tells objects with different keys apart', () => {
+    expect(jsonEqual({ a: null }, { b: null })).toBe(false);
+  });
+
+  it('tells an empty value (null or empty string) from an unknown or present one', () => {
+    expect(isEmptyValue(known(null))).toBe(true);
+    expect(isEmptyValue(known(''))).toBe(true);
+    expect(isEmptyValue(known(0))).toBe(false);
+    expect(isEmptyValue(known('x'))).toBe(false);
+    expect(isEmptyValue(UNKNOWN)).toBe(false);
+  });
+
+  it('expands a runtime matrix with declared keys to one combination of unknown values', () => {
+    const exp = declaredMatrix(['os', 'node']);
+    expect(exp).toEqual({
+      combos: [{ values: { os: { known: false }, node: { known: false } }, origin: 'product', includes: [] }],
+      keys: ['os', 'node'],
+      exact: false,
+      dynamic: false,
+      truncated: false,
+      declared: true,
+    });
+    expect(evaluateTemplate('${{ matrix.os }}', matrixResolver(exp.combos[0]!))).toEqual(UNKNOWN);
+    expect(evaluateTemplate('${{ matrix.arch }}', matrixResolver(exp.combos[0]!))).toEqual(
+      known(null, [{ kind: 'missing-matrix-key', key: 'arch' }]),
     );
   });
 });
