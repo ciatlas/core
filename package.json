@@ -1,6 +1,6 @@
 {
   "name": "@flowpact/core",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "private": true,
   "description": "Workflow model for flowpact: YAML to IR, expression analysis, matrix expansion and the data-flow graph.",
   "type": "module",
