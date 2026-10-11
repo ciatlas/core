@@ -44,3 +44,52 @@ export function trimChar(s: string, ch: string, { start = false } = {}): string 
   while (to > from && s[to - 1] === ch) to--;
   return s.slice(from, to);
 }
+
+function editDistance(a: string, b: string): number {
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  const dp = Array.from({ length: x.length + 1 }, (_, i) => [i, ...Array<number>(y.length).fill(0)]);
+  for (let j = 1; j <= y.length; j++) dp[0]![j] = j;
+  for (let i = 1; i <= x.length; i++) {
+    for (let j = 1; j <= y.length; j++) {
+      dp[i]![j] = Math.min(
+        dp[i - 1]![j]! + 1,
+        dp[i]![j - 1]! + 1,
+        dp[i - 1]![j - 1]! + (x[i - 1] === y[j - 1] ? 0 : 1),
+      );
+    }
+  }
+  return dp[x.length]![y.length]!;
+}
+
+/** Edit distance that counts swapping two neighbouring characters as one edit (optimal string alignment). */
+export function typoDistance(x: string, y: string): number {
+  const d: number[][] = Array.from({ length: x.length + 1 }, (_, i) =>
+    Array.from({ length: y.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)),
+  );
+  for (let i = 1; i <= x.length; i++) {
+    for (let j = 1; j <= y.length; j++) {
+      const cost = x[i - 1] === y[j - 1] ? 0 : 1;
+      let best = Math.min(d[i - 1]![j]! + 1, d[i]![j - 1]! + 1, d[i - 1]![j - 1]! + cost);
+      if (i > 1 && j > 1 && x[i - 1] === y[j - 2] && x[i - 2] === y[j - 1])
+        best = Math.min(best, d[i - 2]![j - 2]! + 1);
+      d[i]![j] = best;
+    }
+  }
+  return d[x.length]![y.length]!;
+}
+
+/** Suggests the closest name, treating `-`/`_` as equivalent. */
+export function didYouMean(name: string, candidates: string[]): string | undefined {
+  const norm = (s: string) => s.toLowerCase().replace(/[-_]/g, '');
+  let best: { c: string; d: number } | undefined;
+  for (const c of candidates) {
+    const [a, b] = [norm(name), norm(c)];
+    // Abbreviations (`ver` → `version`) are as likely as typos.
+    const prefix = Math.min(a.length, b.length) >= 3 && (a.startsWith(b) || b.startsWith(a));
+    const d = a === b ? 0 : prefix ? 1 : editDistance(name, c);
+    if (!best || d < best.d) best = { c, d };
+  }
+  if (!best) return undefined;
+  return best.d <= Math.max(2, Math.floor(name.length / 3)) ? best.c : undefined;
+}

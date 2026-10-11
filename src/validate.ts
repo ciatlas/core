@@ -11,9 +11,9 @@ import { isAlias, isMap, isScalar, isSeq, LineCounter, parseDocument } from 'yam
 import { CONTEXT_FUNCTIONS, KNOWN_CONTEXTS, UNTERMINATED_EXPRESSION } from './expressions';
 import { type Diagnostic, siteAt, type UnitDecl } from './ir';
 import type { Logger } from './logger';
-import { didYouMean } from './rules/util';
 import { mappingsAt, SCHEMA_ROOT, schemaFor, workflowSchema } from './schema';
 import type { Loc } from './source';
+import { didYouMean } from './text';
 
 /**
  * The parser's errors for an invalid `${{ }}`: those of the expression lexer and parser (@actions/expressions, which
