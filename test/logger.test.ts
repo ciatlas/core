@@ -54,4 +54,15 @@ describe('logger', () => {
   ])('resolveLogLevel(%j, %j) = %s', (opts, env, level) => {
     expect(resolveLogLevel(opts, env)).toBe(level);
   });
+
+  it('takes the scope and the debug variable from the embedding tool', () => {
+    const sink = memorySink();
+    createLogger({ sink, scope: 'sim' }).child('x').info('m');
+    expect(sink.records.map((r) => r.scope)).toEqual(['sim:x']);
+    expect(resolveLogLevel({ debugEnv: 'SIM_DEBUG' }, { SIM_DEBUG: '1' })).toBe('debug');
+    expect(resolveLogLevel({ debugEnv: 'SIM_DEBUG' }, { SIM_DEBUG: 'trace' })).toBe('trace');
+    // The tool's own variable replaces FLOWPACT_DEBUG; the runner's debug switches still count.
+    expect(resolveLogLevel({ debugEnv: 'SIM_DEBUG' }, { FLOWPACT_DEBUG: 'trace' })).toBe('info');
+    expect(resolveLogLevel({ debugEnv: 'SIM_DEBUG' }, { RUNNER_DEBUG: '1' })).toBe('debug');
+  });
 });

@@ -201,9 +201,15 @@ export interface Diagnostic {
   /**
    * `context`: a known context or function used where GitHub does not allow it.
    * `ignored`: a key GitHub accepts but ignores, so the file runs without the setting.
-   * `expression`: an invalid expression that FP502 reports too, with the expression and the position in it.
+   * `expression`: an invalid `${{ }}` expression.
    */
   kind?: 'context' | 'ignored' | 'expression';
+  /**
+   * For an `expression` diagnostic: whether the site's own expression parse (`ExprSegment.expr.error` of the site at
+   * `at`), which knows the expression and the position in it, finds this error too. `false` for a scalar that is not a
+   * site, such as a mapping key, and for an error only GitHub's parser gives.
+   */
+  siteError?: boolean;
   /** Start of the YAML scalar as GitHub's parser reports it (1-based). */
   at?: { line: number; column: number };
   /** How to fix this instance, when it is more specific than the rule's advice. */

@@ -228,7 +228,7 @@ export class SymbolLocator {
   private indexRef(unit: UnitDecl, site: ExprSite, ref: LocatedRef) {
     const resolved = this.index.resolveRef(unit, site, ref);
     if (!resolved) {
-      // A whole object (`toJSON(needs.build.outputs)`, `steps.meta.outputs`) reads each output, as FP303 counts it:
+      // A whole object (`toJSON(needs.build.outputs)`, `steps.meta.outputs`) reads each output (see `ProjectIndex.readsOf`):
       // it is a reference to each of them, but the position itself stands for the job (or for nothing).
       for (const s of this.index.readsOf(unit, site, ref)) this.add(s, ref.loc, 'read', false);
     }

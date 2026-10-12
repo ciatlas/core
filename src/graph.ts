@@ -69,7 +69,7 @@ export interface Project {
   repository?: string;
   workflows: Map<string, WorkflowDecl>;
   actions: Map<string, ActionDecl>;
-  /** Files the user asked to analyze; findings outside these are dropped. Empty = everything. */
+  /** Files the requested paths name; every other file is loaded only as context. Empty = everything. */
   targets: Set<string>;
   /** Requested paths that do not exist (or lie outside the repository). */
   missingTargets?: string[];
@@ -225,7 +225,7 @@ export class ProjectIndex {
     return this.actionUses.filter((u) => u.action.path === actionPath);
   }
 
-  /** The reusable workflow a job calls. Workflows without `on.workflow_call` are not callable (see FP609). */
+  /** The reusable workflow a job calls. Workflows without `on.workflow_call` are not callable (see `targetOf`). */
   calleeOf(job: JobDecl): WorkflowDecl | undefined {
     const wf = this.targetOf(job);
     return wf?.call ? wf : undefined;
@@ -257,7 +257,7 @@ export class ProjectIndex {
     return this.edges.filter((e) => e.to === symbol && (!kind || e.kind === kind));
   }
 
-  /** Serializable snapshot (used by `--dump-graph` and the JSON report). */
+  /** Serializable snapshot: every node and edge, in a stable order. */
   toJSON() {
     return {
       nodes: [...this.nodes.values()].sort((a, b) => a.id.localeCompare(b.id)),

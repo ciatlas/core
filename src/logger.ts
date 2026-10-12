@@ -10,7 +10,7 @@ export interface LogRecord {
   time: number;
 }
 
-/** Where log records go. The CLI writes pretty lines to stderr; the action maps to @actions/core. */
+/** Where log records go: e.g. lines on stderr, or the log commands of a GitHub Actions step. */
 export interface LogSink {
   write(record: LogRecord): void;
   group?(title: string): void;
@@ -31,10 +31,16 @@ export interface Logger {
   group<T>(title: string, fn: () => T): T;
 }
 
+/**
+ * flowpact's names, used when the embedding tool gives none: the scope of a logger created without one, and the
+ * environment variable that turns on debug logging (see resolveLogLevel).
+ */
+const DEFAULTS = { scope: 'flowpact', debugEnv: 'FLOWPACT_DEBUG' } as const;
+
 export function createLogger(options: { level?: LogLevel; sink?: LogSink; scope?: string } = {}): Logger {
   const level = options.level ?? 'info';
   const sink = options.sink ?? { write() {} };
-  const scope = options.scope ?? 'flowpact';
+  const scope = options.scope ?? DEFAULTS.scope;
 
   const log = (lvl: Exclude<LogLevel, 'silent'>, message: string, data?: Record<string, unknown>) => {
     if (ORDER[lvl] > ORDER[level]) return;
@@ -73,7 +79,7 @@ export function createLogger(options: { level?: LogLevel; sink?: LogSink; scope?
 
 export const silentLogger: Logger = createLogger({ level: 'silent' });
 
-/** Collects records in memory; used by tests and by `--format json` debug dumps. */
+/** Collects records in memory, e.g. for tests or debug dumps. */
 export function memorySink(): LogSink & { records: LogRecord[] } {
   const records: LogRecord[] = [];
   return { records, write: (r) => void records.push(r) };
@@ -81,17 +87,18 @@ export function memorySink(): LogSink & { records: LogRecord[] } {
 
 /**
  * Resolves the effective log level from flags and environment.
- * `FLOWPACT_DEBUG=1`, `RUNNER_DEBUG=1` and `ACTIONS_STEP_DEBUG=true` all enable debug.
+ * `<debugEnv>=1` (`FLOWPACT_DEBUG` unless the tool names its own), `RUNNER_DEBUG=1` and `ACTIONS_STEP_DEBUG=true` all
+ * enable debug; `<debugEnv>=trace` enables trace.
  */
 export function resolveLogLevel(
-  opts: { debug?: boolean; verbose?: number; quiet?: boolean },
+  opts: { debug?: boolean; verbose?: number; quiet?: boolean; debugEnv?: string },
   env: Record<string, string | undefined> = process.env,
 ): LogLevel {
   if (opts.quiet) return 'error';
   if ((opts.verbose ?? 0) >= 2) return 'trace';
-  const envDebug = truthy(env.FLOWPACT_DEBUG) || truthy(env.RUNNER_DEBUG) || truthy(env.ACTIONS_STEP_DEBUG);
-  if (opts.debug || (opts.verbose ?? 0) >= 1 || envDebug)
-    return env.FLOWPACT_DEBUG === 'trace' ? 'trace' : 'debug';
+  const own = env[opts.debugEnv ?? DEFAULTS.debugEnv];
+  const envDebug = truthy(own) || truthy(env.RUNNER_DEBUG) || truthy(env.ACTIONS_STEP_DEBUG);
+  if (opts.debug || (opts.verbose ?? 0) >= 1 || envDebug) return own === 'trace' ? 'trace' : 'debug';
   return 'info';
 }
 

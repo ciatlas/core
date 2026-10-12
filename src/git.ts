@@ -1,7 +1,7 @@
 /**
- * Read-only access to another revision of the repository, so impact mode can analyse the base of a pull request (or
- * the last release) with the same rules as the working tree. Runs `git` directly (never through a shell) and only
- * reads; refs are verified before use. In-repository symlinks resolve like in the working tree; submodules are skipped.
+ * Read-only access to another revision of the repository (the base of a pull request, the last release) as a
+ * FileSystem, so it loads exactly like the working tree. Runs `git` directly (never through a shell) and only reads;
+ * refs are verified before use. In-repository symlinks resolve like in the working tree; submodules are skipped.
  */
 import { execFileSync } from 'node:child_process';
 import { posix } from 'node:path';
@@ -67,7 +67,7 @@ export function isGitRepository(root: string): boolean {
 
 /** Repository-relative files at `commit` (regular files only), read lazily. */
 export function gitFileSystem(root: string, commit: string): FileSystem & { commit: string } {
-  // `ls-tree` paths are relative to the repository top level; flowpact paths are relative to `root`.
+  // `ls-tree` paths are relative to the repository top level; FileSystem paths are relative to `root`.
   const prefix = git(root, ['rev-parse', '--show-prefix']).toString().trim();
   // Tree paths, relative to the top level.
   const blobs = new Set<string>();

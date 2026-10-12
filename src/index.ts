@@ -16,5 +16,7 @@ export {
   scanRunWrites,
 } from './parse';
 export * from './project';
+export * from './queries';
 export * from './source';
 export * from './text';
+export * from './trace';

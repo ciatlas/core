@@ -21,22 +21,29 @@ const units = (files: Record<string, string>): UnitDecl[] => {
 
 const sorted = (ds: Diagnostic[]) => [...ds].sort((a, b) => compareLoc(a.loc, b.loc));
 
+/**
+ * A diagnostic's kind (`-` for none), and when it says whether the site's own expression parse finds the error too,
+ * that as well: `expression/site` when it does, `expression/parser` when only the parser does.
+ */
+const kindOf = (d: Diagnostic) =>
+  d.siteError === undefined ? (d.kind ?? '-') : `${d.kind ?? '-'}/${d.siteError ? 'site' : 'parser'}`;
+
 /** Every schema diagnostic the loader records, as `kind file:line:column message`, in source order. */
 function schemaErrors(files: Record<string, string>): string[] {
   return sorted(units(files).flatMap((u) => u.schemaErrors)).map(
-    (d) => `${d.kind ?? '-'} ${d.loc.file}:${d.loc.line}:${d.loc.column} ${d.message}`,
+    (d) => `${kindOf(d)} ${d.loc.file}:${d.loc.line}:${d.loc.column} ${d.message}`,
   );
 }
 
 /** The same, with the fix each diagnostic carries. */
 function withFixes(files: Record<string, string>): string[] {
   return sorted(units(files).flatMap((u) => u.schemaErrors)).map(
-    (d) => `${d.kind ?? '-'} ${d.loc.file}:${d.loc.line}:${d.loc.column} ${d.message} | ${d.fix ?? ''}`,
+    (d) => `${kindOf(d)} ${d.loc.file}:${d.loc.line}:${d.loc.column} ${d.message} | ${d.fix ?? ''}`,
   );
 }
 
 describe('invalid expressions', () => {
-  it('marks a workflow’s expression errors that FP502 reports too, in every field, at the expression', () => {
+  it('marks a workflow’s expression errors as the site’s too, in every field, at the expression', () => {
     const [wf] = units({
       [`${WF}/w.yml`]: yaml`
         on: push
@@ -62,19 +69,19 @@ describe('invalid expressions', () => {
     expect(
       sorted(wf!.schemaErrors).map(
         (d) =>
-          `${d.kind} ${d.loc.line}:${d.loc.column}-${d.loc.endColumn} at ${d.at!.line}:${d.at!.column} ${d.message}`,
+          `${kindOf(d)} ${d.loc.line}:${d.loc.column}-${d.loc.endColumn} at ${d.at!.line}:${d.at!.column} ${d.message}`,
       ),
     ).toEqual([
-      "expression 3:6-18 at 3:6 Unexpected symbol: '+'",
-      "expression 6:14-41 at 6:14 Too few parameters supplied: 'contains'",
-      "expression 7:11-32 at 7:11 Too many parameters supplied: 'fromJSON'",
-      "expression 8:9-64 at 8:9 Too many parameters supplied: 'contains'",
-      "expression 10:10-23 at 10:10 Unrecognized function: 'foo'",
+      "expression/site 3:6-18 at 3:6 Unexpected symbol: '+'",
+      "expression/site 6:14-41 at 6:14 Too few parameters supplied: 'contains'",
+      "expression/site 7:11-32 at 7:11 Too many parameters supplied: 'fromJSON'",
+      "expression/site 8:9-64 at 8:9 Too many parameters supplied: 'contains'",
+      "expression/site 10:10-23 at 10:10 Unrecognized function: 'foo'",
       // Two expressions in one scalar: `at` is the scalar, `loc` each expression.
-      "expression 12:19-48 at 12:14 Too few parameters supplied: 'startsWith'",
-      "expression 12:49-67 at 12:14 Unexpected end of expression: 'ref'",
-      "expression 16:14-29 at 16:14 Too few parameters supplied: 'format'",
-      "expression 18:14-32 at 18:14 Too few parameters supplied: 'hashFiles'",
+      "expression/site 12:19-48 at 12:14 Too few parameters supplied: 'startsWith'",
+      "expression/site 12:49-67 at 12:14 Unexpected end of expression: 'ref'",
+      "expression/site 16:14-29 at 16:14 Too few parameters supplied: 'format'",
+      "expression/site 18:14-32 at 18:14 Too few parameters supplied: 'hashFiles'",
     ]);
   });
 
@@ -102,16 +109,16 @@ describe('invalid expressions', () => {
         `,
       }),
     ).toEqual([
-      "expression .github/actions/a/action.yml:5:12 Too few parameters supplied: 'contains'",
-      "expression .github/actions/a/action.yml:10:11 Too many parameters supplied: 'contains'",
-      "expression .github/actions/a/action.yml:11:17 Unexpected symbol: '+'",
-      "expression .github/actions/a/action.yml:11:30 Unrecognized function: 'foo'",
-      "expression .github/actions/a/action.yml:15:12 Too few parameters supplied: 'join'",
-      "expression .github/actions/a/action.yml:17:12 Unexpected end of expression: 'ref'",
+      "expression/site .github/actions/a/action.yml:5:12 Too few parameters supplied: 'contains'",
+      "expression/site .github/actions/a/action.yml:10:11 Too many parameters supplied: 'contains'",
+      "expression/site .github/actions/a/action.yml:11:17 Unexpected symbol: '+'",
+      "expression/site .github/actions/a/action.yml:11:30 Unrecognized function: 'foo'",
+      "expression/site .github/actions/a/action.yml:15:12 Too few parameters supplied: 'join'",
+      "expression/site .github/actions/a/action.yml:17:12 Unexpected end of expression: 'ref'",
     ]);
   });
 
-  it('marks errors in multi-line scalars that FP502 has too, and drops those the parser misreads there', () => {
+  it('marks errors in multi-line scalars whose own parse fails too, and drops those the parser misreads there', () => {
     expect(
       schemaErrors({
         [`${WF}/w.yml`]: yaml`
@@ -136,15 +143,15 @@ describe('invalid expressions', () => {
         `,
       }),
     ).toEqual([
-      `expression ${WF}/w.yml:7:16 Too many parameters supplied: 'contains'`,
-      `expression ${WF}/w.yml:10:11 Too few parameters supplied: 'format'`,
-      `expression ${WF}/w.yml:13:11 Too few parameters supplied: 'contains'`,
+      `expression/site ${WF}/w.yml:7:16 Too many parameters supplied: 'contains'`,
+      `expression/site ${WF}/w.yml:10:11 Too few parameters supplied: 'format'`,
+      `expression/site ${WF}/w.yml:13:11 Too few parameters supplied: 'contains'`,
       // The quoted `if:` is valid: the parser read its doubled quotes as written.
       `context ${WF}/w.yml:17:11 Unrecognized named-value: 'secrets'`,
     ]);
   });
 
-  it('keeps the errors FP502 does not check: an empty expression, and an expression in a key', () => {
+  it('tells the errors the site’s own parse does not find: an empty expression, and an expression in a key', () => {
     expect(
       schemaErrors({
         [`${WF}/w.yml`]: yaml`
@@ -160,8 +167,8 @@ describe('invalid expressions', () => {
       }),
     ).toEqual([
       `- ${WF}/w.yml:6:19 An expression was expected`,
-      `expression ${WF}/w.yml:6:26 Too many parameters supplied: 'contains'`,
-      `- ${WF}/w.yml:8:11 Unexpected symbol: '+'`,
+      `expression/site ${WF}/w.yml:6:26 Too many parameters supplied: 'contains'`,
+      `expression/parser ${WF}/w.yml:8:11 Unexpected symbol: '+'`,
     ]);
   });
 
@@ -188,12 +195,12 @@ describe('invalid expressions', () => {
         `,
       }),
     ).toEqual([
-      `expression ${WF}/w.yml:4:23 Too few parameters supplied: 'contains'`,
-      `expression ${WF}/w.yml:8:22 Unexpected symbol: '+'`,
-      `expression ${WF}/w.yml:9:24 Too many parameters supplied: 'fromJSON'`,
-      `expression ${WF}/w.yml:11:18 Too few parameters supplied: 'startsWith'`,
-      `expression ${WF}/w.yml:13:12 Too few parameters supplied: 'contains'`,
-      `expression ${WF}/w.yml:16:26 Too few parameters supplied: 'format'`,
+      `expression/site ${WF}/w.yml:4:23 Too few parameters supplied: 'contains'`,
+      `expression/site ${WF}/w.yml:8:22 Unexpected symbol: '+'`,
+      `expression/site ${WF}/w.yml:9:24 Too many parameters supplied: 'fromJSON'`,
+      `expression/site ${WF}/w.yml:11:18 Too few parameters supplied: 'startsWith'`,
+      `expression/site ${WF}/w.yml:13:12 Too few parameters supplied: 'contains'`,
+      `expression/site ${WF}/w.yml:16:26 Too few parameters supplied: 'format'`,
     ]);
   });
 
@@ -213,17 +220,17 @@ describe('invalid expressions', () => {
     ).toEqual([]);
   });
 
-  it('matches an unclosed ${{ with FP502’s unterminated expression, and the parser’s limits with FP502’s', () => {
+  it('matches an unclosed ${{ with the site’s unterminated expression, and the parser’s limits with the site’s', () => {
     const step = (run: string) => `on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: ${run}\n`;
     expect(schemaErrors({ [`${WF}/w.yml`]: step('echo ${{ github.ref') })).toEqual([
-      `expression ${WF}/w.yml:6:14 The expression is not closed. An unescaped \${{ sequence was found, but the closing }} sequence was not found.`,
+      `expression/site ${WF}/w.yml:6:14 The expression is not closed. An unescaped \${{ sequence was found, but the closing }} sequence was not found.`,
     ]);
     expect(
       schemaErrors({ [`${WF}/w.yml`]: step(`echo \${{ ${'('.repeat(60)}1${')'.repeat(60)} }}`) }),
-    ).toEqual([`expression ${WF}/w.yml:6:19 Exceeded max expression depth 50: '('`]);
+    ).toEqual([`expression/site ${WF}/w.yml:6:19 Exceeded max expression depth 50: '('`]);
     expect(
       schemaErrors({ [`${WF}/w.yml`]: step(`echo \${{ format('{0}', '${'a'.repeat(22_000)}') }}`) }),
-    ).toEqual([`expression ${WF}/w.yml:6:19 ErrorExceededMaxLength`]);
+    ).toEqual([`expression/site ${WF}/w.yml:6:19 ErrorExceededMaxLength`]);
   });
 
   it('strips the file name from messages, even one that contains a colon', () => {
@@ -239,14 +246,14 @@ describe('invalid expressions', () => {
         `,
       }),
     ).toEqual([
-      `expression ${WF}/deploy:prod.yml:6:19 Too few parameters supplied: 'contains'`,
-      `expression ${WF}/deploy:prod.yml:6:47 Unexpected symbol: '+'`,
+      `expression/site ${WF}/deploy:prod.yml:6:19 Too few parameters supplied: 'contains'`,
+      `expression/site ${WF}/deploy:prod.yml:6:47 Unexpected symbol: '+'`,
     ]);
   });
 });
 
 describe('contexts and functions a field does not allow', () => {
-  it('marks known contexts and functions as `context`, and leaves unknown names to FP502', () => {
+  it('marks known contexts and functions as `context`, and unknown names as invalid expressions', () => {
     expect(
       schemaErrors({
         [`${WF}/w.yml`]: yaml`
@@ -289,7 +296,7 @@ describe('contexts and functions a field does not allow', () => {
     ).toEqual([
       "context .github/actions/c/action.yml:6:11 Unrecognized named-value: 'secrets'",
       `context ${WF}/w.yml:8:10 Unrecognized function: 'hashFiles'`,
-      `expression ${WF}/w.yml:10:19 Unrecognized named-value: 'foo'`,
+      `expression/site ${WF}/w.yml:10:19 Unrecognized named-value: 'foo'`,
       `context ${WF}/w.yml:14:10 Unrecognized named-value: 'env'`,
     ]);
   });

@@ -18,7 +18,7 @@ import { didYouMean } from './text';
 
 /**
  * The parser's errors for an invalid `${{ }}`: those of the expression lexer and parser (@actions/expressions, which
- * FP502 parses with too), and the template reader's for a `${{` without `}}`.
+ * the sites' own expression parse uses too), and the template reader's for a `${{` without `}}`.
  */
 const EXPRESSION_ERROR =
   /^(?:Unexpected symbol|Unexpected end of expression|Unrecognized named-value|Unrecognized function|Too few parameters supplied|Too many parameters supplied|Even number of parameters supplied|Exceeded max expression (?:depth|length)|ErrorExceededMaxLength|The expression is not closed)\b/;
@@ -51,9 +51,9 @@ const EVENT_FILTERS = [
 ];
 
 /**
- * "Unrecognized named-value: 'env'" for a context flowpact knows means the context is not available in that field
- * (GitHub's context-availability rules), and likewise for a function only some fields allow. For an unknown name it
- * is a typo, which FP502 reports.
+ * "Unrecognized named-value: 'env'" for a known context means the context is not available in that field (GitHub's
+ * context-availability rules), and likewise for a function only some fields allow. For an unknown name it is a typo:
+ * an invalid expression.
  */
 function isContextError(message: string): boolean {
   const named = /Unrecognized named-value: '([^']+)'/i.exec(message);
@@ -63,23 +63,25 @@ function isContextError(message: string): boolean {
 }
 
 /**
- * How a parser expression error relates to FP502, which checks each `${{ }}` of a scalar with the same expression parser
- * and reports the error once, with the expression and the position of the error in it:
- * - `fp502`: FP502 reports it. In a single-line scalar both read the same text, so the messages match. In a multi-line
- *   scalar the parser reads the source as written, with quotes still doubled and escapes not decoded, where FP502 reads
- *   the value GitHub evaluates; an error there repeats FP502's when FP502 has one for the scalar;
- * - `misread`: a multi-line scalar FP502 finds valid; the parser misread it, and GitHub accepts it;
- * - `own`: a scalar FP502 does not check, such as a mapping key, or a message FP502 does not give.
- * Contexts and functions the field does not allow (FP505) are not expression errors here: FP502 accepts them anywhere.
+ * How a parser expression error relates to the site's own expression parse (`ExprSegment.expr.error`), which checks
+ * each `${{ }}` of the scalar with the same expression parser and knows the expression and the position of the error:
+ * - `site`: the site's parse finds it too. In a single-line scalar both read the same text, so the messages match. In a
+ *   multi-line scalar the parser reads the source as written, with quotes still doubled and escapes not decoded, where
+ *   the site's parse reads the value GitHub evaluates; an error there is the site's when the site's parse fails too;
+ * - `misread`: a multi-line scalar the site's parse finds valid; the parser misread it, and GitHub accepts it;
+ * - `parser`: only the parser finds it: a scalar that is not a site, such as a mapping key, or a message the site's
+ *   parse does not give.
+ * Contexts and functions the field does not allow are `context` errors, not expression errors: the expression parser
+ * accepts them anywhere.
  */
-function againstFP502(unit: UnitDecl, d: Diagnostic): 'fp502' | 'misread' | 'own' {
+function againstSite(unit: UnitDecl, d: Diagnostic): 'site' | 'misread' | 'parser' {
   const site = d.at && siteAt(unit.sites, d.at);
-  if (!site) return 'own';
+  if (!site) return 'parser';
   if (site.loc.endLine > site.loc.line) {
-    return site.segments.some((seg) => seg.expr.error) ? 'fp502' : 'misread';
+    return site.segments.some((seg) => seg.expr.error) ? 'site' : 'misread';
   }
   const message = UNCLOSED.test(d.message) ? UNTERMINATED_EXPRESSION : d.message;
-  return site.segments.some((seg) => seg.expr.error?.message === message) ? 'fp502' : 'own';
+  return site.segments.some((seg) => seg.expr.error?.message === message) ? 'site' : 'parser';
 }
 
 const isExpressionError = (d: Diagnostic) =>
@@ -87,9 +89,10 @@ const isExpressionError = (d: Diagnostic) =>
 const atKey = (d: Diagnostic) => (d.at ? `${d.at.line}:${d.at.column}` : '');
 
 /**
- * Marks the parser's expression errors that FP502 reports (FP503 then reports them only when FP502 does not run), and
- * drops what only repeats them: a misread multi-line scalar, and the type error a boolean, number or matrix field adds
- * for a value whose `${{ }}` did not parse ("Unexpected value '${{ ... }}'"), which goes once the expression parses.
+ * Marks the parser's expression errors as `expression`, with whether the site's own parse finds each one too
+ * (`siteError`). Drops the errors of a misread multi-line scalar, which GitHub accepts, and the type error a boolean,
+ * number or matrix field adds for a value whose `${{ }}` did not parse ("Unexpected value '${{ ... }}'"), which only
+ * repeats the expression's and goes once the expression parses.
  */
 function classifyExpressions(unit: UnitDecl, diagnostics: Diagnostic[]): Diagnostic[] {
   const failed = new Set(diagnostics.filter(isExpressionError).map(atKey));
@@ -100,9 +103,9 @@ function classifyExpressions(unit: UnitDecl, diagnostics: Diagnostic[]): Diagnos
       out.push(d);
       continue;
     }
-    const relation = againstFP502(unit, d);
+    const relation = againstSite(unit, d);
     if (relation === 'misread') continue;
-    out.push(relation === 'fp502' ? { ...d, kind: 'expression' } : d);
+    out.push({ ...d, kind: 'expression', siteError: relation === 'site' });
   }
   return out;
 }

@@ -29,7 +29,7 @@ const toPosix = (p: string) => p.split('\\').join('/');
 
 /**
  * Whether `abs` (after following symlinks) is inside the repository at `root` and outside its `.git` directory. A
- * checkout can contain symlinks; this keeps flowpact from reading e.g. /etc or the persisted git credentials, and from
+ * checkout can contain symlinks; this keeps a caller from reading e.g. /etc or the persisted git credentials, and from
  * writing through a link. A path that does not exist yet is judged by its nearest existing parent.
  */
 export function insideRepository(root: string, abs: string): boolean {
@@ -185,7 +185,7 @@ export interface LoadProjectOptions {
   repository?: string;
   validateSchema?: boolean;
   logger?: Logger;
-  /** Globs of published units (`impact.publish`): matching actions are loaded even when nothing here uses them. */
+  /** Globs of published actions: the actions they match are loaded even when nothing in the repository uses them. */
   publish?: string[];
 }
 
@@ -257,7 +257,7 @@ export function loadProject(opts: LoadProjectOptions): Project {
   const discovered = fs.list(WORKFLOWS_DIR).filter(isYaml).sort();
   const actionFiles = new Set(fs.walk(ACTIONS_DIR).filter(isActionFile).sort());
   // The repository's own action (what `uses: owner/repo@ref` runs) is part of the project even when no workflow here
-  // uses it, and so are the actions `impact.publish` lists (each once, however many patterns match it).
+  // uses it, and so are the actions `publish` matches (each once, however many patterns match it).
   const rootAction = actionFile('.');
   if (rootAction) actionFiles.add(rootAction);
   for (const raw of opts.publish ?? []) {
@@ -282,7 +282,7 @@ export function loadProject(opts: LoadProjectOptions): Project {
 
   const targets = new Set<string>();
   const missingTargets: string[] = [];
-  // `flowpact lint .` (or the root's absolute path) means: report on everything.
+  // A path of `.` (or the root's absolute path) means: report on everything.
   let wholeRepository = false;
   const ignoredTargets: string[] = [];
   for (const p of opts.paths ?? []) {
@@ -370,7 +370,7 @@ export function loadProject(opts: LoadProjectOptions): Project {
 
   if (opts.validateSchema !== false) {
     logger.time('schema validation', () => {
-      // Files that are not valid YAML are reported by FP504; the schema parser would only repeat that.
+      // Files that are not valid YAML already carry parse errors; the schema parser would only repeat them.
       for (const u of [...workflows.values(), ...actions.values()]) {
         if (u.parseErrors.length === 0) u.schemaErrors = validateSchema(u, logger);
       }
