@@ -73,11 +73,27 @@ jobs:
           mode: lint
           fail-on: warning
 
+  zizmor:
+    # Workflow security (zizmor.sh): template injection, credentials left in the checkout, cache poisoning, unpinned or
+    # impostor actions and more. Findings fail the job and annotate the pull request.
+    name: Workflow security (zizmor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          inputs: .github/workflows
+          version: 1.30.1
+          advanced-security: false
+          annotations: true
+
   ci-passed:
     # The only required status check: add new jobs to `needs` instead of changing the branch rules.
     name: CI passed
     if: always()
-    needs: [test, fallow, workflows]
+    needs: [test, fallow, workflows, zizmor]
     runs-on: ubuntu-latest
     steps:
       - name: Every job succeeded
