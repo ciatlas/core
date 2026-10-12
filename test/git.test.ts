@@ -19,7 +19,7 @@ import {
   isGitRepository,
   loadProject,
   resolveCommit,
-} from '@flowpact/core';
+} from '@ciatlas/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WF } from './helpers';
 

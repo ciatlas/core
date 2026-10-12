@@ -6,7 +6,7 @@ import {
   refsOf,
   secretsNeededBy,
   type WorkflowDecl,
-} from '@flowpact/core';
+} from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 import { load, WF, yaml } from './helpers';
 

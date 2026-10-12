@@ -8,7 +8,7 @@ import {
   parseWorkflowFile,
   silentLogger,
   type UnitDecl,
-} from '@flowpact/core';
+} from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 import { mappingsAt, SCHEMA_ROOT, schemaFor, workflowSchema } from '../src/schema';
 import { validateSchema } from '../src/validate';

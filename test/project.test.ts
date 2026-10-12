@@ -24,7 +24,7 @@ import {
   overlayFileSystem,
   type Project,
   WORKFLOWS_DIR,
-} from '@flowpact/core';
+} from '@ciatlas/core';
 import { afterAll, describe, expect, it } from 'vitest';
 import { load, WF, yaml } from './helpers';
 

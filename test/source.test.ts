@@ -1,4 +1,4 @@
-import { compareLoc, formatLoc, type Loc, SourceFile } from '@flowpact/core';
+import { compareLoc, formatLoc, type Loc, SourceFile } from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 import { parseDocument } from 'yaml';
 import { WF } from './helpers';

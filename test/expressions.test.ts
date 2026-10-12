@@ -13,7 +13,7 @@ import {
   toStr,
   truthy,
   UNKNOWN,
-} from '@flowpact/core';
+} from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 
 const refs = (src: string) =>

@@ -15,7 +15,7 @@ import {
   matrixResolver,
   parseWorkflowFile,
   UNKNOWN,
-} from '@flowpact/core';
+} from '@ciatlas/core';
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { yaml } from './helpers';

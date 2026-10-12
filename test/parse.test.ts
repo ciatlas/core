@@ -12,7 +12,7 @@ import {
   parseWorkflowFile,
   scanRunWrites,
   siteAt,
-} from '@flowpact/core';
+} from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 import { WF, yaml } from './helpers';
 

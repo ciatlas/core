@@ -5,7 +5,7 @@ import {
   parseWorkflowFile,
   type StepDecl,
   type UsesRef,
-} from '@flowpact/core';
+} from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 import {
   applyCheckout,

@@ -5,7 +5,7 @@ import {
   neutralizeWorkflowCommands,
   trimChar,
   typoDistance,
-} from '@flowpact/core';
+} from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 
 const within = (ms: number, f: () => void) => {

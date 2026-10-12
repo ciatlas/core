@@ -1,4 +1,4 @@
-import { type SiteField, sym } from '@flowpact/core';
+import { type SiteField, sym } from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 import { load, WF, yaml } from './helpers';
 

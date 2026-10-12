@@ -1,4 +1,4 @@
-import { matchesPattern } from '@flowpact/core';
+import { matchesPattern } from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 
 describe('matchesPattern', () => {

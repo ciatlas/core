@@ -1,4 +1,4 @@
-import { createLogger, memorySink, resolveLogLevel, silentLogger } from '@flowpact/core';
+import { createLogger, memorySink, resolveLogLevel, silentLogger } from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 
 describe('logger', () => {

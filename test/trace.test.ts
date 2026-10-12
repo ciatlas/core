@@ -1,4 +1,4 @@
-import { resolveSymbols, sym, trace } from '@flowpact/core';
+import { resolveSymbols, sym, trace } from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 import { load, WF, yaml } from './helpers';
 

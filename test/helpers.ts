@@ -1,4 +1,4 @@
-import { loadProject, memoryFileSystem, type Project, ProjectIndex } from '@flowpact/core';
+import { loadProject, memoryFileSystem, type Project, ProjectIndex } from '@ciatlas/core';
 
 /** Strips the common leading indentation so YAML can be written inline in tests. */
 export function yaml(strings: TemplateStringsArray, ...values: unknown[]): string {
