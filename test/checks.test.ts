@@ -1,4 +1,4 @@
-/** Check-run names (checks.ts), against the names GitHub actually reported in the lab (fixtures/checknames-lab). */
+/** Check-run names (checks.ts), against the names GitHub actually reported in the lab (test/fixtures/checknames-lab). */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
@@ -16,7 +16,7 @@ import {
 import { describe, expect, it } from 'vitest';
 import { load, WF, yaml } from './helpers';
 
-const LAB = fileURLToPath(new URL('../../../fixtures/checknames-lab/', import.meta.url));
+const LAB = fileURLToPath(new URL('./fixtures/checknames-lab/', import.meta.url));
 const expected = JSON.parse(readFileSync(`${LAB}expected.json`, 'utf8')) as {
   checks: { name: string; conclusion: string }[];
 };

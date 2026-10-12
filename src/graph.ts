@@ -209,6 +209,7 @@ export class ProjectIndex {
     return [...this.project.workflows.values(), ...this.project.actions.values()];
   }
 
+  // fallow-ignore-next-line unused-class-member -- API; tests reach it via load()
   unit(path: string): UnitDecl | undefined {
     return this.project.workflows.get(path) ?? this.project.actions.get(path);
   }
@@ -258,6 +259,7 @@ export class ProjectIndex {
   }
 
   /** Serializable snapshot: every node and edge, in a stable order. */
+  // fallow-ignore-next-line unused-class-member -- API; tests reach it via load()
   toJSON() {
     return {
       nodes: [...this.nodes.values()].sort((a, b) => a.id.localeCompare(b.id)),

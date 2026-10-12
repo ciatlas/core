@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
+  // A library: what src/index.ts exports, and the members of what it exports, are its API for flowpact and simul-ci.
+  "publicPackages": ["@ciatlas/core"],
+  "health": {
+    "thresholdOverrides": [
+      {
+        "files": ["test/**"],
+        "maxUnitSize": 500,
+        "reason": "Test suites: a describe() block groups many it() cases and is long by design"
+      }
+    ]
+  }
+}

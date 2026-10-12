@@ -1,0 +1,13 @@
+{
+  "private_vulnerability_reporting": true,
+  "vulnerability_alerts": true,
+  "security_and_analysis": {
+    "secret_scanning": "enabled",
+    "secret_scanning_push_protection": "enabled"
+  },
+  "code_scanning_default_setup": {
+    "state": "configured",
+    "languages": ["actions", "javascript-typescript"],
+    "query_suite": "extended"
+  }
+}

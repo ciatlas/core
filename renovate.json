@@ -1,0 +1,55 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":semanticPrefixFixDepsChoreOthers",
+    "helpers:pinGitHubActionDigestsToSemver"
+  ],
+  "description": "Pull request titles follow Conventional Commits (the PR title check and release-please rely on it). pnpm refuses versions younger than a day, hence minimumReleaseAge.",
+  "ignorePaths": ["**/node_modules/**", "test/fixtures/**"],
+  "schedule": ["before 6am on monday"],
+  "dependencyDashboard": true,
+  "packageRules": [
+    {
+      "description": "Workflow actions: ci(deps), one grouped pull request.",
+      "matchManagers": ["github-actions"],
+      "semanticCommitType": "ci",
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Development dependencies: chore(deps), grouped unless major.",
+      "matchDepTypes": ["devDependencies"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "dev dependencies (non-major)"
+    },
+    {
+      "description": "Runtime dependencies reach every consumer: fix(deps), so they ship in a patch release.",
+      "matchDepTypes": ["dependencies"],
+      "semanticCommitType": "fix"
+    },
+    {
+      "description": "Non-major updates merge themselves once every required check passes; Renovate bypasses only the code owner review (.github/rulesets/main-reviews.json).",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest", "pinDigest"],
+      "automerge": true
+    },
+    {
+      "description": "0.x minor versions may break: review them.",
+      "matchCurrentVersion": "/^v?0\\./",
+      "matchUpdateTypes": ["minor"],
+      "automerge": false
+    },
+    {
+      "description": "Pinning to a commit SHA keeps the same version: merge it right away.",
+      "matchUpdateTypes": ["pin", "pinDigest"],
+      "minimumReleaseAge": null,
+      "groupName": "pin dependencies"
+    }
+  ],
+  "minimumReleaseAge": "2 days",
+  "gitIgnoredAuthors": ["340947222+ciatlas-release-bot[bot]@users.noreply.github.com"],
+  "platformAutomerge": false,
+  "automergeType": "pr",
+  "automergeStrategy": "squash",
+  "osvVulnerabilityAlerts": true
+}
