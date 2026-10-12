@@ -1,6 +1,5 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
-  "bootstrap-sha": "2e9f8f38000d4005a0305cb9aceb33291cd26e12",
   "release-type": "node",
   "include-component-in-tag": false,
   "include-v-in-tag": true,
@@ -58,8 +57,7 @@
   "packages": {
     ".": {
       "package-name": "@ciatlas/core",
-      "changelog-path": "CHANGELOG.md",
-      "release-as": "0.1.0"
+      "changelog-path": "CHANGELOG.md"
     }
   }
 }
