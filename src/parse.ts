@@ -27,7 +27,6 @@ import type {
   OutputDecl,
   PermissionsDecl,
   SecretDecl,
-  SiteField,
   StepDecl,
   UsesRef,
   WorkflowDecl,
@@ -711,7 +710,7 @@ function permissions(node: unknown): PermissionsDecl | undefined {
 }
 
 /** Upper bound on the nodes alias expansion may produce; real workflows stay far below it. */
-export const MAX_ALIAS_EXPANSION = 50_000;
+const MAX_ALIAS_EXPANSION = 50_000;
 
 /**
  * Counts the nodes alias resolution would produce, memoized per node (linear in the document). Returns the alias at
@@ -887,5 +886,3 @@ export function parseActionFile(dir: string, file: string, text: string, ctx: Pa
     steps: steps(unit, get(runs, 'steps'), ['runs', 'steps'], 'action', ctx),
   };
 }
-
-export type { SiteField };
