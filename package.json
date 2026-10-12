@@ -9,7 +9,7 @@
     "url": "git+https://github.com/ciatlas/core.git"
   },
   "type": "module",
-  "packageManager": "pnpm@12.11.0",
+  "packageManager": "pnpm@12.11.2",
   "engines": {
     "node": ">=22"
   },
