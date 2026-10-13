@@ -666,6 +666,52 @@ describe('reference locations', () => {
     expect(segments).toEqual(['7:11', '11:11', '14:20']);
   });
 
+  it.each([
+    ['LF', '\n'],
+    ['CRLF', '\r\n'],
+  ])(
+    "starts an expression at its value's first character, not at a later line that repeats its start (%s)",
+    (_, eol) => {
+      // Each if:'s first 40 characters span its line break, and its next line repeats them. A double-quoted scalar may
+      // write the spaces before the expression as escapes: `\t`, `\x20`, an escaped line break. `\x69` is an `i`.
+      const text = stepWorkflow(
+        [
+          "      - if: inputs.a == 'x' ||",
+          "          inputs.a == 'x' || inputs.a == 'x' || inputs.a == 'x'",
+          '        run: x',
+          '      - if: >',
+          "          inputs.a == 'x' ||",
+          "          inputs.a == 'x' || inputs.a == 'x' || inputs.a == 'x'",
+          '        run: x',
+          '      - if: "\\t\\x20\\',
+          "          inputs.a == 'x'\"",
+          '        run: x',
+          '      - if: "\\x69nputs.a == \'x\'"',
+          '        run: x',
+          '      - run: "${{\\tinputs.a }}"',
+        ],
+        eol,
+      );
+      const segments = parse(text).sites.flatMap((site) =>
+        site.segments.map((seg) => `${seg.loc.line}:${seg.loc.column}`),
+      );
+      expect(segments).toEqual(['6:13', '10:11', '14:11', '16:14', '18:20']);
+      expect(locatedRefs(text)).toEqual([
+        'inputs.a@6:13',
+        'inputs.a@7:11',
+        'inputs.a@7:30',
+        'inputs.a@7:49',
+        'inputs.a@10:11',
+        'inputs.a@11:11',
+        'inputs.a@11:30',
+        'inputs.a@11:49',
+        'inputs.a@14:11',
+        '\\x69nput@16:14',
+        'inputs.a@18:20',
+      ]);
+    },
+  );
+
   it('skips a copy of a reference that continues a name or a property chain', () => {
     // `.inputs.a` is a property of fromJSON's result, and `my-inputs.a` and `myinputs.a` are longer names.
     const text = stepWorkflow([

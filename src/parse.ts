@@ -268,13 +268,11 @@ function valueStart(type: Scalar['type'], raw: string): number {
 }
 
 /**
- * A bare `if:` is one expression: the whole value. Its first 40 characters are searched for; when the source writes them
- * otherwise (a line break, `''`), the expression starts at the value's first character that is not a space.
+ * A bare `if:` is one expression: the whole value, from its first character that is not a space. A search for the
+ * value's first characters could instead find a later line that repeats them.
  */
 function conditionSegment(s: RawScalar, text: string): ExprSegment {
-  const inner = text.trim();
-  const at = s.raw.indexOf(inner.slice(0, Math.min(inner.length, 40)), s.open);
-  return locateExpression(s, at >= 0 ? at : skipSpace(s.raw, s.open), parseExpression(inner), false).segment;
+  return locateExpression(s, skipSpace(s, s.open), parseExpression(text.trim()), false).segment;
 }
 
 /** Each `${{ }}` is found after the one before it ends, so a `${{` inside a string literal does not start one. */
@@ -283,17 +281,44 @@ function templateSegments(s: RawScalar, templated: TemplateSegment[]): ExprSegme
   return templated.map((seg) => {
     const open = s.raw.indexOf('${{', searchFrom);
     if (open < 0) return locateExpression(s, seg.innerStart - seg.start, seg.expr, true).segment;
-    const located = locateExpression(s, skipSpace(s.raw, open + 3), seg.expr, true);
+    const located = locateExpression(s, skipSpace(s, open + 3), seg.expr, true);
     searchFrom = located.end;
     return located.segment;
   });
 }
 
-function skipSpace(text: string, i: number): number {
+/**
+ * Past the spaces and line breaks from `i`, which the decoded value trims. A double-quoted scalar may write them as
+ * escapes: `\t`, `\x20`, `\ `, or a `\` that joins the next line.
+ */
+function skipSpace(s: RawScalar, i: number): number {
   let at = i;
-  while (at < text.length && /\s/.test(text[at]!)) at++;
+  for (let n = spaceLength(s, at); n > 0; n = spaceLength(s, at)) at += n;
   return at;
 }
+
+/** The length of the space at `at`: a character, or an escape that stands for one; 0 for anything else. */
+function spaceLength(s: RawScalar, at: number): number {
+  if (/\s/.test(s.raw[at] ?? '')) return 1;
+  const esc = s.escapes ? ESCAPE_AT_START.exec(s.raw.slice(at, at + 10)) : null;
+  return esc && escapesSpace(esc) ? esc[0].length : 0;
+}
+
+/** A `\` escape of a double-quoted scalar that starts the text: its hex digits, or the one character after the `\`. */
+const ESCAPE_AT_START = /^\\(?:x([\dA-Fa-f]{2})|u([\dA-Fa-f]{4})|U([\dA-Fa-f]{8})|([\s\S]))/;
+
+/** The one-character escapes that stand for a space or a line break, and the line break a `\` joins to the next line. */
+const SPACE_ESCAPES = new Set(['t', '\t', 'n', 'v', 'f', 'r', ' ', '_', 'L', 'P', '\n', '\r']);
+
+/** Whether an escape stands for a space or a line break, as the decoded value's `trim()` takes them. */
+function escapesSpace(esc: RegExpExecArray): boolean {
+  if (esc[4] !== undefined) return SPACE_ESCAPES.has(esc[4]);
+  const code = escapedCode(esc);
+  return code < 0x10000 && /\s/.test(String.fromCharCode(code));
+}
+
+/** The code point an escape's hex digits spell. */
+const escapedCode = (esc: RegExpExecArray) => Number.parseInt(esc[1] ?? esc[2] ?? esc[3] ?? '0', 16);
 
 /**
  * Locates the expression that starts at `from` in the raw scalar. Offsets in the decoded value drift from the source in
@@ -388,7 +413,7 @@ function continuesName(s: RawScalar, at: number): boolean {
 
 /** Whether an escape stands for a name character: `\x2e` is a `.`, and a letter escape (`\t`) a control or space. */
 function escapesNameChar(hex: RegExpExecArray): boolean {
-  const code = Number.parseInt(hex[1] ?? hex[2] ?? hex[3] ?? '0', 16);
+  const code = escapedCode(hex);
   return code < 128 && NAME_CHAR.test(String.fromCharCode(code));
 }
 
