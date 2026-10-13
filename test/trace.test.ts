@@ -1,4 +1,4 @@
-import { resolveSymbols, sym, trace } from '@ciatlas/core';
+import { resolveSymbols, sym, type TraceNode, trace } from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 import { load, WF, yaml } from './helpers';
 
@@ -1193,5 +1193,194 @@ describe('resolveSymbols: more queries', () => {
     expect(ids('mid.yml:leaf')).toEqual([]);
     expect(ids('mid.yml:INPUTS.CFG')).toEqual([`${WF}/mid.yml#inputs.cfg`]);
     expect(ids('mid.yml:nope')).toEqual([]);
+  });
+});
+
+// GitHub gives a called workflow its caller's `github` context, event payload included, so in a workflow that can be
+// called `github.event.inputs` is the caller's own event, never what the caller passes in `with:`.
+describe('trace: github.event.inputs in a workflow that can be called', () => {
+  const MID = `${WF}/mid.yml`;
+  const TOP = `${WF}/top.yml`;
+  const UPPER = `${WF}/upper.yml`;
+  const CALLEE = `${WF}/callee.yml`;
+  const mid = (on: string) => yaml`
+    on:
+      ${on}
+    jobs:
+      a:
+        uses: ./.github/workflows/callee.yml
+        with:
+          title: \${{ github.event.inputs.x }}
+      b:
+        uses: ./.github/workflows/callee.yml
+        with:
+          title: \${{ inputs.x || github.event.inputs.x }}
+      c:
+        runs-on: x
+        steps:
+          - run: echo \${{ github.event.inputs.x }} \${{ inputs.x }}
+  `;
+  const both = mid(`workflow_call:
+        inputs:
+          x: { type: string }
+      workflow_dispatch:
+        inputs:
+          x: { type: string }`);
+  const files = (midText: string) => ({
+    [MID]: midText,
+    [CALLEE]: yaml`
+      on:
+        workflow_call:
+          inputs:
+            title: { type: string }
+      jobs:
+        j:
+          runs-on: x
+          steps:
+            - run: echo
+    `,
+    [TOP]: yaml`
+      on: pull_request
+      jobs:
+        m:
+          uses: ./.github/workflows/mid.yml
+          with:
+            x: \${{ github.event.pull_request.title }}
+    `,
+    [UPPER]: yaml`
+      on:
+        workflow_call:
+          inputs:
+            foo: { type: string }
+      jobs:
+        m:
+          uses: ./.github/workflows/mid.yml
+          with:
+            x: \${{ inputs.foo }}
+    `,
+  });
+  const { index } = load(files(both));
+  const title = sym.input(CALLEE, 'title');
+  const x = sym.input(MID, 'x');
+  const leavesOf = (t: TraceNode) => t.leaves.map((l) => `${l.role} ${l.where}: ${l.text}`);
+  const allLeaves = (t: TraceNode): string[] => [...leavesOf(t), ...t.children.flatMap(allLeaves)];
+  const lineOf = (file: string, needle: string) => {
+    const text = index.unit(file)?.source.text ?? '';
+    return text.slice(0, text.indexOf(needle)).split('\n').length;
+  };
+  const parentsVia = (t: TraceNode, field: string) =>
+    t.children.filter((c) => c.via?.loc.line === lineOf(MID, field));
+
+  it('keeps the read in the graph, for the dispatched case and the rules that count reads', () => {
+    expect(index.incoming(title, 'flows').map((e) => e.from)).toEqual([x, x, x]);
+    expect(index.usagesOf(x).map((u) => [u.ref.context, ...u.ref.path].join('.'))).toEqual([
+      'github.event.inputs.x',
+      'inputs.x',
+      'github.event.inputs.x',
+      'github.event.inputs.x',
+      'inputs.x',
+    ]);
+  });
+
+  it('traces a value read only through github.event.inputs up to the dispatch input and the caller’s event', () => {
+    const t = trace(index, title, { direction: 'up' });
+    const [onlyEvent] = parentsVia(t, 'title: ${{ github.event.inputs.x }}');
+    // When dispatched, the dispatch input: entered by whoever dispatches mid.yml, so nothing above it.
+    expect(onlyEvent).toMatchObject({ symbol: x, children: [], leaves: [] });
+    expect(onlyEvent!.stop).toBeUndefined();
+    expect(onlyEvent!.via?.note).toBe('when dispatched');
+    // When called, the caller's event, once per definition, at the reference.
+    expect(leavesOf(t)).toEqual([
+      `context ${MID} › jobs.a: github.event.inputs.x`,
+      `context ${MID} › jobs.b: github.event.inputs.x`,
+    ]);
+    expect(t.leaves[0]!.loc.line).toBe(lineOf(MID, 'title: ${{ github.event.inputs.x }}'));
+    // `inputs.x` in the same expression does hold the callers' values: top.yml's pull request title, upper.yml's foo.
+    // The dispatch input alone is not marked as expanded, so this parent still is.
+    const [both] = parentsVia(t, 'title: ${{ inputs.x ||');
+    expect(both!.symbol).toBe(x);
+    expect(both!.via?.note).toBeUndefined();
+    expect(both!.children.map((c) => c.symbol)).toEqual([sym.input(UPPER, 'foo')]);
+    expect(leavesOf(both!)).toEqual([`context ${TOP} › jobs.m: github.event.pull_request.title`]);
+    expect(allLeaves(t).filter((l) => l.includes('pull_request'))).toHaveLength(1);
+  });
+
+  it('shows the dispatch input alone even where the trace comes up from a caller', () => {
+    // Up from top.yml's job, mid.yml runs as called there; the trace does not keep track of that, so the dispatch input
+    // is still listed, as a parent with nothing above it: top.yml's pull request title is never a source.
+    const outputs = mid(`workflow_call:
+        inputs:
+          x: { type: string }
+        outputs:
+          o:
+            value: \${{ jobs.d.outputs.e }}
+      workflow_dispatch:
+        inputs:
+          x: { type: string }`).replace(
+      '  c:\n',
+      '  d:\n    runs-on: x\n    outputs:\n      e: ${{ github.event.inputs.x }}\n    steps: [{ run: echo }]\n  c:\n',
+    );
+    const t = trace(load(files(outputs)).index, sym.jobOutput(TOP, 'm', 'o'), { direction: 'up' });
+    const e = t.children[0]!.children[0]!;
+    expect(e.symbol).toBe(sym.jobOutput(MID, 'd', 'e'));
+    expect(e.children).toMatchObject([
+      { symbol: x, children: [], leaves: [], via: { note: 'when dispatched' } },
+    ]);
+    expect(allLeaves(t)).toEqual([`context ${MID} › jobs.d: github.event.inputs.x`]);
+  });
+
+  it('does not let a caller’s with: value flow on through github.event.inputs', () => {
+    const t = trace(index, sym.input(UPPER, 'foo'));
+    const [called] = t.children;
+    expect(called!.symbol).toBe(x);
+    // Only `inputs.x` carries foo on: to jobs.b's title and to jobs.c's script.
+    expect(called!.children.map((c) => `${c.symbol} ${c.via?.text}`)).toEqual([
+      `${title} \${{ inputs.x || github.event.inputs.x }}`,
+    ]);
+    expect(leavesOf(called!)).toEqual([
+      `run script jobs.c › steps[0] › run: echo \${{ github.event.inputs.x }} \${{ inputs.x }}`,
+    ]);
+    // From the input itself (dispatched or called), every read is listed.
+    const root = trace(index, x);
+    expect(root.children.map((c) => c.via?.text)).toEqual([
+      '${{ github.event.inputs.x }}',
+      '${{ inputs.x || github.event.inputs.x }}',
+    ]);
+    expect(root.leaves).toHaveLength(2);
+  });
+
+  it('leaves a workflow that is only dispatched as it was', () => {
+    const { index: dispatched } = load(
+      files(
+        mid(`workflow_dispatch:
+        inputs:
+          x: { type: string }`),
+      ),
+    );
+    const t = trace(dispatched, title, { direction: 'up' });
+    expect(t.children.map((c) => `${c.symbol} ${c.via?.note}`)).toEqual([`${x} undefined`, `${x} undefined`]);
+    expect(t.children[1]).toMatchObject({ stop: 'seen' });
+    expect(t.leaves).toEqual([]);
+    expect(trace(dispatched, x).children).toHaveLength(2);
+  });
+
+  it('ends at the caller’s event in a workflow that is only called, as it did', () => {
+    const { index: called } = load(
+      files(
+        mid(`workflow_call:
+        inputs:
+          x: { type: string }`),
+      ),
+    );
+    const t = trace(called, title, { direction: 'up' });
+    expect(t.children.map((c) => `${c.symbol} ${c.via?.text}`)).toEqual([
+      `${x} \${{ inputs.x || github.event.inputs.x }}`,
+    ]);
+    expect(leavesOf(t)).toEqual([
+      `context ${MID} › jobs.a: github.event.inputs.x`,
+      `context ${MID} › jobs.b: github.event.inputs.x`,
+    ]);
+    const down = trace(called, sym.input(UPPER, 'foo')).children[0]!;
+    expect(down.children.map((c) => c.via?.text)).toEqual(['${{ inputs.x || github.event.inputs.x }}']);
   });
 });

@@ -1,10 +1,19 @@
 import { CONTEXT_FUNCTIONS, calledFunctions } from './expressions';
-import { type ActionUse, type Definition, type GraphNode, type ProjectIndex, sym, type Usage } from './graph';
+import {
+  type ActionUse,
+  type Definition,
+  type GraphEdge,
+  type GraphNode,
+  type ProjectIndex,
+  sym,
+  type Usage,
+} from './graph';
 import {
   type Binding,
   type ExprSegment,
   type ExprSite,
   type InputDecl,
+  type JobDecl,
   type LocatedRef,
   lookup,
   type SiteField,
@@ -20,10 +29,11 @@ export interface TraceLeaf {
    * when that is not another symbol: `literal` (a plain value: passed by a caller or a step, an env variable's or
    * output's own value, or an input's default), `omitted` (a caller or step does not pass the input), `value`,
    * `missing` and `dynamic` (a matrix key's combinations), `context` (read from a context the graph does not follow,
-   * such as `github.event.pull_request.title` or `runner.os`; `text` is the reference), `invalid` (an expression that
-   * does not parse, or, in an input's default, a reference to a context or a call to a function GitHub does not allow
-   * there; `text` is then the reference, or the function's name and `()` at the expression's place) and `expression`
-   * (an expression that reads no context, e.g. a `format()` of literals).
+   * such as `github.event.pull_request.title` or `runner.os`, or from the caller's event: `github.event.inputs.<name>`
+   * in a workflow that can be called; `text` is the reference), `invalid` (an expression that does not parse, or, in an
+   * input's default, a reference to a context or a call to a function GitHub does not allow there; `text` is then the
+   * reference, or the function's name and `()` at the expression's place) and `expression` (an expression that reads
+   * no context, e.g. a `format()` of literals).
    *
    * When a caller or step omits an input, its `default:` is the value there, so the input's trace also ends at the
    * default, after the calls: a `literal`, or the `context`, `invalid` or `expression` leaves of an expression, with
@@ -53,7 +63,10 @@ export interface TraceNode {
   kind: GraphNode['kind'];
   unit?: string;
   loc?: Loc;
-  /** How the value got here from the parent node. */
+  /**
+   * How the value got here from the parent node. `note` qualifies it: `when dispatched` for a workflow input read
+   * through `github.event.inputs`, which holds the input only when the workflow is dispatched (see `readsCallerEvent`).
+   */
   via?: { loc: Loc; text: string; note?: string };
   children: TraceNode[];
   leaves: TraceLeaf[];
@@ -126,7 +139,7 @@ function base(index: ProjectIndex, symbol: string): TraceNode {
 
 /**
  * The node for `symbol`, and the path below it when the branch goes on. A branch stops at a cycle, at the depth limit,
- * or at a symbol already expanded elsewhere in the trace; otherwise the symbol is marked as expanded.
+ * or at a symbol already expanded elsewhere in the trace under the same `key`; otherwise the key is marked as expanded.
  */
 function enter(
   index: ProjectIndex,
@@ -134,12 +147,13 @@ function enter(
   depth: number,
   path: Set<string>,
   expanded: Set<string>,
+  key = symbol,
 ): { node: TraceNode; next?: Set<string> } {
   const node = base(index, symbol);
   if (path.has(symbol)) return { node: { ...node, stop: 'cycle' } };
   if (depth <= 0) return { node: { ...node, stop: 'depth' } };
-  if (expanded.has(symbol)) return { node: { ...node, stop: 'seen' } };
-  expanded.add(symbol);
+  if (expanded.has(key)) return { node: { ...node, stop: 'seen' } };
+  expanded.add(key);
   return { node, next: new Set(path).add(symbol) };
 }
 
@@ -166,56 +180,119 @@ function matrixSymbol(symbol: string, unit: string): { job: string; key: string 
   return { job: rest.slice(0, at), key: rest.slice(at + '.matrix.'.length) };
 }
 
+/**
+ * `called`: the symbol is a workflow input entered through a caller's `with:`, so the workflow runs as a called one,
+ * and its `github.event.inputs` reads take the caller's event, not this value (see `readsCallerEvent`).
+ */
 function down(
   index: ProjectIndex,
   symbol: string,
   depth: number,
   path: Set<string>,
   expanded: Set<string>,
+  called = false,
 ): TraceNode {
-  const { node, next } = enter(index, symbol, depth, path, expanded);
+  const { node, next } = enter(index, symbol, depth, path, expanded, downKey(index, symbol, called));
   if (!next) return node;
-
-  const seenSinks = new Set<string>();
-  for (const u of index.usagesOf(symbol)) {
-    if (u.sink) {
-      if (seenSinks.has(`${u.sink}@${u.site.id}`)) continue;
-      seenSinks.add(`${u.sink}@${u.site.id}`);
-      const child = down(index, u.sink, depth - 1, next, expanded);
-      child.via = { loc: u.ref.loc, text: short(u.site.text) };
-      node.children.push(child);
-    } else {
-      node.leaves.push(leafOf(u));
-    }
-  }
-  // Propagation that is structural rather than an expression (callee output → caller job output, etc.).
-  for (const e of index.outgoing(symbol, 'flows')) {
-    if (e.siteId !== undefined) continue;
-    const child = down(index, e.to, depth - 1, next, expanded);
-    if (e.loc) child.via = { loc: e.loc, text: 'workflow output', note: 'exposed to the caller' };
-    node.children.push(child);
-  }
-  // `secrets: inherit` forwards the secret under the same name, possibly through workflows that never read it.
-  const secret = secretSymbol(symbol);
-  const wf = secret ? index.project.workflows.get(secret.unit) : undefined;
-  if (secret && wf) {
-    const name = secret.name;
-    for (const job of Object.values(wf.jobs)) {
-      const callee = job.secretsInherit ? index.calleeOf(job) : undefined;
-      if (!callee) continue;
-      const needed = [...secretsNeededBy(index, callee)].some((s) => s.toLowerCase() === name.toLowerCase());
-      if (!needed) continue;
-      const target = sym.secret(
-        callee.path,
-        (callee.call && lookup(callee.call.secrets, name)?.name) ?? name,
-      );
-      const child = down(index, target, depth - 1, next, expanded);
-      child.via = { loc: job.secretsLoc ?? job.loc, text: 'secrets: inherit', note: `jobs.${job.id}` };
-      node.children.push(child);
-    }
-  }
+  const child = (to: string, calledInput = false) => down(index, to, depth - 1, next, expanded, calledInput);
+  addReads(index, symbol, called, child, node);
+  node.children = [
+    ...node.children,
+    ...structuralChildren(index, symbol, child),
+    ...inheritChildren(index, symbol, child),
+  ];
   return node;
 }
+
+/**
+ * What a symbol is expanded once for downstream: the symbol, and whether it is `called` when that changes its reads,
+ * that is for an input the workflow reads through `github.event.inputs`. Each symbol is expanded at most twice.
+ */
+function downKey(index: ProjectIndex, symbol: string, called: boolean): string {
+  const skips = called && index.usagesOf(symbol).some((u) => readsCallerEvent(index, u));
+  return skips ? `${symbol}\0called` : symbol;
+}
+
+/** What reads the value: a symbol each expression defines (a child, once per expression) or a use (a leaf). */
+function addReads(
+  index: ProjectIndex,
+  symbol: string,
+  called: boolean,
+  child: (to: string, calledInput?: boolean) => TraceNode,
+  node: TraceNode,
+): void {
+  const seenSinks = new Set<string>();
+  for (const u of index.usagesOf(symbol)) {
+    if (called && readsCallerEvent(index, u)) continue;
+    if (!u.sink) {
+      node.leaves.push(leafOf(u));
+      continue;
+    }
+    if (seenSinks.has(`${u.sink}@${u.site.id}`)) continue;
+    seenSinks.add(`${u.sink}@${u.site.id}`);
+    // A caller's `with:` value is the called workflow's input.
+    const c = child(u.sink, u.site.field === 'job.with');
+    c.via = { loc: u.ref.loc, text: short(u.site.text) };
+    node.children.push(c);
+  }
+}
+
+/** Propagation that is structural rather than an expression (callee output → caller job output, etc.). */
+function structuralChildren(
+  index: ProjectIndex,
+  symbol: string,
+  child: (to: string) => TraceNode,
+): TraceNode[] {
+  return index
+    .outgoing(symbol, 'flows')
+    .filter((e) => e.siteId === undefined)
+    .map((e) => {
+      const c = child(e.to);
+      if (e.loc) c.via = { loc: e.loc, text: 'workflow output', note: 'exposed to the caller' };
+      return c;
+    });
+}
+
+/** `secrets: inherit` forwards the secret under the same name, possibly through workflows that never read it. */
+function inheritChildren(index: ProjectIndex, symbol: string, child: (to: string) => TraceNode): TraceNode[] {
+  const secret = secretSymbol(symbol);
+  const wf = secret ? index.project.workflows.get(secret.unit) : undefined;
+  if (!secret || !wf) return [];
+  return Object.values(wf.jobs).flatMap((job) => {
+    const target = inheritedSecret(index, job, secret.name);
+    if (!target) return [];
+    const c = child(target);
+    c.via = { loc: job.secretsLoc ?? job.loc, text: 'secrets: inherit', note: `jobs.${job.id}` };
+    return [c];
+  });
+}
+
+/** The callee's secret a job's `secrets: inherit` hands the secret `name` to, when the callee needs it. */
+function inheritedSecret(index: ProjectIndex, job: JobDecl, name: string): string | undefined {
+  const callee = job.secretsInherit ? index.calleeOf(job) : undefined;
+  if (!callee) return undefined;
+  const needed = [...secretsNeededBy(index, callee)].some((s) => s.toLowerCase() === name.toLowerCase());
+  if (!needed) return undefined;
+  return sym.secret(callee.path, (callee.call && lookup(callee.call.secrets, name)?.name) ?? name);
+}
+
+/**
+ * Whether a read is `github.event.inputs…` in a workflow that can be called. GitHub gives a called workflow its
+ * caller's `github` context ("the github context is always associated with the caller workflow"), with the caller's
+ * event payload, so there `github.event.inputs` holds the caller's own dispatch inputs, or nothing, and never the
+ * values passed in `with:`. The graph resolves the read to the workflow's input, which holds only when the workflow
+ * is dispatched.
+ */
+function readsCallerEvent(index: ProjectIndex, u: { site: ExprSite; ref: LocatedRef }): boolean {
+  const unit = index.project.workflows.get(u.site.ownerPath);
+  return !!unit?.call && isEventInputs(u.ref);
+}
+
+const isEventInputs = (ref: LocatedRef) =>
+  ref.context === 'github' && ref.path[0] === 'event' && ref.path[1] === 'inputs';
+
+/** The node of a parent upstream: a symbol traced on up, or the dispatch input alone (see `dispatchedInput`). */
+type Parent = (from: string, dispatched?: boolean) => TraceNode;
 
 function up(
   index: ProjectIndex,
@@ -226,7 +303,8 @@ function up(
 ): TraceNode {
   const { node, next } = enter(index, symbol, depth, path, expanded);
   if (!next) return node;
-  const parent = (from: string) => up(index, from, depth - 1, next, expanded);
+  const parent: Parent = (from, dispatched = false) =>
+    dispatched ? dispatchedInput(index, from, depth - 1, next) : up(index, from, depth - 1, next, expanded);
   const fallback = omittedDefault(index, symbol);
 
   node.children = [
@@ -255,8 +333,27 @@ function endSources(index: ProjectIndex, symbol: string, fallback: InputDefault 
   ];
 }
 
+/**
+ * A workflow input that a value reads only through `github.event.inputs`: the value entered when the workflow is
+ * dispatched. When it is called, the read takes the caller's event instead (a `context` leaf, see `readsCallerEvent`),
+ * so the callers' `with:` values, which the input holds then, are not where the value comes from: the input is shown,
+ * but not traced on up, nor marked as expanded, so that a read of it through `inputs` still is.
+ */
+function dispatchedInput(index: ProjectIndex, symbol: string, depth: number, path: Set<string>): TraceNode {
+  const node = base(index, symbol);
+  if (path.has(symbol)) return { ...node, stop: 'cycle' };
+  if (depth <= 0) return { ...node, stop: 'depth' };
+  return node;
+}
+
+/** Whether every read of `from` in the site is `github.event.inputs` in a workflow that can be called. */
+function readsOnlyCallerEvent(index: ProjectIndex, from: string, siteId: number | undefined): boolean {
+  const reads = index.usagesOf(from).filter((u) => u.site.id === siteId);
+  return reads.length > 0 && reads.every((u) => readsCallerEvent(index, u));
+}
+
 /** The symbols the value is computed from, through `flows` edges: one parent per source and expression. */
-function flowParents(index: ProjectIndex, symbol: string, parent: (from: string) => TraceNode): TraceNode[] {
+function flowParents(index: ProjectIndex, symbol: string, parent: Parent): TraceNode[] {
   const parents: TraceNode[] = [];
   // One parent per source and expression, even when the expression reads the symbol several times.
   const seenEdges = new Set<string>();
@@ -267,20 +364,23 @@ function flowParents(index: ProjectIndex, symbol: string, parent: (from: string)
         : `${e.from}@${e.loc ? `${e.loc.file}:${e.loc.line}:${e.loc.column}` : ''}`;
     if (seenEdges.has(key)) continue;
     seenEdges.add(key);
-    const p = parent(e.from);
-    const site = e.siteId !== undefined ? index.site(e.siteId) : undefined;
-    if (e.loc) p.via = { loc: e.loc, text: site ? short(site.text) : 'workflow output' };
-    parents.push(p);
+    parents.push(flowParent(index, e, parent));
   }
   return parents;
 }
 
+/** The parent a `flows` edge comes from, with how the value got here: `when dispatched` for a dispatch input alone. */
+function flowParent(index: ProjectIndex, e: GraphEdge, parent: Parent): TraceNode {
+  const dispatched = readsOnlyCallerEvent(index, e.from, e.siteId);
+  const p = parent(e.from, dispatched);
+  const site = e.siteId !== undefined ? index.site(e.siteId) : undefined;
+  const note = dispatched ? { note: 'when dispatched' } : {};
+  if (e.loc) p.via = { loc: e.loc, text: site ? short(site.text) : 'workflow output', ...note };
+  return p;
+}
+
 /** A secret received through `secrets: inherit` comes from the caller's secret of the same name. */
-function inheritParents(
-  index: ProjectIndex,
-  symbol: string,
-  parent: (from: string) => TraceNode,
-): TraceNode[] {
+function inheritParents(index: ProjectIndex, symbol: string, parent: Parent): TraceNode[] {
   const secret = secretSymbol(symbol);
   if (!secret) return [];
   const parents: TraceNode[] = [];
@@ -515,14 +615,14 @@ interface Reading {
 
 /**
  * What an expression site reads that is not a symbol, or the expression itself when it reads nothing. `reading` says
- * what each of its references reads (the graph's `readsOf` by default) and which functions it may call.
+ * what each of its references reads (`definitionReads` by default) and which functions it may call.
  */
 function siteSources(
   index: ProjectIndex,
   unit: UnitDecl,
   site: ExprSite,
   where: string,
-  reading: Reading = { reads: (s, ref) => index.readsOf(unit, s, ref) },
+  reading: Reading = { reads: definitionReads(index, unit) },
 ): TraceLeaf[] {
   const found = new Map<string, TraceLeaf>();
   collectSources(index, unit, { ...reading, site, where }, found);
@@ -602,6 +702,15 @@ function addRead(
     add(found, `invalid@${ref.loc.line}:${ref.loc.column}`, { role: 'invalid', ...leaf });
   else if (reads.length === 0)
     add(found, `context:${[ref.context, ...ref.path].join('.').toLowerCase()}`, { role: 'context', ...leaf });
+}
+
+/**
+ * What a reference in a definition reads: the symbols the graph resolves it to, or none for `github.event.inputs` in a
+ * workflow that can be called, which holds the caller's event when the workflow is called (see `readsCallerEvent`), so
+ * the reference ends at that context, which the graph does not follow.
+ */
+function definitionReads(index: ProjectIndex, unit: UnitDecl): Reader {
+  return (site, ref) => (readsCallerEvent(index, { site, ref }) ? [] : index.readsOf(unit, site, ref));
 }
 
 /**
