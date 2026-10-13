@@ -16,15 +16,20 @@ export function readsContextDynamically(unit: UnitDecl, context: string): boolea
   for (const { ref } of refsOf(unit)) {
     // `needs.build.outputs[matrix.k]` names its job: the graph counts it as a read of each output of that job.
     if (ref.context === context && ref.dynamic && !namesOwner(ref)) return true;
-    if (context === 'inputs' && ref.context === 'github' && ref.path[0] === 'event') {
-      if (
-        ref.path.length === 1 ||
-        (ref.path[1] === 'inputs' && (ref.path.length === 2 || ref.path[2] === '?'))
-      )
-        return true;
-    }
+    if (context === 'inputs' && readsEveryEventInput(ref)) return true;
   }
   return false;
+}
+
+/**
+ * Whether a reference reads every dispatch input of the triggering workflow, which `github.event` holds: the whole
+ * `github.event` or `github.event.inputs`, or a computed key of the inputs (`github.event.inputs[matrix.k]`).
+ */
+function readsEveryEventInput(ref: LocatedRef): boolean {
+  if (ref.context !== 'github' || ref.path[0] !== 'event') return false;
+  return (
+    ref.path.length === 1 || (ref.path[1] === 'inputs' && (ref.path.length === 2 || ref.path[2] === '?'))
+  );
 }
 
 /**
