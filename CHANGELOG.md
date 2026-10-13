@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0](https://github.com/ciatlas/core/compare/v0.3.0...v0.4.0) (2026-10-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* **queries:** count a whole secrets read behind secrets: inherit as reading every secret ([#31](https://github.com/ciatlas/core/issues/31))
+
+### Bug Fixes
+
+* **expressions:** locate references after a string literal that spans lines ([#29](https://github.com/ciatlas/core/issues/29)) ([131e48d](https://github.com/ciatlas/core/commit/131e48d53e6b29fbbbb3c1bdf1e14be6f640e9dd))
+* **queries:** count a whole secrets read behind secrets: inherit as reading every secret ([#31](https://github.com/ciatlas/core/issues/31)) ([e71e033](https://github.com/ciatlas/core/commit/e71e033d5b12680e64578873f1d2b375fd05f41d))
+* **trace:** label an action's output edge 'action output' ([#30](https://github.com/ciatlas/core/issues/30)) ([a7c8895](https://github.com/ciatlas/core/commit/a7c88956ac29623626aea9b1ba60a50bdf68eafa))
+
 ## [0.3.0](https://github.com/ciatlas/core/compare/v0.2.0...v0.3.0) (2026-10-13)
 
 
