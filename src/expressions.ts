@@ -198,13 +198,12 @@ function collectRefs(root: Expr, source: string): ExprRef[] {
       const idx = e.index;
       if (idx instanceof Star) return { ...base, path: [...base.path, '*'] };
       if (idx instanceof Literal && idx.literal.kind === Kind.String) {
+        // A bracketed `['c']` ends after its `]`, which `refEndFromSource` finds; a dotted `.c` ends at its name, even
+        // when the whole reference is itself an index (`x[github.event.action]`).
         return {
           ...base,
           path: [...base.path, idx.literal.coerceString()],
-          end: Math.max(
-            base.end,
-            endOf(idx.token as Tok) + (source[endOf(idx.token as Tok)] === ']' ? 1 : 0),
-          ),
+          end: Math.max(base.end, endOf(idx.token as Tok)),
         };
       }
       if (idx instanceof Literal && idx.literal.kind === Kind.Number) {

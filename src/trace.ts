@@ -1,5 +1,5 @@
 import { type ActionUse, type Definition, type GraphNode, type ProjectIndex, sym, type Usage } from './graph';
-import { type Binding, type ExprSite, lookup, type SiteField } from './ir';
+import { type Binding, type ExprSite, type LocatedRef, lookup, type SiteField, type UnitDecl } from './ir';
 import { type Cell, comboLabel, expandMatrix } from './matrix';
 import { secretsNeededBy } from './queries';
 import type { Loc } from './source';
@@ -7,10 +7,11 @@ import type { Loc } from './source';
 export interface TraceLeaf {
   /**
    * Downstream, what the value is used for, e.g. `run script`, `condition`, `runs-on`. Upstream, where it comes from
-   * when that is not another symbol: `literal` and `omitted` (by a caller or a step), `value`, `missing` and `dynamic`
-   * (a matrix key's combinations), `context` (a value read from a context the graph does not follow, such as
-   * `github.event.pull_request.title` or `runner.os`; the trace ends there) and `expression` (an expression that reads no
-   * context, e.g. a `format()` of literals).
+   * when that is not another symbol: `literal` (a plain value: passed by a caller or a step, or an env variable's or
+   * output's own value), `omitted` (a caller or step does not pass the input), `value`, `missing` and `dynamic` (a
+   * matrix key's combinations), `context` (read from a context the graph does not follow, such as
+   * `github.event.pull_request.title` or `runner.os`; `text` is the reference), `invalid` (an expression that does not
+   * parse) and `expression` (an expression that reads no context, e.g. a `format()` of literals).
    */
   role: string;
   where: string;
@@ -199,19 +200,24 @@ function up(
   if (!next) return node;
   const parent = (from: string) => up(index, from, depth - 1, next, expanded);
 
-  node.children.push(...flowParents(index, symbol, parent), ...inheritParents(index, symbol, parent));
-  node.leaves.push(...endSources(index, symbol));
+  node.children = [...flowParents(index, symbol, parent), ...inheritParents(index, symbol, parent)];
+  node.leaves = endSources(index, symbol);
   return node;
 }
 
-/** Where the trace ends: a matrix key's combinations, callers' literal values and omissions, and runtime contexts. */
+/**
+ * Where the trace ends: a matrix key's combinations, callers' literal values and omissions, and what each definition
+ * reads that is not a symbol. Arrays are joined, not spread into `push`, which has an argument limit.
+ */
 function endSources(index: ProjectIndex, symbol: string): TraceLeaf[] {
   const n = index.nodes.get(symbol);
-  const leaves: TraceLeaf[] = [];
-  if (n?.unit && n.kind === 'matrix') leaves.push(...matrixSources(index, symbol, n.unit));
-  if (n?.unit && n.kind === 'input') leaves.push(...callerValues(index, symbol, n.unit));
-  for (const def of index.definitionsOf(symbol)) leaves.push(...runtimeSources(index, def));
-  return leaves;
+  const matrix = n?.unit && n.kind === 'matrix' ? matrixSources(index, symbol, n.unit) : [];
+  const callers = n?.unit && n.kind === 'input' ? callerValues(index, symbol, n.unit) : [];
+  return [
+    ...matrix,
+    ...callers,
+    ...index.definitionsOf(symbol).flatMap((def) => definitionSources(index, def)),
+  ];
 }
 
 /** The symbols the value is computed from, through `flows` edges: one parent per source and expression. */
@@ -315,28 +321,92 @@ function valueLeaf(b: Binding | undefined, where: string, usesLoc: Loc): TraceLe
 }
 
 /**
- * What a definition reads that is not a symbol, where the trace ends: contexts set at runtime
- * (`github.event.pull_request.title`, `runner.os`, `needs.<job>.result`, `steps.<id>.outcome`, an `env` value written to
- * `$GITHUB_ENV`) and the step's own `env:`. A definition that reads no context at all is shown as written. The symbols it
- * reads are the node's children already, through its `flows` edges.
+ * Where a definition's value comes from when that is not a symbol (the symbols it reads are the node's children
+ * already, through its `flows` edges): a plain value (`literal`); contexts the graph does not follow (`context`), such
+ * as `github.event.pull_request.title`, `runner.os`, `needs.<job>.result`, `steps.<id>.outcome` or an `env` value
+ * written to `$GITHUB_ENV`, followed through the step's own `env:`; an expression that does not parse (`invalid`); or,
+ * when it reads nothing at all, the expression as written (`expression`).
  */
-function runtimeSources(index: ProjectIndex, { unit, site }: Definition): TraceLeaf[] {
-  // The same place as the `literal` and `omitted` leaves of a call name: the job, and the step for an action.
-  const where = [site.file, site.job && `jobs.${site.job}`, site.step !== undefined && `steps[${site.step}]`]
+function definitionSources(index: ProjectIndex, def: Definition): TraceLeaf[] {
+  if (!('site' in def)) {
+    const where = placeOf(def.unit, def.job);
+    return [{ role: 'literal', where, loc: def.loc, text: JSON.stringify(def.value) }];
+  }
+  const { unit, site } = def;
+  const where = placeOf(unit, site.job, site.step);
+  const found = new Map<string, TraceLeaf>();
+  collectSources(index, unit, site, where, found);
+  const readsNothing = site.segments.every((seg) => seg.refs.length === 0 && !seg.expr.error);
+  if (readsNothing) return [{ role: 'expression', where, loc: site.loc, text: short(site.text) }];
+  return [...found.values()];
+}
+
+/** The same place as the `literal` and `omitted` leaves of a call: the unit, the job, and the step for an action. */
+function placeOf(unit: UnitDecl, job?: string, step?: number): string {
+  return [unit.path, job && `jobs.${job}`, step !== undefined && `steps[${step}]`]
     .filter(Boolean)
     .join(' › ');
-  const refs = site.segments.flatMap((seg) => seg.refs.map((ref) => ({ seg, ref })));
-  if (refs.length === 0) return [{ role: 'expression', where, loc: site.loc, text: short(site.text) }];
-  const leaves: TraceLeaf[] = [];
-  const seen = new Set<string>();
-  for (const { seg, ref } of refs) {
-    if (index.readsOf(unit, site, ref).length > 0) continue;
-    const text = seg.expr.source.slice(ref.start, ref.end);
-    if (seen.has(text)) continue;
-    seen.add(text);
-    leaves.push({ role: 'context', where, loc: ref.loc, text });
+}
+
+/** Adds the leaves for what `site` reads that is not a symbol, once per context (contexts ignore case). */
+function collectSources(
+  index: ProjectIndex,
+  unit: UnitDecl,
+  site: ExprSite,
+  where: string,
+  found: Map<string, TraceLeaf>,
+): void {
+  for (const seg of site.segments) {
+    if (seg.expr.error) {
+      add(found, `invalid@${seg.loc.line}:${seg.loc.column}`, {
+        role: 'invalid',
+        where,
+        loc: seg.loc,
+        text: short(seg.expr.source),
+      });
+    }
+    for (const ref of seg.refs) {
+      const own = ownEnv(index, unit, site, ref);
+      if (own?.site) collectSources(index, unit, own.site, where, found);
+      else if (own) add(found, `literal@${own.valueLoc.line}:${own.valueLoc.column}`, ownLiteral(own, where));
+      else if (index.readsOf(unit, site, ref).length === 0)
+        add(found, `context:${[ref.context, ...ref.path].join('.').toLowerCase()}`, {
+          role: 'context',
+          where,
+          loc: ref.loc,
+          text: refText(seg.expr.source, ref),
+        });
+    }
   }
-  return leaves;
+}
+
+/**
+ * The step's own `env:` entry a reference reads: it shadows the job's and the workflow's for the rest of the step, and
+ * its value (evaluated against the outer env) is where the reference's value comes from.
+ */
+function ownEnv(index: ProjectIndex, unit: UnitDecl, site: ExprSite, ref: LocatedRef): Binding | undefined {
+  const name = ref.path[0];
+  if (ref.context !== 'env' || site.field === 'step.env' || !name || name === '*' || name === '?')
+    return undefined;
+  return lookup(index.stepOf(unit, site)?.env ?? {}, name);
+}
+
+/** Keeps the first leaf of each key: the place where the source is first written. */
+function add(found: Map<string, TraceLeaf>, key: string, leaf: TraceLeaf): void {
+  if (!found.has(key)) found.set(key, leaf);
+}
+
+function ownLiteral(own: Binding, where: string): TraceLeaf {
+  return { role: 'literal', where, loc: own.valueLoc, text: JSON.stringify(own.value) };
+}
+
+/** The reference as written, on one line; a computed index at its end shows as `[…]`. */
+function refText(source: string, ref: LocatedRef): string {
+  const text = source
+    .slice(ref.start, ref.end)
+    .replace(/\s*([.[\]])\s*/g, '$1')
+    .replace(/\s+/g, ' ');
+  return ref.path.at(-1) === '?' ? `${text}[…]` : text;
 }
 
 function leafOf(u: Usage): TraceLeaf {

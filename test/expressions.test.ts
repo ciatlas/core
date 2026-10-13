@@ -100,6 +100,17 @@ describe('parseExpression references', () => {
     expect(src.slice(x!.start, x!.end)).toBe("steps.s.outputs['x']");
   });
 
+  it('ends a dotted reference used as an index at its name, and a bracketed one after its ]', () => {
+    const src =
+      "fromJSON(github.event.client_payload)[github.event.action] || github.event['a-b'][ github.ref ]";
+    expect(parseExpression(src).refs.map((r) => src.slice(r.start, r.end))).toEqual([
+      'github.event.client_payload',
+      'github.event.action',
+      "github.event['a-b']",
+      'github.ref',
+    ]);
+  });
+
   it('accepts context-specific functions', () => {
     expect(parseExpression("hashFiles('**/lock')").error).toBeUndefined();
     expect(parseExpression('success() && always()').error).toBeUndefined();
