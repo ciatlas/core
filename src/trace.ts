@@ -359,12 +359,15 @@ function readsCallerEvent(index: ProjectIndex, u: { site: ExprSite; ref: Located
 const readsGithub = (ref: LocatedRef) => ref.context === 'github';
 
 /**
- * Whether a usage reads its symbol only through `github` in a workflow that can be called (see
- * `readsCallerEvent`): directly, or through the step's own env values it reads (`env.X`, where the step's `env:` has
- * `X: ${{ github.event.inputs.z }}`, or a whole `env`, which reads every own value), which the graph resolves to what
- * the values read.
+ * Whether a usage reads its symbol only through `github` in a workflow that can be called: directly
+ * (`github.event.inputs.<name>`, `toJSON(github)`, `github.event[x]`), or through the step's own env values it reads
+ * (`env.X`, where the step's `env:` has `X: ${{ toJSON(github) }}`, or a whole `env`, which reads every own value), which
+ * the graph resolves to what the values read. The symbol is then one of the workflow's `workflow_dispatch` inputs,
+ * which `github.event` holds only when the workflow is dispatched: when it is called, GitHub gives it the caller's
+ * `github` context and event (see `readsCallerEvent`), so the usage never takes in the value a caller passes in `with:`.
+ * A rule about that value, such as one that looks for an input a callee never takes in, can skip such usages.
  */
-function usageReadsCallerEvent(index: ProjectIndex, u: Usage): boolean {
+export function usageReadsCallerEvent(index: ProjectIndex, u: Usage): boolean {
   const wf = index.project.workflows.get(u.site.ownerPath);
   if (!wf?.call) return false;
   if (readsGithub(u.ref)) return true;

@@ -1,4 +1,4 @@
-import { resolveSymbols, sym, type TraceNode, trace } from '@ciatlas/core';
+import { resolveSymbols, sym, type TraceNode, trace, usageReadsCallerEvent } from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 import { load, WF, yaml } from './helpers';
 
@@ -2697,5 +2697,63 @@ describe('trace: whole and computed github reads (#22)', () => {
     // From the input itself (dispatched or called), the reads are listed.
     expect(trace(index, sym.input(BOTH, 's')).leaves).toHaveLength(1);
     expect(trace(index, sym.input(BOTH, 'c')).leaves).toHaveLength(0);
+  });
+});
+
+// A called workflow gets its caller's `github` context, so a usage that reads an input only through `github`, directly or
+// through the step's own env, never takes in what a caller passes: rules about that value can tell it apart (#22).
+describe('usageReadsCallerEvent', () => {
+  const BOTH = `${WF}/both.yml`;
+  const DISP = `${WF}/disp.yml`;
+  const steps = yaml`
+    jobs:
+      j:
+        runs-on: x
+        strategy: { matrix: { k: [event] } }
+        steps:
+          - run: echo '\${{ github.event.inputs.target }} \${{ toJSON(github) }} \${{ github[matrix.k].inputs.target }}'
+          - env:
+              G: \${{ toJSON(github) }}
+              N: \${{ github.event.inputs.target }}
+            run: echo '\${{ env.G }} \${{ env.N }} \${{ toJSON(env) }}'
+          - env:
+              M: \${{ github.event.inputs.target }} \${{ inputs.target }}
+            run: echo '\${{ env.M }} \${{ inputs.target }}'
+  `;
+  const { index } = load({
+    [BOTH]: `on:\n  workflow_call:\n    inputs:\n      target: { type: string, required: false }\n  workflow_dispatch:\n    inputs:\n      target: { type: string, required: false }\n${steps}`,
+    [DISP]: `on:\n  workflow_dispatch:\n    inputs:\n      target: { type: string, required: false }\n${steps}`,
+  });
+  const reads = (path: string) =>
+    index
+      .usagesOf(sym.input(path, 'target'))
+      .map(
+        (u) =>
+          `${u.site.field} ${[u.ref.context, ...u.ref.path].join('.')}: ${usageReadsCallerEvent(index, u)}`,
+      );
+
+  it('tells the reads through github, or through the step’s own env values that read only github, in a workflow that can be called', () => {
+    expect(reads(BOTH)).toEqual([
+      'step.run github.event.inputs.target: true',
+      'step.run github: true',
+      'step.run github.?.inputs.target: true',
+      'step.env github: true',
+      'step.env github.event.inputs.target: true',
+      'step.run env.G: true',
+      'step.run env.N: true',
+      // A whole env reads the input through G and N, which read only github.
+      'step.run env: true',
+      'step.env github.event.inputs.target: true',
+      'step.env inputs.target: false',
+      // M reads it through inputs too: a usage for each of its two reads.
+      'step.run env.M: false',
+      'step.run env.M: false',
+      'step.run inputs.target: false',
+    ]);
+  });
+
+  it('is false in a workflow that cannot be called, whose github is its own', () => {
+    expect(reads(DISP).filter((r) => r.endsWith('true'))).toEqual([]);
+    expect(reads(DISP)).toHaveLength(13);
   });
 });
