@@ -12,7 +12,13 @@ import {
   visit,
   type YAMLMap,
 } from 'yaml';
-import { findTemplateSegments, type Json, parseExpression } from './expressions';
+import {
+  findTemplateSegments,
+  type Json,
+  type ParsedExpression,
+  parseExpression,
+  type TemplateSegment,
+} from './expressions';
 import type {
   ActionDecl,
   Binding,
@@ -202,47 +208,10 @@ function buildSite(
   ctx: ParseContext,
 ): ExprSite {
   const { source } = unit;
-  const [start, end] = node.range ?? [0, 0];
-  const raw = source.text.slice(start, end);
-  const segments: ExprSegment[] = [];
-
-  // Offsets in the decoded value drift from the source in folded/literal blocks, quoted strings with escapes and
-  // CRLF files, so each reference is located by searching for its own text in the raw scalar, in order.
-  let cursor = 0;
-  const locateSegment = (absInner: number, expr: ReturnType<typeof parseExpression>): ExprSegment => {
-    cursor = Math.max(cursor, absInner - start);
-    const refs = expr.refs.map((r) => {
-      const refText = expr.source.slice(r.start, r.end);
-      const found = refText ? raw.indexOf(refText, cursor) : -1;
-      if (found >= 0) {
-        cursor = found + refText.length;
-        return { ...r, loc: source.loc(start + found, start + found + refText.length) };
-      }
-      return { ...r, loc: source.loc(absInner + r.start, absInner + r.end) };
-    });
-    return { expr, loc: source.loc(absInner, absInner + expr.source.length), refs };
-  };
-
+  const scalar = rawScalar(source, node);
   const templated = findTemplateSegments(text);
-  const wholeIsTemplate =
-    templated.length === 1 && text.trim() === text.slice(templated[0]!.start, templated[0]!.end);
-  if (c.cond && !wholeIsTemplate && templated.length === 0) {
-    const inner = text.trim();
-    const expr = parseExpression(inner);
-    const idx = raw.indexOf(inner.slice(0, Math.min(inner.length, 40)));
-    segments.push(locateSegment(start + Math.max(0, idx), expr));
-  } else {
-    let searchFrom = 0;
-    for (const seg of templated) {
-      const idx = raw.indexOf('${{', searchFrom);
-      const absOpen = idx >= 0 ? start + idx : start;
-      if (idx >= 0) searchFrom = idx + 3;
-      const lead = seg.innerStart - seg.start;
-      const rawAfter = idx >= 0 ? raw.slice(idx + 3) : '';
-      const leadRaw = idx >= 0 ? 3 + (rawAfter.length - rawAfter.trimStart().length) : lead;
-      segments.push(locateSegment(absOpen + leadRaw, seg.expr));
-    }
-  }
+  const segments =
+    c.cond && templated.length === 0 ? [conditionSegment(scalar, text)] : templateSegments(scalar, templated);
 
   return {
     id: ctx.nextSiteId(),
@@ -254,10 +223,198 @@ function buildSite(
     ...(c.key !== undefined ? { key: c.key } : {}),
     yamlPath: p,
     text,
-    loc: source.loc(start, end),
+    loc: source.loc(scalar.start, scalar.start + scalar.raw.length),
     isCondition: c.cond,
     segments,
   };
+}
+
+/** A scalar as written, where the expressions of its decoded value are located. Offsets are relative to `raw`. */
+interface RawScalar {
+  source: SourceFile;
+  /** The scalar's offset in the file. */
+  start: number;
+  /** The scalar's source text: its quotes, escapes, indentation and line breaks included. */
+  raw: string;
+  /** An expression's string quote as written: a single-quoted scalar doubles each `'`. */
+  quote: string;
+  /** Whether the source spells characters with `\` escapes, as a double-quoted scalar does. */
+  escapes: boolean;
+  /** Where the value starts: past the opening quote of a quoted scalar, or past the header line of a block scalar. */
+  open: number;
+}
+
+function rawScalar(source: SourceFile, node: Scalar): RawScalar {
+  const [start, end] = node.range ?? [0, 0];
+  const raw = source.text.slice(start, end);
+  return {
+    source,
+    start,
+    raw,
+    quote: node.type === 'QUOTE_SINGLE' ? "''" : "'",
+    escapes: node.type === 'QUOTE_DOUBLE',
+    open: valueStart(node.type, raw),
+  };
+}
+
+/**
+ * Where a scalar's value starts in its source. A block scalar's range includes its header line (`|`, `>`, their
+ * indicators and a comment), whose text is not in the value: a `'`, `${{` or copy of an expression there is skipped.
+ */
+function valueStart(type: Scalar['type'], raw: string): number {
+  if (type === 'QUOTE_SINGLE' || type === 'QUOTE_DOUBLE') return 1;
+  if (type === 'BLOCK_LITERAL' || type === 'BLOCK_FOLDED') return raw.indexOf('\n') + 1;
+  return 0;
+}
+
+/**
+ * A bare `if:` is one expression: the whole value, from its first character that is not a space. A search for the
+ * value's first characters could instead find a later line that repeats them.
+ */
+function conditionSegment(s: RawScalar, text: string): ExprSegment {
+  return locateExpression(s, skipSpace(s, s.open), parseExpression(text.trim()), false).segment;
+}
+
+/** Each `${{ }}` is found after the one before it ends, so a `${{` inside a string literal does not start one. */
+function templateSegments(s: RawScalar, templated: TemplateSegment[]): ExprSegment[] {
+  let searchFrom = s.open;
+  return templated.map((seg) => {
+    const open = s.raw.indexOf('${{', searchFrom);
+    if (open < 0) return locateExpression(s, seg.innerStart - seg.start, seg.expr, true).segment;
+    const located = locateExpression(s, skipSpace(s, open + 3), seg.expr, true);
+    searchFrom = located.end;
+    return located.segment;
+  });
+}
+
+/**
+ * Past the spaces and line breaks from `i`, which the decoded value trims. A double-quoted scalar may write them as
+ * escapes: `\t`, `\x20`, `\ `, or a `\` that joins the next line.
+ */
+function skipSpace(s: RawScalar, i: number): number {
+  let at = i;
+  for (let n = spaceLength(s, at); n > 0; n = spaceLength(s, at)) at += n;
+  return at;
+}
+
+/** The length of the space at `at`: a character, or an escape that stands for one; 0 for anything else. */
+function spaceLength(s: RawScalar, at: number): number {
+  if (/\s/.test(s.raw[at] ?? '')) return 1;
+  const esc = s.escapes ? ESCAPE_AT_START.exec(s.raw.slice(at, at + 10)) : null;
+  return esc && escapesSpace(esc) ? esc[0].length : 0;
+}
+
+/** A `\` escape of a double-quoted scalar that starts the text: its hex digits, or the one character after the `\`. */
+const ESCAPE_AT_START = /^\\(?:x([\dA-Fa-f]{2})|u([\dA-Fa-f]{4})|U([\dA-Fa-f]{8})|([\s\S]))/;
+
+/** The one-character escapes that stand for a space or a line break, and the line break a `\` joins to the next line. */
+const SPACE_ESCAPES = new Set(['t', '\t', 'n', 'v', 'f', 'r', ' ', '_', 'L', 'P', '\n', '\r']);
+
+/** Whether an escape stands for a space or a line break, as the decoded value's `trim()` takes them. */
+function escapesSpace(esc: RegExpExecArray): boolean {
+  if (esc[4] !== undefined) return SPACE_ESCAPES.has(esc[4]);
+  const code = escapedCode(esc);
+  return code < 0x10000 && /\s/.test(String.fromCharCode(code));
+}
+
+/** The code point an escape's hex digits spell. */
+const escapedCode = (esc: RegExpExecArray) => Number.parseInt(esc[1] ?? esc[2] ?? esc[3] ?? '0', 16);
+
+/**
+ * Locates the expression that starts at `from` in the raw scalar. Offsets in the decoded value drift from the source in
+ * folded and literal blocks, quoted scalars with escapes and CRLF files, so each reference is found by its own text, in
+ * order, within the expression and outside its string literals (a copy of the text there is not the reference). A
+ * reference the source spells with an escape (`\x62` for `b` in a double-quoted scalar) keeps the expression's own
+ * offsets.
+ */
+function locateExpression(
+  s: RawScalar,
+  from: number,
+  expr: ParsedExpression,
+  closes: boolean,
+): { segment: ExprSegment; end: number } {
+  const scan = scanExpression(s.raw, from, s.quote, closes);
+  const at = s.start + from;
+  let cursor = from;
+  const refs = expr.refs.map((r) => {
+    // In a single-quoted scalar, a reference's own quotes (`github.event['action']`) are doubled too.
+    const written = expr.source.slice(r.start, r.end).replaceAll("'", s.quote);
+    const found = written ? indexOutside(s, written, cursor, scan) : -1;
+    if (found < 0) return { ...r, loc: s.source.loc(at + r.start, at + r.end) };
+    cursor = found + written.length;
+    return { ...r, loc: s.source.loc(s.start + found, s.start + cursor) };
+  });
+  return { segment: { expr, loc: s.source.loc(at, at + expr.source.length), refs }, end: scan.end };
+}
+
+/** An expression as written: where it ends, and the `[start, end)` of each string literal, quotes included. */
+interface RawExpression {
+  end: number;
+  strings: [number, number][];
+}
+
+/**
+ * Scans an expression the way `findTemplateSegments` scans the decoded value: `quote` opens and closes a string, and a
+ * doubled one inside it is an escaped quote. With `closes`, the expression ends at the first `}}` outside a string;
+ * otherwise (a bare `if:`) at the end of the scalar.
+ */
+function scanExpression(raw: string, from: number, quote: string, closes: boolean): RawExpression {
+  const strings: [number, number][] = [];
+  let i = from;
+  while (i < raw.length) {
+    if (raw.startsWith(quote, i)) {
+      const end = stringEnd(raw, i + quote.length, quote);
+      strings.push([i, end]);
+      i = end;
+    } else if (closes && raw.startsWith('}}', i)) {
+      return { end: i, strings };
+    } else {
+      i++;
+    }
+  }
+  return { end: raw.length, strings };
+}
+
+/** Past the quote that closes the string whose text starts at `i`, or the end of the scalar when none does. */
+function stringEnd(raw: string, i: number, quote: string): number {
+  let at = raw.indexOf(quote, i);
+  while (at >= 0 && raw.startsWith(quote, at + quote.length)) at = raw.indexOf(quote, at + 2 * quote.length);
+  return at < 0 ? raw.length : at + quote.length;
+}
+
+/**
+ * The first copy of `text` from `from` that ends within the expression, does not start inside one of its strings and
+ * does not continue a name or property chain: in `fromJSON(env.X).inputs.a`, `.inputs.a` is a property, not a reference.
+ */
+function indexOutside(s: RawScalar, text: string, from: number, scan: RawExpression): number {
+  let at = s.raw.indexOf(text, from);
+  while (at >= 0 && at + text.length <= scan.end) {
+    const inString = scan.strings.find(([start, end]) => at >= start && at < end);
+    if (!inString && !continuesName(s, at)) return at;
+    at = s.raw.indexOf(text, inString ? inString[1] : at + 1);
+  }
+  return -1;
+}
+
+const NAME_CHAR = /[\w.-]/;
+
+/** A `\` escape of a double-quoted scalar that ends the text, its backslash not itself escaped, with its hex digits. */
+const ESCAPE_AT_END =
+  /(?:^|[^\\])(?:\\\\)*\\(?:[0abtnvfreN_LP]|x([\dA-Fa-f]{2})|u([\dA-Fa-f]{4})|U([\dA-Fa-f]{8}))$/;
+
+/**
+ * Whether the character before `at` continues a name or property chain (`.`, a word character or `-`). A double-quoted
+ * scalar may write that character as an escape.
+ */
+function continuesName(s: RawScalar, at: number): boolean {
+  const escaped = s.escapes ? ESCAPE_AT_END.exec(s.raw.slice(Math.max(0, at - 16), at)) : null;
+  return escaped ? escapesNameChar(escaped) : NAME_CHAR.test(s.raw[at - 1] ?? '');
+}
+
+/** Whether an escape stands for a name character: `\x2e` is a `.`, and a letter escape (`\t`) a control or space. */
+function escapesNameChar(hex: RegExpExecArray): boolean {
+  const code = escapedCode(hex);
+  return code < 128 && NAME_CHAR.test(String.fromCharCode(code));
 }
 
 // ---------------------------------------------------------------------------
