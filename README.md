@@ -18,11 +18,12 @@ It has no rules, no configuration and no output formats: the tools built on it d
 The package is not on npm. Depend on a release tag:
 
 ```json
-{ "dependencies": { "@ciatlas/core": "github:ciatlas/core#v0.1.0" } }
+{ "dependencies": { "@ciatlas/core": "github:ciatlas/core#v0.4.0" } }
 ```
 
 It ships its TypeScript source and no build: bundle it with the `source` export condition (esbuild/tsup
-`conditions: ['source']`, TypeScript `customConditions: ["source"]`). Before 1.0, a minor version may break.
+`conditions: ['source']`, TypeScript `customConditions: ["source"]`). Versions follow Semantic Versioning: a breaking
+change is a major release, also before 1.0 (up to 0.4.0 one could come in a minor release).
 
 ## Development
 

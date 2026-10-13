@@ -25,5 +25,5 @@ To change core and a consumer together, link your checkout from the consumer: `p
 ## Commit messages
 
 Pull request titles follow [Conventional Commits](https://www.conventionalcommits.org) (`type(scope): summary`): the
-title is the squashed commit, and release-please reads only those. `feat` → minor, `fix`/`perf` → patch; before 1.0 a
-breaking change (`!`) bumps the minor version.
+title is the squashed commit, and release-please reads only those. `feat` → minor, `fix`/`perf` → patch, and a breaking
+change (`!` or a `BREAKING CHANGE:` footer) → major, also before 1.0: the next one releases 1.0.0.
