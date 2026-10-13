@@ -307,23 +307,41 @@ function inheritChildren(index: ProjectIndex, symbol: string, child: (to: string
   const secret = secretSymbol(symbol);
   const wf = secret ? index.project.workflows.get(secret.unit) : undefined;
   if (!secret || !wf) return [];
-  return Object.values(wf.jobs).flatMap((job) => {
-    const target = inheritedSecret(index, job, secret.name);
-    if (!target) return [];
-    const c = child(target);
-    c.via = { loc: job.secretsLoc ?? job.loc, text: 'secrets: inherit', note: `jobs.${job.id}` };
-    return [c];
-  });
+  return Object.values(wf.jobs).flatMap((job) =>
+    inheritedSecrets(index, job, secret.name).map((target) => {
+      const c = child(target);
+      c.via = { loc: job.secretsLoc ?? job.loc, text: 'secrets: inherit', note: `jobs.${job.id}` };
+      return c;
+    }),
+  );
 }
 
 /**
- * The callee's secret a job's `secrets: inherit` hands the secret `name` to, when the callee needs it: it, or a callee
- * it hands every secret to, reads it by name or reads, or may read, every secret (see `NeededSecrets.all`).
+ * The callee's symbols of the secret `name` that a job's `secrets: inherit` hands it to (see `secretSymbols`), when the
+ * callee needs it: it, or a callee it hands every secret to, reads it by name or reads, or may read, every secret (see
+ * `NeededSecrets.all`).
  */
-function inheritedSecret(index: ProjectIndex, job: JobDecl, name: string): string | undefined {
+function inheritedSecrets(index: ProjectIndex, job: JobDecl, name: string): string[] {
   const callee = job.secretsInherit ? index.calleeOf(job) : undefined;
-  if (!callee || !needsSecret(secretsNeededBy(index, callee), name)) return undefined;
-  return sym.secret(callee.path, (callee.call && lookup(callee.call.secrets, name)?.name) ?? name);
+  if (!callee || !needsSecret(secretsNeededBy(index, callee), name)) return [];
+  return secretSymbols(index, callee, name);
+}
+
+/**
+ * A workflow's symbols of the secret `name`, which GitHub looks up ignoring case: the secret it declares, else each
+ * spelling it reads the secret by (`secrets.deploy`, `secrets.Deploy`), else `name` itself, in a workflow that only
+ * hands the secret on.
+ */
+function secretSymbols(index: ProjectIndex, wf: WorkflowDecl, name: string): string[] {
+  const declared = wf.call && lookup(wf.call.secrets, name);
+  if (declared) return [sym.secret(wf.path, declared.name)];
+  const prefix = sym.secret(wf.path, '');
+  const lower = name.toLowerCase();
+  const spelled = [...index.nodes.values()]
+    .filter((n) => n.unit === wf.path && n.id.startsWith(prefix))
+    .map((n) => n.id)
+    .filter((id) => id.slice(prefix.length).toLowerCase() === lower);
+  return spelled.length ? spelled : [sym.secret(wf.path, name)];
 }
 
 /**
@@ -509,20 +527,23 @@ function flowParent(index: ProjectIndex, e: GraphEdge, parent: Parent): TraceNod
   return p;
 }
 
-/** A secret received through `secrets: inherit` comes from the caller's secret of the same name. */
+/**
+ * A secret received through `secrets: inherit` comes from each caller's symbols of that name (see `secretSymbols`). Not
+ * `GITHUB_TOKEN`, which GitHub gives every workflow without it.
+ */
 function inheritParents(index: ProjectIndex, symbol: string, parent: Parent): TraceNode[] {
   const secret = secretSymbol(symbol);
-  if (!secret) return [];
-  const parents: TraceNode[] = [];
-  const name = secret.name;
-  for (const c of index.callersOf(secret.unit)) {
-    if (!c.job.secretsInherit) continue;
-    const callerName = (c.caller.call && lookup(c.caller.call.secrets, name)?.name) ?? name;
-    const p = parent(sym.secret(c.caller.path, callerName));
-    p.via = { loc: c.job.secretsLoc ?? c.job.loc, text: 'secrets: inherit', note: `jobs.${c.job.id}` };
-    parents.push(p);
-  }
-  return parents;
+  if (!secret || BUILTIN_SECRETS.has(secret.name.toLowerCase())) return [];
+  return index
+    .callersOf(secret.unit)
+    .filter((c) => c.job.secretsInherit)
+    .flatMap((c) =>
+      secretSymbols(index, c.caller, secret.name).map((from) => {
+        const p = parent(from);
+        p.via = { loc: c.job.secretsLoc ?? c.job.loc, text: 'secrets: inherit', note: `jobs.${c.job.id}` };
+        return p;
+      }),
+    );
 }
 
 /**
