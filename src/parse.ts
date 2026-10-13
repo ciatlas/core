@@ -351,7 +351,9 @@ function locateExpression(
  * Where a reference is written from `from`: as the expression reads it, or else word by word. A reference holds spaces
  * and line breaks only between its names or in a bracketed key (`github.event['a\nb']`), which the source may write
  * as a line break and indentation, a blank line or an escape. Its first word is then found as `indexOutside` finds it,
- * and each word after it past the spaces before it.
+ * and each word after it past the spaces before it; where they do not follow, at the next copy of the first word. An
+ * earlier copy can be another reference (`inputs.ab` before `inputs\n.ab`, as a chain's computed indexes are visited
+ * from the right) or the start of one not found (`github.event['a\x63']`).
  */
 function spanOf(
   s: RawScalar,
@@ -362,15 +364,28 @@ function spanOf(
   const found = indexOutside(s, written, from, scan);
   if (found >= 0) return [found, found + written.length];
   const [first = '', ...rest] = written.split(/\s+/);
-  const start = rest.length > 0 ? indexOutside(s, first, from, scan) : -1;
-  if (start < 0) return undefined;
-  let end = start + first.length;
-  for (const word of rest) {
+  if (rest.length === 0) return undefined;
+  let start = indexOutside(s, first, from, scan);
+  while (start >= 0) {
+    const end = wordsEnd(s, rest, start + first.length);
+    if (end !== undefined && end <= scan.end) return [start, end];
+    start = indexOutside(s, first, start + 1, scan);
+  }
+  return undefined;
+}
+
+/**
+ * The end of `words` written from `from`, each after at least one space, line break or space escape: with none, the
+ * words would join (`inputs['a b']` would match `inputs['ab']`).
+ */
+function wordsEnd(s: RawScalar, words: string[], from: number): number | undefined {
+  let end = from;
+  for (const word of words) {
     const at = skipSpace(s, end);
-    if (!s.raw.startsWith(word, at)) return undefined;
+    if (at === end || !s.raw.startsWith(word, at)) return undefined;
     end = at + word.length;
   }
-  return end <= scan.end ? [start, end] : undefined;
+  return end;
 }
 
 /** An expression as written: where it ends, and the `[start, end)` of each string literal, quotes included. */

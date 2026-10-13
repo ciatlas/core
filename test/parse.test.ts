@@ -769,6 +769,40 @@ describe('reference locations', () => {
     ]);
   });
 
+  it('finds the words of a reference only with a space between them, at any copy of its first word (#14)', () => {
+    // A chain's computed indexes are visited from the right, and a reference the source spells with an escape is not
+    // found, so a copy of the words joined with nothing between them (`inputs.ab`, `inputs['ab']`) can come first;
+    // `github.event['a` is first written by the reference before.
+    const text = stepWorkflow([
+      '      - run: |',
+      '          echo ${{ toJSON(github.event[inputs.ab][inputs',
+      '            .ab]) }}',
+      "      - run: \"echo ${{ format('{0}{1}', inputs['\\x61 b'], inputs['ab']) }}\"",
+      "      - run: \"echo ${{ github.event['a\\x63'] == github.event['a\\nb'] }}\"",
+    ]);
+    // `inputs['a b']` and `github.event['ac']` are spelled with an escape and keep the expression's offsets: only their
+    // start is checked.
+    const escaped = new Set(['a b', 'ac']);
+    expect(
+      parse(text).sites.flatMap((s) =>
+        s.segments.flatMap((seg) =>
+          seg.refs.map((r) => {
+            const written = escaped.has(r.path.at(-1)!) ? '' : sourceAt(text, r.loc);
+            return `${written}@${r.loc.line}:${r.loc.column}`;
+          }),
+        ),
+      ),
+    ).toEqual([
+      'github.event@7:27',
+      'inputs\n            .ab@7:51',
+      'inputs.ab@7:40',
+      '@9:41',
+      "inputs['ab']@9:59",
+      '@10:24',
+      "github.event['a\\nb']@10:49",
+    ]);
+  });
+
   it("skips a block scalar's header line and its comment", () => {
     // A block scalar's range starts at `|` or `>`, so its header comment was searched as part of the value: a `'` there
     // opened a string, and a `${{` or a copy of a bare if's first 40 characters was taken for the expression.
