@@ -618,6 +618,8 @@ describe('reference locations', () => {
       double: (e) => [`      - run: "echo ${e}"`],
       literal: (e) => ['      - run: |', '          echo one', `          echo ${e}`],
       folded: (e) => ['      - run: >-', '          echo', `          ${e}`],
+      'literal, header comment': (e) => ["      - run: | # don't ${{ inputs.a }}", `          echo ${e}`],
+      'folded, header comment': (e) => ["      - run: >- # it's }}", '          echo', `          ${e}`],
     };
     fc.assert(
       fc.property(
@@ -635,6 +637,62 @@ describe('reference locations', () => {
         },
       ),
     );
+  });
+
+  it("skips a block scalar's header line and its comment", () => {
+    // A block scalar's range starts at `|` or `>`, so its header comment was searched as part of the value: a `'` there
+    // opened a string, and a `${{` or a copy of a bare if's first 40 characters was taken for the expression.
+    const text = stepWorkflow([
+      "      - if: | # don't wait for }} or ${{",
+      "          inputs.a == 'x' &&",
+      "          inputs.b == 'y'",
+      '        run: x',
+      '      - if: > # inputs.a == github.ref',
+      '          inputs.a == github.ref',
+      '        run: x',
+      '      - run: | # uses ${{ inputs.a }}',
+      "          echo ${{ format('x', inputs.a) }}",
+    ]);
+    expect(locatedRefs(text)).toEqual([
+      'inputs.a@7:11',
+      'inputs.b@8:11',
+      'inputs.a@11:11',
+      'github.ref@11:23',
+      'inputs.a@14:32',
+    ]);
+    const segments = parse(text).sites.flatMap((site) =>
+      site.segments.map((seg) => `${seg.loc.line}:${seg.loc.column}`),
+    );
+    expect(segments).toEqual(['7:11', '11:11', '14:20']);
+  });
+
+  it('skips a copy of a reference that continues a name or a property chain', () => {
+    // `.inputs.a` is a property of fromJSON's result, and `my-inputs.a` and `myinputs.a` are longer names.
+    const text = stepWorkflow([
+      '      - run: echo ${{ fromJSON(env.X).inputs.a || inputs.a }}',
+      '      - run: echo ${{ fromJSON(env.X).my-inputs.a || inputs.a }}',
+      '      - run: echo ${{ fromJSON(env.X).myinputs.a || inputs.a }}',
+    ]);
+    expect(locatedRefs(text)).toEqual([
+      'env.X@6:32',
+      'inputs.a@6:51',
+      'env.X@7:32',
+      'inputs.a@7:54',
+      'env.X@8:32',
+      'inputs.a@8:53',
+    ]);
+  });
+
+  it('reads the escape before a copy of a reference in a double-quoted scalar', () => {
+    // run: "echo ${{ env.X ||\tinputs.a }} ${{ fromJSON(env.X)\x2einputs.a || inputs.a }}": `\t` is a tab, so the
+    // first inputs.a is a reference; `\x2e` is a `.`, so the second one is a property.
+    const text = stepWorkflow([
+      '      - run: "echo ${{ env.X ||\\tinputs.a }} ${{ fromJSON(env.X)\\x2einputs.a || inputs.a }}"',
+    ]);
+    expect(parse(text).sites[0]!.text).toBe(
+      'echo ${{ env.X ||\tinputs.a }} ${{ fromJSON(env.X).inputs.a || inputs.a }}',
+    );
+    expect(locatedRefs(text)).toEqual(['env.X@6:24', 'inputs.a@6:34', 'env.X@6:59', 'inputs.a@6:81']);
   });
 });
 
