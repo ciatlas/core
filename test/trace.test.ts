@@ -1821,6 +1821,140 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
     expect(leavesOf(t)).toEqual([`literal ${at}: "plain"`, `context ${at}: github.sha`]);
   });
 
+  it('keeps the env context next to the members once a step that may write $GITHUB_ENV has run', () => {
+    const B = '.github/actions/b';
+    const { index: env } = load({
+      [W]: yaml`
+        on: push
+        env:
+          W: workflow
+        jobs:
+          j:
+            runs-on: x
+            outputs:
+              all: \${{ toJSON(env) }}
+            steps:
+              - uses: ./.github/actions/a
+                with:
+                  v: \${{ toJSON(env) }}
+              - run: echo "TAG=from-script" >> "$GITHUB_ENV"
+              - uses: ./.github/actions/a
+                with:
+                  v: \${{ toJSON(env) }}
+          plain:
+            runs-on: x
+            outputs:
+              all: \${{ toJSON(env) }}
+            steps:
+              - run: echo
+          action:
+            runs-on: x
+            outputs:
+              all: \${{ toJSON(env) }}
+            steps:
+              - uses: actions/setup-python@v5
+      `,
+      [`${A}/action.yml`]: index.project.actions.get(A)!.source.text,
+      [`${B}/action.yml`]: yaml`
+        name: b
+        description: d
+        runs:
+          using: composite
+          steps:
+            - uses: ./.github/actions/a
+              env:
+                OWN: lit
+              with:
+                v: \${{ toJSON(env) }}
+      `,
+    });
+    const ends = (symbol: string) => {
+      const t = trace(env, symbol, { direction: 'up' });
+      return [...t.children.map((c) => `${c.symbol} ${c.via?.loc.line}`), ...leavesOf(t)];
+    };
+    // Step 0 runs first: env holds what the files declare. Step 2 runs after a script wrote TAG to $GITHUB_ENV.
+    // In action b, env also holds its caller's env.
+    expect(ends(sym.input(A, 'v'))).toEqual([
+      `${sym.env(W, undefined, 'W')} 12`,
+      `${sym.env(W, undefined, 'W')} 16`,
+      `context ${W} › jobs.j › steps[2]: env`,
+      `literal ${B} › steps[0]: "lit"`,
+      `context ${B} › steps[0]: env`,
+    ]);
+    // A job output is evaluated after every step: after the script, or after an action, which may export variables.
+    expect(ends(sym.jobOutput(W, 'j', 'all'))).toEqual([
+      `${sym.env(W, undefined, 'W')} 8`,
+      `context ${W} › jobs.j: env`,
+    ]);
+    expect(ends(sym.jobOutput(W, 'plain', 'all'))).toEqual([`${sym.env(W, undefined, 'W')} 20`]);
+    expect(ends(sym.jobOutput(W, 'action', 'all'))).toEqual([
+      `${sym.env(W, undefined, 'W')} 26`,
+      `context ${W} › jobs.action: env`,
+    ]);
+  });
+
+  it('keeps the matrix and secrets contexts next to the members when they may hold more', () => {
+    const D = `${WF}/dispatch.yml`;
+    const { index: open } = load({
+      [W]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              only: { type: string }
+            secrets:
+              DECL: {}
+        jobs:
+          fixed:
+            runs-on: x
+            strategy:
+              matrix:
+                os: [linux]
+                include:
+                  - arch: arm
+            outputs:
+              m: \${{ toJSON(matrix) }}
+              s: \${{ toJSON(secrets) }}
+              i: \${{ toJSON(inputs) }}
+            steps:
+              - run: echo
+          computed:
+            runs-on: x
+            strategy:
+              matrix:
+                os: [linux]
+                include: \${{ fromJSON(vars.EXTRA) }}
+            outputs:
+              m: \${{ toJSON(matrix) }}
+            steps:
+              - run: echo
+      `,
+      [D]: yaml`
+        on:
+          workflow_dispatch:
+            inputs:
+              only: { type: string }
+        jobs:
+          j:
+            runs-on: x
+            outputs:
+              e: \${{ toJSON(github.event.inputs) }}
+            steps:
+              - run: echo
+      `,
+    });
+    const ends = (job: string, out: string, unit = W) => {
+      const t = trace(open, sym.jobOutput(unit, job, out), { direction: 'up' });
+      return [...t.children.map((c) => c.symbol), ...t.leaves.map((l) => `${l.role}: ${l.text}`)];
+    };
+    expect(ends('fixed', 'm')).toEqual([sym.matrix(W, 'fixed', 'os'), sym.matrix(W, 'fixed', 'arch')]);
+    expect(ends('computed', 'm')).toEqual([sym.matrix(W, 'computed', 'os'), 'context: matrix']);
+    // GITHUB_TOKEN is always among the secrets; a caller's `secrets: inherit` passes others.
+    expect(ends('fixed', 's')).toEqual([sym.secret(W, 'DECL'), 'context: secrets']);
+    // Inputs hold only those declared, and so does the event of a workflow that is only dispatched.
+    expect(ends('fixed', 'i')).toEqual([sym.input(W, 'only')]);
+    expect(ends('j', 'e', D)).toEqual([sym.input(D, 'only')]);
+  });
+
   it('keeps the context of a whole object the repository declares no member of', () => {
     const { index: other } = load({
       [W]: yaml`

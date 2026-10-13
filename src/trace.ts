@@ -16,7 +16,9 @@ import {
   type JobDecl,
   type LocatedRef,
   lookup,
+  type MatrixDecl,
   type SiteField,
+  type StepDecl,
   type UnitDecl,
 } from './ir';
 import { type Cell, comboLabel, expandMatrix } from './matrix';
@@ -29,9 +31,10 @@ export interface TraceLeaf {
    * when that is not another symbol: `literal` (a plain value: passed by a caller or a step, an env variable's or
    * output's own value, or an input's default), `omitted` (a caller or step does not pass the input), `value`,
    * `missing` and `dynamic` (a matrix key's combinations), `context` (read from a context the graph does not follow,
-   * such as `github.event.pull_request.title` or `runner.os`, or from the caller's event: `github.event.inputs.<name>`
-   * in a workflow that can be called; `text` is the reference), `invalid` (an expression that does not parse, or, in an
-   * input's default, a reference to a context or a call to a function GitHub does not allow there; `text` is then the
+   * such as `github.event.pull_request.title` or `runner.os`, from the caller's event: `github.event.inputs.<name>` in
+   * a workflow that can be called, or from a whole object that may hold more than the members the files declare, such
+   * as `toJSON(secrets)`; `text` is the reference), `invalid` (an expression that does not parse, or, in an input's
+   * default, a reference to a context or a call to a function GitHub does not allow there; `text` is then the
    * reference, or the function's name and `()` at the expression's place) and `expression` (an expression that reads
    * no context, e.g. a `format()` of literals).
    *
@@ -724,21 +727,6 @@ function addCalls(found: Map<string, TraceLeaf>, at: SourceSite, seg: ExprSegmen
   }
 }
 
-/** A reference that reads no symbol ends the trace: at its context, or as `invalid` where GitHub does not allow it. */
-function addRead(
-  found: Map<string, TraceLeaf>,
-  where: string,
-  seg: ExprSegment,
-  ref: LocatedRef,
-  reads: Reads,
-): void {
-  const leaf = { where, loc: ref.loc, text: refText(seg.expr.source, ref) };
-  if (reads === 'invalid')
-    add(found, `invalid@${ref.loc.line}:${ref.loc.column}`, { role: 'invalid', ...leaf });
-  else if (reads.length === 0)
-    add(found, `context:${[ref.context, ...ref.path].join('.').toLowerCase()}`, { role: 'context', ...leaf });
-}
-
 /**
  * What a reference in a definition reads: the symbols the graph resolves it to, or none for `github.event.inputs` in a
  * workflow that can be called, which holds the caller's event when the workflow is called (see `readsCallerEvent`), so
@@ -749,8 +737,9 @@ function definitionReads(index: ProjectIndex, unit: UnitDecl): Reader {
 }
 
 /**
- * Adds the leaves for one reference: the sources of the step's own env values it reads, or else the context itself when
- * it reads no symbol, or `invalid` where GitHub does not allow it (see `addRead`).
+ * Adds the leaves for one reference: the sources of the step's own env values it reads, `invalid` where GitHub does
+ * not allow it, and the context itself when it reads no symbol or may read members the files do not declare (see
+ * `holdsUndeclared`).
  */
 function refSources(
   index: ProjectIndex,
@@ -762,7 +751,15 @@ function refSources(
     if (own.site) collectSources(index, unit, { ...at, site: own.site }, found);
     else add(found, `literal@${own.valueLoc.line}:${own.valueLoc.column}`, ownLiteral(own, at.where));
   }
-  if (owns.length === 0) addRead(found, at.where, seg, ref, at.reads(at.site, ref));
+  const reads = at.reads(at.site, ref);
+  const leaf = { where: at.where, loc: ref.loc, text: refText(seg.expr.source, ref) };
+  if (reads === 'invalid') {
+    add(found, `invalid@${ref.loc.line}:${ref.loc.column}`, { role: 'invalid', ...leaf });
+    return;
+  }
+  const unfollowed = owns.length === 0 && reads.length === 0;
+  if (unfollowed || holdsUndeclared(unit, at.site, ref))
+    add(found, `context:${[ref.context, ...ref.path].join('.').toLowerCase()}`, { role: 'context', ...leaf });
 }
 
 /**
@@ -773,10 +770,59 @@ function refSources(
 function ownEnv(index: ProjectIndex, unit: UnitDecl, site: ExprSite, ref: LocatedRef): Binding[] {
   if (ref.context !== 'env' || site.field === 'step.env') return [];
   const env = index.stepOf(unit, site)?.env ?? {};
-  const name = ref.path[0];
-  if (!name || name === '*' || name === '?') return Object.values(env);
-  const own = lookup(env, name);
+  if (!namesMember(ref)) return Object.values(env);
+  const own = lookup(env, ref.path[0]!);
   return own ? [own] : [];
+}
+
+/** Whether a reference names one member of its context: `env.NAME`, not `toJSON(env)`, `env.*` or `env[expr]`. */
+function namesMember(ref: LocatedRef): boolean {
+  const name = ref.path[0];
+  return !!name && name !== '*' && name !== '?';
+}
+
+/**
+ * Whether a whole object or computed key of `secrets`, `matrix` or `env` may hold members the files do not declare.
+ * The graph reads it as the declared members (see `ProjectIndex.readsOf`); the context stays a source next to them:
+ * - `secrets`, always: `GITHUB_TOKEN` is always there, and `secrets: inherit` passes the caller's other secrets;
+ * - `matrix`, when the matrix or its `include` is computed at runtime;
+ * - `env`, in an action, which also has its caller's env, and in a job once a step that may write `$GITHUB_ENV` has
+ *   run.
+ * `inputs` and `github.event.inputs` hold the declared inputs only.
+ */
+function holdsUndeclared(unit: UnitDecl, site: ExprSite, ref: LocatedRef): boolean {
+  if (namesMember(ref)) return false;
+  if (ref.context === 'secrets') return true;
+  if (ref.context === 'matrix') return keysAtRuntime(jobOf(unit, site)?.matrix);
+  return ref.context === 'env' && (unit.kind === 'action' || stepsRunBefore(unit, site).some(mayWriteEnv));
+}
+
+/** Whether a matrix has keys only known at runtime: the matrix, or its `include`, is an expression. */
+function keysAtRuntime(matrix: MatrixDecl | undefined): boolean {
+  return !!matrix && (matrix.dynamic || matrix.includeDynamic);
+}
+
+/** The job a site of a workflow is in. */
+function jobOf(unit: UnitDecl, site: ExprSite): JobDecl | undefined {
+  return unit.kind === 'workflow' && site.job ? unit.jobs[site.job] : undefined;
+}
+
+/**
+ * The steps of the site's job that have run when the site is evaluated: those before its step, all of them for a job
+ * output, none for the job's other settings.
+ */
+function stepsRunBefore(unit: UnitDecl, site: ExprSite): StepDecl[] {
+  const steps = jobOf(unit, site)?.steps ?? [];
+  if (site.step !== undefined) return steps.filter((s) => s.index < site.step!);
+  return site.field === 'job.output' ? steps : [];
+}
+
+/**
+ * Whether a step may write `$GITHUB_ENV`: its script does (see `StepDecl.writesEnv`), or it runs an action, which can
+ * export variables (`core.exportVariable`) its YAML does not show.
+ */
+function mayWriteEnv(step: StepDecl): boolean {
+  return step.writesEnv.names.length > 0 || step.writesEnv.dynamic || step.uses !== undefined;
 }
 
 /** Keeps the first leaf of each key: the place where the source is first written. */
