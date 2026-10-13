@@ -13,6 +13,7 @@ import {
   type YAMLMap,
 } from 'yaml';
 import {
+  type ExprRef,
   findTemplateSegments,
   type Json,
   type ParsedExpression,
@@ -323,9 +324,9 @@ const escapedCode = (esc: RegExpExecArray) => Number.parseInt(esc[1] ?? esc[2] ?
 /**
  * Locates the expression that starts at `from` in the raw scalar. Offsets in the decoded value drift from the source in
  * folded and literal blocks, quoted scalars with escapes and CRLF files, so each reference is found by its own text, in
- * order, within the expression and outside its string literals (a copy of the text there is not the reference). A
- * reference the source spells with an escape (`\x62` for `b` in a double-quoted scalar) keeps the expression's own
- * offsets.
+ * the order they are written, within the expression and outside its string literals (a copy of the text there is not
+ * the reference). A reference the source spells with an escape (`\x62` for `b` in a double-quoted scalar) keeps the
+ * expression's own offsets.
  */
 function locateExpression(
   s: RawScalar,
@@ -336,14 +337,18 @@ function locateExpression(
   const scan = scanExpression(s.raw, from, s.quote, closes);
   const at = s.start + from;
   let cursor = from;
-  const refs = expr.refs.map((r) => {
+  const locs = new Map<ExprRef, Loc>();
+  // A chain's computed indexes are listed from the right (`a[b][c]` lists `c` before `b`): searched in that order, the
+  // search would start past the reference on the left.
+  for (const r of expr.refs.toSorted((a, b) => a.start - b.start)) {
     // In a single-quoted scalar, a reference's own quotes (`github.event['action']`) are doubled too.
     const written = expr.source.slice(r.start, r.end).replaceAll("'", s.quote);
     const span = written ? spanOf(s, written, cursor, scan) : undefined;
-    if (!span) return { ...r, loc: s.source.loc(at + r.start, at + r.end) };
-    cursor = span[1];
-    return { ...r, loc: s.source.loc(s.start + span[0], s.start + span[1]) };
-  });
+    if (span) cursor = span[1];
+    const [start, end] = span ? [s.start + span[0], s.start + span[1]] : [at + r.start, at + r.end];
+    locs.set(r, s.source.loc(start, end));
+  }
+  const refs = expr.refs.map((r) => ({ ...r, loc: locs.get(r)! }));
   return { segment: { expr, loc: s.source.loc(at, at + expr.source.length), refs }, end: scan.end };
 }
 

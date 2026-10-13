@@ -694,17 +694,18 @@ describe('reference locations', () => {
     expect(locatedRefs(text)).toEqual(['github.event.sender.login@10:18', 'inputs.a@10:48']);
   });
 
+  // `⏎` is a line break in the decoded string: as written in a literal block, a blank line in the folded and flow
+  // styles (which fold a single one into a space) and an escape in a double-quoted scalar.
+  const piece = fc.constantFrom('inputs.a', "''", ' ', '}}', '${{', 'x', '.', '⏎');
+  const styles: Record<string, [(expr: string) => string[], (eol: string) => string]> = {
+    literal: [(e) => ['      - run: |', `          echo ${e}`], (eol) => `${eol}          `],
+    folded: [(e) => ['      - run: >-', `          echo ${e}`], (eol) => `${eol}${eol}          `],
+    plain: [(e) => [`      - run: echo ${e}`], (eol) => `${eol}${eol}          `],
+    single: [(e) => [`      - run: 'echo ${e.replaceAll("'", "''")}'`], (eol) => `${eol}${eol}          `],
+    double: [(e) => [`      - run: "echo ${e}"`], () => '\\r\\n'],
+  };
+
   it('places references after strings that span lines, and one whose key spans lines, in every style (#14)', () => {
-    // `⏎` is a line break in the decoded string: as written in a literal block, a blank line in the folded and flow
-    // styles (which fold a single one into a space) and an escape in a double-quoted scalar.
-    const piece = fc.constantFrom('inputs.a', "''", ' ', '}}', '${{', 'x', '.', '⏎');
-    const styles: Record<string, [(expr: string) => string[], (eol: string) => string]> = {
-      literal: [(e) => ['      - run: |', `          echo ${e}`], (eol) => `${eol}          `],
-      folded: [(e) => ['      - run: >-', `          echo ${e}`], (eol) => `${eol}${eol}          `],
-      plain: [(e) => [`      - run: echo ${e}`], (eol) => `${eol}${eol}          `],
-      single: [(e) => [`      - run: 'echo ${e.replaceAll("'", "''")}'`], (eol) => `${eol}${eol}          `],
-      double: [(e) => [`      - run: "echo ${e}"`], () => '\\r\\n'],
-    };
     fc.assert(
       fc.property(
         fc.array(piece, { maxLength: 8 }),
@@ -770,9 +771,8 @@ describe('reference locations', () => {
   });
 
   it('finds the words of a reference only with a space between them, at any copy of its first word (#14)', () => {
-    // A chain's computed indexes are visited from the right, and a reference the source spells with an escape is not
-    // found, so a copy of the words joined with nothing between them (`inputs.ab`, `inputs['ab']`) can come first;
-    // `github.event['a` is first written by the reference before.
+    // A reference the source spells with an escape is not found and leaves the search where it was, so a copy of the
+    // words joined with nothing between them (`inputs['ab']`), or of the first word (`github.event['a`), can be ahead.
     const text = stepWorkflow([
       '      - run: |',
       '          echo ${{ toJSON(github.event[inputs.ab][inputs',
@@ -801,6 +801,52 @@ describe('reference locations', () => {
       '@10:24',
       "github.event['a\\nb']@10:49",
     ]);
+  });
+
+  it("finds a chain's computed indexes in the order they are written", () => {
+    // They are listed from the right; searched in that order, the left one was not found past the right one and kept
+    // the expression's offsets, which drift with doubled quotes, an indented line or an escape before it.
+    const text = stepWorkflow([
+      "      - run: 'echo ${{ toJSON(github.event[github.event[''a'']][github.event[''b'']]) }}'",
+      '      - run: |',
+      '          echo ${{ toJSON(',
+      "            github.event[github.event['a']][github.event['b']]) }}",
+      "      - run: \"echo ${{ toJSON(\\tgithub.event[github.event['a']][github.event['b']]) }}\"",
+    ]);
+    expect(locatedRefs(text)).toEqual([
+      'github.event@6:31',
+      "github.event[''b'']@6:65",
+      "github.event[''a'']@6:44",
+      'github.event@9:13',
+      "github.event['b']@9:45",
+      "github.event['a']@9:26",
+      'github.event@10:33',
+      "github.event['b']@10:65",
+      "github.event['a']@10:46",
+    ]);
+  });
+
+  it('places a key that spans lines past an index that writes it without the spaces, in every style (#14)', () => {
+    fc.assert(
+      fc.property(
+        fc.array(piece, { maxLength: 8 }),
+        fc.constantFrom(...Object.keys(styles)),
+        fc.constantFrom('\n', '\r\n'),
+        (key, style, eol) => {
+          const [lines, lineBreak] = styles[style]!;
+          const joined = key.filter((p) => p !== ' ' && p !== '⏎');
+          const expr = `\${{ toJSON(github.event[github.event['${joined.join('')}']][github.event['${key.join('')}']]) }}`;
+          const text = stepWorkflow(lines(expr), eol).replaceAll('⏎', lineBreak(eol));
+          const quote = style === 'single' ? "''" : "'";
+          const written = (k: string[]) =>
+            `github.event[${quote}${k.join('').replaceAll("'", quote).replaceAll('⏎', lineBreak(eol))}${quote}]`;
+          const refs = parse(text).sites.flatMap((s) => s.segments.flatMap((seg) => seg.refs));
+          // When the key has no space, both indexes are the same reference: which takes which copy does not matter.
+          const keys = refs.filter((r) => r.path.length === 2).map((r) => sourceAt(text, r.loc));
+          expect(keys.sort()).toEqual([written(joined), written(key)].sort());
+        },
+      ),
+    );
   });
 
   it("skips a block scalar's header line and its comment", () => {
