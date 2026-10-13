@@ -161,7 +161,7 @@ describe('expandMatrix — dynamic parts', () => {
   });
 
   it('marks an include or exclude with an item that is an expression as dynamic and inexact', () => {
-    // The item evaluates at runtime to an entry of any keys; the file shows an entry with none.
+    // The item evaluates at runtime to an entry of any keys: not an entry of the file's.
     const include = matrixOf(yaml`
       matrix:
         os: [linux]
@@ -170,16 +170,19 @@ describe('expandMatrix — dynamic parts', () => {
           - \${{ fromJSON(inputs.extra) }}
     `);
     expect(include).toMatchObject({ includeDynamic: true, excludeDynamic: false });
-    expect(include.include.map((e) => e.values)).toEqual([{ arch: 'arm' }, {}]);
+    expect(include.include.map((e) => e.values)).toEqual([{ arch: 'arm' }]);
     expect(expandMatrix(include).exact).toBe(false);
     const exclude = matrixOf(yaml`
       matrix:
-        os: [linux]
+        os: [linux, mac]
         exclude:
           - \${{ fromJSON(inputs.skip) }}
     `);
-    expect(exclude).toMatchObject({ includeDynamic: false, excludeDynamic: true });
-    expect(expandMatrix(exclude).exact).toBe(false);
+    expect(exclude).toMatchObject({ includeDynamic: false, excludeDynamic: true, exclude: [] });
+    // The combinations the file shows: the item may exclude some at runtime, not all of them as an empty entry would.
+    const excluded = expandMatrix(exclude);
+    expect(excluded.exact).toBe(false);
+    expect(plain(excluded.combos)).toEqual([{ os: 'linux' }, { os: 'mac' }]);
     // Items that are mappings, with expressions as values, leave the lists static.
     expect(
       matrixOf(yaml`

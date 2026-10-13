@@ -803,15 +803,17 @@ const NO_FILTER = { entries: [] as MatrixEntry[], dynamic: false };
 
 /**
  * A matrix's `include` or `exclude`: its entries, and `dynamic` when part of it is known only at runtime: the list is
- * an expression, or one of its items is (`- ${{ fromJSON(inputs.extra) }}`, which evaluates to an entry of any keys and
- * stays an entry with none here).
+ * an expression, or one of its items is (`- ${{ fromJSON(inputs.extra) }}`, which evaluates to an entry of any keys).
+ * Such an item is not an entry here: as one with no keys, it would match every combination, and an `exclude` would
+ * remove them all.
  */
 function matrixFilter(unit: Unit, node: unknown, path: YPath): { entries: MatrixEntry[]; dynamic: boolean } {
   if (isScalar(node)) return { entries: [], dynamic: true };
   const items = isSeq(node) ? node.items : [];
+  const expression = (i: number) => unit.siteByPath.has(pathKey([...path, i]));
   return {
-    entries: matrixEntries(unit, node, path),
-    dynamic: items.some((_, i) => unit.siteByPath.has(pathKey([...path, i]))),
+    entries: matrixEntries(unit, node, path).filter((_, i) => !expression(i)),
+    dynamic: items.some((_, i) => expression(i)),
   };
 }
 
