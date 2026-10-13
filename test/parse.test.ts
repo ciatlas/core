@@ -39,6 +39,14 @@ function locatedRefs(text: string): string[] {
   );
 }
 
+/** The source text from a location's start to its end, which may be on a later line. */
+function sourceAt(text: string, l: Loc): string {
+  const lines = text.split('\n');
+  const offset = (line: number, column: number) =>
+    lines.slice(0, line - 1).reduce((n, s) => n + s.length + 1, column - 1);
+  return text.slice(offset(l.line, l.column), offset(l.endLine, l.endColumn));
+}
+
 describe('parseWorkflowFile — triggers and interface', () => {
   it.each([
     ['on: push', ['push']],
@@ -686,7 +694,7 @@ describe('reference locations', () => {
     expect(locatedRefs(text)).toEqual(['github.event.sender.login@10:18', 'inputs.a@10:48']);
   });
 
-  it('places references after strings that span lines, in every style that can break one (#14)', () => {
+  it('places references after strings that span lines, and one whose key spans lines, in every style (#14)', () => {
     // `⏎` is a line break in the decoded string: as written in a literal block, a blank line in the folded and flow
     // styles (which fold a single one into a space) and an escape in a double-quoted scalar.
     const piece = fc.constantFrom('inputs.a', "''", ' ', '}}', '${{', 'x', '.', '⏎');
@@ -701,22 +709,64 @@ describe('reference locations', () => {
       fc.property(
         fc.array(piece, { maxLength: 8 }),
         fc.array(piece, { maxLength: 8 }),
+        fc.array(piece, { maxLength: 8 }),
         fc.constantFrom(...Object.keys(styles)),
         fc.constantFrom('\n', '\r\n'),
-        (a, b, style, eol) => {
+        (a, b, c, style, eol) => {
           const [lines, lineBreak] = styles[style]!;
-          const expr = `\${{ format('${a.join('')}', inputs.a, '${b.join('')}', inputs.b) }}`;
+          const expr = `\${{ format('${a.join('')}', inputs.a, '${b.join('')}', inputs.b) == github.event['${c.join('')}'] }}`;
           const text = stepWorkflow(lines(expr), eol).replaceAll('⏎', lineBreak(eol));
           const refs = parse(text).sites.flatMap((s) => s.segments.flatMap((seg) => seg.refs));
-          expect(refs.map((r) => r.path[0])).toEqual(['a', 'b']);
-          for (const { loc, path } of refs) {
+          expect(refs.map((r) => r.path[0])).toEqual(['a', 'b', 'event']);
+          const quote = style === 'single' ? "''" : "'";
+          for (const { loc, path } of refs.slice(0, 2)) {
             const line = text.split(/\r?\n/)[loc.line - 1]!;
-            const written = `${style === 'single' ? "''" : "'"}, inputs.${path[0]}`;
+            const written = `${quote}, inputs.${path[0]}`;
             expect(line.slice(loc.endColumn - 1 - written.length, loc.endColumn - 1)).toBe(written);
           }
+          const key = c.join('').replaceAll("'", quote).replaceAll('⏎', lineBreak(eol));
+          expect(sourceAt(text, refs[2]!.loc)).toBe(`github.event[${quote}${key}${quote}]`);
         },
       ),
     );
+  });
+
+  it('locates a reference whose own text spans lines, word by word (#14)', () => {
+    // A line break in a bracketed key or between the names is written with indentation, as a blank line or as an
+    // escape, or folds into a space: the source does not hold the reference as the expression reads it.
+    const text = stepWorkflow([
+      '      - run: |',
+      '          echo ${{ inputs.a ==',
+      "            github.event['a",
+      "            b'].c }} ${{ steps.s.outputs",
+      '            .v }}',
+      '      - run: >-',
+      "          echo ${{ format('',",
+      "          inputs.a) == github.event['a",
+      '',
+      "          b'] }}",
+      "      - run: \"echo ${{ format('\\n', inputs.a) == github.event['a\\nb'] }}\"",
+      '      - run: echo ${{ inputs.a == github.event',
+      '          .action }}',
+    ]);
+    expect(parse(text).sites.map((s) => s.text)).toContain('echo ${{ inputs.a == github.event .action }}');
+    expect(
+      parse(text).sites.flatMap((s) =>
+        s.segments.flatMap((seg) =>
+          seg.refs.map((r) => `${sourceAt(text, r.loc)}@${r.loc.line}:${r.loc.column}`),
+        ),
+      ),
+    ).toEqual([
+      'inputs.a@7:20',
+      "github.event['a\n            b'].c@8:13",
+      'steps.s.outputs\n            .v@9:26',
+      'inputs.a@13:11',
+      "github.event['a\n\n          b']@13:24",
+      'inputs.a@16:37',
+      "github.event['a\\nb']@16:50",
+      'inputs.a@17:23',
+      'github.event\n          .action@17:35',
+    ]);
   });
 
   it("skips a block scalar's header line and its comment", () => {

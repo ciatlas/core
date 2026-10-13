@@ -339,12 +339,38 @@ function locateExpression(
   const refs = expr.refs.map((r) => {
     // In a single-quoted scalar, a reference's own quotes (`github.event['action']`) are doubled too.
     const written = expr.source.slice(r.start, r.end).replaceAll("'", s.quote);
-    const found = written ? indexOutside(s, written, cursor, scan) : -1;
-    if (found < 0) return { ...r, loc: s.source.loc(at + r.start, at + r.end) };
-    cursor = found + written.length;
-    return { ...r, loc: s.source.loc(s.start + found, s.start + cursor) };
+    const span = written ? spanOf(s, written, cursor, scan) : undefined;
+    if (!span) return { ...r, loc: s.source.loc(at + r.start, at + r.end) };
+    cursor = span[1];
+    return { ...r, loc: s.source.loc(s.start + span[0], s.start + span[1]) };
   });
   return { segment: { expr, loc: s.source.loc(at, at + expr.source.length), refs }, end: scan.end };
+}
+
+/**
+ * Where a reference is written from `from`: as the expression reads it, or else word by word. A reference holds spaces
+ * and line breaks only between its names or in a bracketed key (`github.event['a\nb']`), which the source may write
+ * as a line break and indentation, a blank line or an escape. Its first word is then found as `indexOutside` finds it,
+ * and each word after it past the spaces before it.
+ */
+function spanOf(
+  s: RawScalar,
+  written: string,
+  from: number,
+  scan: RawExpression,
+): [number, number] | undefined {
+  const found = indexOutside(s, written, from, scan);
+  if (found >= 0) return [found, found + written.length];
+  const [first = '', ...rest] = written.split(/\s+/);
+  const start = rest.length > 0 ? indexOutside(s, first, from, scan) : -1;
+  if (start < 0) return undefined;
+  let end = start + first.length;
+  for (const word of rest) {
+    const at = skipSpace(s, end);
+    if (!s.raw.startsWith(word, at)) return undefined;
+    end = at + word.length;
+  }
+  return end <= scan.end ? [start, end] : undefined;
 }
 
 /** An expression as written: where it ends, and the `[start, end)` of each string literal, quotes included. */
