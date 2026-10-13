@@ -144,13 +144,19 @@ export interface MatrixDim {
 
 export interface MatrixDecl {
   loc: Loc;
-  /** True when `matrix:` itself (or `include`/`exclude`) is a single expression such as `fromJSON(...)`. */
+  /** True when `matrix:` itself is a single expression such as `fromJSON(...)`. */
   dynamic: boolean;
   dynamicSite?: ExprSite;
   dims: MatrixDim[];
   include: MatrixEntry[];
   exclude: MatrixEntry[];
+  /**
+   * True when part of `include` is known only at runtime: the list is an expression, or one of its items is
+   * (`- ${{ fromJSON(inputs.extra) }}`, an entry of any keys, which `include` holds as an entry with none). Also true
+   * for a `dynamic` matrix.
+   */
   includeDynamic: boolean;
+  /** The same for `exclude`. */
   excludeDynamic: boolean;
 }
 
