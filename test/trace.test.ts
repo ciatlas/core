@@ -2073,3 +2073,84 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
     });
   });
 });
+
+// A whole env (#12) over a step's own env values that read github.event.inputs (#10).
+describe('trace: a whole env and github.event.inputs', () => {
+  const ACTION = '.github/actions/a';
+  const WFP = `${WF}/wf.yml`;
+  const TOP = `${WF}/top.yml`;
+  const UPPER = `${WF}/upper.yml`;
+  const z = sym.input(WFP, 'z');
+  const v = sym.input(ACTION, 'v');
+  const leavesOf = (t: TraceNode) => t.leaves.map((l) => `${l.role} ${l.where}: ${l.text}`);
+  const allLeaves = (t: TraceNode): string[] => [...leavesOf(t), ...t.children.flatMap(allLeaves)];
+  /** wf.yml's step passes `toJSON(env)` to action a, with the step's own env entries given. */
+  const repo = (env: string) =>
+    load({
+      [WFP]: yaml`
+        on:
+          workflow_dispatch:
+            inputs: { z: { type: string } }
+          workflow_call:
+            inputs: { z: { type: string } }
+        jobs:
+          j:
+            runs-on: x
+            steps:
+              - uses: ./.github/actions/a
+                env: ${env}
+                with:
+                  v: \${{ toJSON(env) }}
+      `,
+      [TOP]: yaml`
+        on: workflow_dispatch
+        jobs:
+          t:
+            uses: ./.github/workflows/wf.yml
+            with:
+              z: from-top
+      `,
+      [UPPER]: yaml`
+        on:
+          workflow_call:
+            inputs: { q: { type: string } }
+        jobs:
+          t:
+            uses: ./.github/workflows/wf.yml
+            with:
+              z: \${{ inputs.q }}
+      `,
+      [`${ACTION}/action.yml`]: yaml`
+        name: a
+        description: d
+        inputs: { v: { description: v } }
+        runs:
+          using: composite
+          steps: [{ shell: bash, run: echo }]
+      `,
+    }).index;
+  const event = `context ${WFP} › jobs.j › steps[0]: github.event.inputs.z`;
+
+  it('reads the own env values of a whole env that read the input only through github.event.inputs as the caller’s event', () => {
+    // Its only own value that reads z is github.event.inputs.z, after one that reads nothing.
+    const index = repo('{ P: plain, X: "${{ github.event.inputs.z }}" }');
+    const up = trace(index, v, { direction: 'up' });
+    expect(up.children).toMatchObject([
+      { symbol: z, children: [], leaves: [], via: { text: '${{ toJSON(env) }}', note: 'when dispatched' } },
+    ]);
+    expect(leavesOf(up)).toContain(event);
+    expect(allLeaves(up)).not.toContainEqual(expect.stringContaining('from-top'));
+    // Down, upper.yml's value does not flow on into the action.
+    const down = trace(index, sym.input(UPPER, 'q'));
+    expect(down.children).toMatchObject([{ symbol: z, children: [], leaves: [] }]);
+  });
+
+  it('traces the input on up when another own value of the whole env reads it through inputs', () => {
+    const index = repo('{ X: "${{ github.event.inputs.z }}", Y: "${{ inputs.z }}" }');
+    const up = trace(index, v, { direction: 'up' });
+    expect(up.children.map((c) => `${c.symbol} ${c.via?.note}`)).toEqual([`${z} undefined`]);
+    expect(leavesOf(up.children[0]!)).toEqual([`literal ${TOP} › jobs.t: "from-top"`]);
+    expect(leavesOf(up)).toContain(event);
+    expect(trace(index, sym.input(UPPER, 'q')).children[0]!.children.map((c) => c.symbol)).toEqual([v]);
+  });
+});
