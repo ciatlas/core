@@ -1,11 +1,18 @@
-import { type GraphNode, type ProjectIndex, sym, type Usage } from './graph';
-import { type ExprSite, lookup, type SiteField } from './ir';
-import { comboLabel, expandMatrix } from './matrix';
+import { type ActionUse, type Definition, type GraphNode, type ProjectIndex, sym, type Usage } from './graph';
+import { type Binding, type ExprSite, type LocatedRef, lookup, type SiteField, type UnitDecl } from './ir';
+import { type Cell, comboLabel, expandMatrix } from './matrix';
 import { secretsNeededBy } from './queries';
 import type { Loc } from './source';
 
 export interface TraceLeaf {
-  /** What the value is used for, e.g. `run script`, `condition`, `runs-on`. */
+  /**
+   * Downstream, what the value is used for, e.g. `run script`, `condition`, `runs-on`. Upstream, where it comes from
+   * when that is not another symbol: `literal` (a plain value: passed by a caller or a step, or an env variable's or
+   * output's own value), `omitted` (a caller or step does not pass the input), `value`, `missing` and `dynamic` (a
+   * matrix key's combinations), `context` (read from a context the graph does not follow, such as
+   * `github.event.pull_request.title` or `runner.os`; `text` is the reference), `invalid` (an expression that does not
+   * parse) and `expression` (an expression that reads no context, e.g. a `format()` of literals).
+   */
   role: string;
   where: string;
   loc: Loc;
@@ -89,6 +96,25 @@ function base(index: ProjectIndex, symbol: string): TraceNode {
   };
 }
 
+/**
+ * The node for `symbol`, and the path below it when the branch goes on. A branch stops at a cycle, at the depth limit,
+ * or at a symbol already expanded elsewhere in the trace; otherwise the symbol is marked as expanded.
+ */
+function enter(
+  index: ProjectIndex,
+  symbol: string,
+  depth: number,
+  path: Set<string>,
+  expanded: Set<string>,
+): { node: TraceNode; next?: Set<string> } {
+  const node = base(index, symbol);
+  if (path.has(symbol)) return { node: { ...node, stop: 'cycle' } };
+  if (depth <= 0) return { node: { ...node, stop: 'depth' } };
+  if (expanded.has(symbol)) return { node: { ...node, stop: 'seen' } };
+  expanded.add(symbol);
+  return { node, next: new Set(path).add(symbol) };
+}
+
 // Symbols are split with indexOf rather than regexes like /^(.+)#secrets\.(.+)$/, which backtrack quadratically on
 // symbols that repeat the separator (CodeQL js/polynomial-redos).
 
@@ -119,12 +145,8 @@ function down(
   path: Set<string>,
   expanded: Set<string>,
 ): TraceNode {
-  const node = base(index, symbol);
-  if (path.has(symbol)) return { ...node, stop: 'cycle' };
-  if (depth <= 0) return { ...node, stop: 'depth' };
-  if (expanded.has(symbol)) return { ...node, stop: 'seen' };
-  expanded.add(symbol);
-  const next = new Set(path).add(symbol);
+  const { node, next } = enter(index, symbol, depth, path, expanded);
+  if (!next) return node;
 
   const seenSinks = new Set<string>();
   for (const u of index.usagesOf(symbol)) {
@@ -174,13 +196,33 @@ function up(
   path: Set<string>,
   expanded: Set<string>,
 ): TraceNode {
-  const node = base(index, symbol);
-  if (path.has(symbol)) return { ...node, stop: 'cycle' };
-  if (depth <= 0) return { ...node, stop: 'depth' };
-  if (expanded.has(symbol)) return { ...node, stop: 'seen' };
-  expanded.add(symbol);
-  const next = new Set(path).add(symbol);
+  const { node, next } = enter(index, symbol, depth, path, expanded);
+  if (!next) return node;
+  const parent = (from: string) => up(index, from, depth - 1, next, expanded);
 
+  node.children = [...flowParents(index, symbol, parent), ...inheritParents(index, symbol, parent)];
+  node.leaves = endSources(index, symbol);
+  return node;
+}
+
+/**
+ * Where the trace ends: a matrix key's combinations, callers' literal values and omissions, and what each definition
+ * reads that is not a symbol. Arrays are joined, not spread into `push`, which has an argument limit.
+ */
+function endSources(index: ProjectIndex, symbol: string): TraceLeaf[] {
+  const n = index.nodes.get(symbol);
+  const matrix = n?.unit && n.kind === 'matrix' ? matrixSources(index, symbol, n.unit) : [];
+  const callers = n?.unit && n.kind === 'input' ? callerValues(index, symbol, n.unit) : [];
+  return [
+    ...matrix,
+    ...callers,
+    ...index.definitionsOf(symbol).flatMap((def) => definitionSources(index, def)),
+  ];
+}
+
+/** The symbols the value is computed from, through `flows` edges: one parent per source and expression. */
+function flowParents(index: ProjectIndex, symbol: string, parent: (from: string) => TraceNode): TraceNode[] {
+  const parents: TraceNode[] = [];
   // One parent per source and expression, even when the expression reads the symbol several times.
   const seenEdges = new Set<string>();
   for (const e of index.incoming(symbol, 'flows')) {
@@ -190,79 +232,181 @@ function up(
         : `${e.from}@${e.loc ? `${e.loc.file}:${e.loc.line}:${e.loc.column}` : ''}`;
     if (seenEdges.has(key)) continue;
     seenEdges.add(key);
-    const parent = up(index, e.from, depth - 1, next, expanded);
+    const p = parent(e.from);
     const site = e.siteId !== undefined ? index.site(e.siteId) : undefined;
-    if (e.loc) parent.via = { loc: e.loc, text: site ? short(site.text) : 'workflow output' };
-    node.children.push(parent);
+    if (e.loc) p.via = { loc: e.loc, text: site ? short(site.text) : 'workflow output' };
+    parents.push(p);
   }
-  // A secret received through `secrets: inherit` comes from the caller's secret of the same name.
+  return parents;
+}
+
+/** A secret received through `secrets: inherit` comes from the caller's secret of the same name. */
+function inheritParents(
+  index: ProjectIndex,
+  symbol: string,
+  parent: (from: string) => TraceNode,
+): TraceNode[] {
   const secret = secretSymbol(symbol);
-  if (secret) {
-    const name = secret.name;
-    for (const c of index.callersOf(secret.unit)) {
-      if (!c.job.secretsInherit) continue;
-      const callerName = (c.caller.call && lookup(c.caller.call.secrets, name)?.name) ?? name;
-      const parent = up(index, sym.secret(c.caller.path, callerName), depth - 1, next, expanded);
-      parent.via = { loc: c.job.secretsLoc ?? c.job.loc, text: 'secrets: inherit', note: `jobs.${c.job.id}` };
-      node.children.push(parent);
-    }
+  if (!secret) return [];
+  const parents: TraceNode[] = [];
+  const name = secret.name;
+  for (const c of index.callersOf(secret.unit)) {
+    if (!c.job.secretsInherit) continue;
+    const callerName = (c.caller.call && lookup(c.caller.call.secrets, name)?.name) ?? name;
+    const p = parent(sym.secret(c.caller.path, callerName));
+    p.via = { loc: c.job.secretsLoc ?? c.job.loc, text: 'secrets: inherit', note: `jobs.${c.job.id}` };
+    parents.push(p);
   }
-  const n = index.nodes.get(symbol);
-  // A matrix key's sources are the combinations themselves; show each value and flag where it is missing.
-  if (n?.kind === 'matrix' && n.unit) {
-    const m = matrixSymbol(symbol, n.unit);
-    const wf = index.project.workflows.get(n.unit);
-    const job = m && wf ? wf.jobs[m.job] : undefined;
-    if (job?.matrix && m) {
-      const key = m.key;
-      const exp = expandMatrix(job.matrix);
-      if (exp.dynamic) {
-        node.leaves.push({
-          role: 'dynamic',
-          where: `jobs.${job.id}`,
-          loc: job.matrix.loc,
-          text: 'matrix is computed at runtime',
-        });
-      }
-      for (const combo of exp.combos) {
-        const cell = lookup(combo.values, key);
-        const others = exp.keys.filter((k) => k.toLowerCase() !== key.toLowerCase());
-        node.leaves.push({
-          role: cell ? 'value' : 'missing',
-          where: comboLabel(combo, others.length ? others : exp.keys),
-          loc: job.matrix.loc,
-          text: cell ? (cell.known ? JSON.stringify(cell.value) : '<expression>') : `(undefined → '')`,
-        });
-      }
-    }
+  return parents;
+}
+
+/** A matrix key's sources are the combinations themselves: each value, and where it is missing. */
+function matrixSources(index: ProjectIndex, symbol: string, unit: string): TraceLeaf[] {
+  const m = matrixSymbol(symbol, unit);
+  const wf = index.project.workflows.get(unit);
+  const job = m && wf ? wf.jobs[m.job] : undefined;
+  if (!job?.matrix || !m) return [];
+  const matrix = job.matrix;
+  const exp = expandMatrix(matrix);
+  const others = exp.keys.filter((k) => k.toLowerCase() !== m.key.toLowerCase());
+  const dynamic: TraceLeaf[] = exp.dynamic
+    ? [{ role: 'dynamic', where: `jobs.${job.id}`, loc: matrix.loc, text: 'matrix is computed at runtime' }]
+    : [];
+  return [
+    ...dynamic,
+    ...exp.combos.map((combo) =>
+      comboLeaf(
+        lookup(combo.values, m.key),
+        comboLabel(combo, others.length ? others : exp.keys),
+        matrix.loc,
+      ),
+    ),
+  ];
+}
+
+/** One combination's value of the key, or `missing` when the combination does not define it. */
+function comboLeaf(cell: Cell | undefined, where: string, loc: Loc): TraceLeaf {
+  if (!cell) return { role: 'missing', where, loc, text: `(undefined → '')` };
+  return { role: 'value', where, loc, text: cell.known ? JSON.stringify(cell.value) : '<expression>' };
+}
+
+/** Literal values and omissions by the callers of a workflow and the steps that use an action. */
+function callerValues(index: ProjectIndex, symbol: string, unit: string): TraceLeaf[] {
+  const name = symbol.slice(symbol.indexOf('#inputs.') + '#inputs.'.length);
+  const calls = index
+    .callersOf(unit)
+    .map((c) =>
+      valueLeaf(
+        lookup(c.job.with, name),
+        `${c.caller.path} › jobs.${c.job.id}`,
+        c.job.uses?.loc ?? c.job.loc,
+      ),
+    );
+  const uses = index
+    .usersOf(unit)
+    .map((u) => valueLeaf(lookup(u.step.with, name), stepWhere(u), u.step.uses?.loc ?? u.step.loc));
+  return [...calls, ...uses].filter((l): l is TraceLeaf => l !== undefined);
+}
+
+/** `<file> › jobs.<job> › steps[<n>]`, without the job in an action. */
+function stepWhere(u: ActionUse): string {
+  return `${u.unit.path}${u.job ? ` › jobs.${u.job.id}` : ''} › steps[${u.step.index}]`;
+}
+
+/** `omitted` when a call does not pass the input, `literal` when it passes a plain value; nothing for an expression. */
+function valueLeaf(b: Binding | undefined, where: string, usesLoc: Loc): TraceLeaf | undefined {
+  if (!b) return { role: 'omitted', where, loc: usesLoc, text: '(not passed)' };
+  if (!b.site) return { role: 'literal', where, loc: b.valueLoc, text: JSON.stringify(b.value) };
+  return undefined;
+}
+
+/**
+ * Where a definition's value comes from when that is not a symbol (the symbols it reads are the node's children
+ * already, through its `flows` edges): a plain value (`literal`); contexts the graph does not follow (`context`), such
+ * as `github.event.pull_request.title`, `runner.os`, `needs.<job>.result`, `steps.<id>.outcome` or an `env` value
+ * written to `$GITHUB_ENV`, followed through the step's own `env:`; an expression that does not parse (`invalid`); or,
+ * when it reads nothing at all, the expression as written (`expression`).
+ */
+function definitionSources(index: ProjectIndex, def: Definition): TraceLeaf[] {
+  if (!('site' in def)) {
+    const where = placeOf(def.unit, def.job);
+    return [{ role: 'literal', where, loc: def.loc, text: JSON.stringify(def.value) }];
   }
-  // Literal values and omissions by callers of a workflow / users of an action.
-  if (n?.kind === 'input' && n.unit) {
-    const name = symbol.slice(symbol.indexOf('#inputs.') + '#inputs.'.length);
-    const calls = index.callersOf(n.unit);
-    for (const c of calls) {
-      const b = lookup(c.job.with, name);
-      const where = `${c.caller.path} › jobs.${c.job.id}`;
-      if (!b)
-        node.leaves.push({ role: 'omitted', where, loc: c.job.uses?.loc ?? c.job.loc, text: '(not passed)' });
-      else if (!b.site)
-        node.leaves.push({ role: 'literal', where, loc: b.valueLoc, text: JSON.stringify(b.value) });
+  const { unit, site } = def;
+  const where = placeOf(unit, site.job, site.step);
+  const found = new Map<string, TraceLeaf>();
+  collectSources(index, unit, site, where, found);
+  const readsNothing = site.segments.every((seg) => seg.refs.length === 0 && !seg.expr.error);
+  if (readsNothing) return [{ role: 'expression', where, loc: site.loc, text: short(site.text) }];
+  return [...found.values()];
+}
+
+/** The same place as the `literal` and `omitted` leaves of a call: the unit, the job, and the step for an action. */
+function placeOf(unit: UnitDecl, job?: string, step?: number): string {
+  return [unit.path, job && `jobs.${job}`, step !== undefined && `steps[${step}]`]
+    .filter(Boolean)
+    .join(' › ');
+}
+
+/** Adds the leaves for what `site` reads that is not a symbol, once per context (contexts ignore case). */
+function collectSources(
+  index: ProjectIndex,
+  unit: UnitDecl,
+  site: ExprSite,
+  where: string,
+  found: Map<string, TraceLeaf>,
+): void {
+  for (const seg of site.segments) {
+    if (seg.expr.error) {
+      add(found, `invalid@${seg.loc.line}:${seg.loc.column}`, {
+        role: 'invalid',
+        where,
+        loc: seg.loc,
+        text: short(seg.expr.source),
+      });
     }
-    for (const u of index.usersOf(n.unit)) {
-      const b = lookup(u.step.with, name);
-      const where = `${u.unit.path}${u.job ? ` › jobs.${u.job.id}` : ''} › steps[${u.step.index}]`;
-      if (!b)
-        node.leaves.push({
-          role: 'omitted',
+    for (const ref of seg.refs) {
+      const own = ownEnv(index, unit, site, ref);
+      if (own?.site) collectSources(index, unit, own.site, where, found);
+      else if (own) add(found, `literal@${own.valueLoc.line}:${own.valueLoc.column}`, ownLiteral(own, where));
+      else if (index.readsOf(unit, site, ref).length === 0)
+        add(found, `context:${[ref.context, ...ref.path].join('.').toLowerCase()}`, {
+          role: 'context',
           where,
-          loc: u.step.uses?.loc ?? u.step.loc,
-          text: '(not passed)',
+          loc: ref.loc,
+          text: refText(seg.expr.source, ref),
         });
-      else if (!b.site)
-        node.leaves.push({ role: 'literal', where, loc: b.valueLoc, text: JSON.stringify(b.value) });
     }
   }
-  return node;
+}
+
+/**
+ * The step's own `env:` entry a reference reads: it shadows the job's and the workflow's for the rest of the step, and
+ * its value (evaluated against the outer env) is where the reference's value comes from.
+ */
+function ownEnv(index: ProjectIndex, unit: UnitDecl, site: ExprSite, ref: LocatedRef): Binding | undefined {
+  const name = ref.path[0];
+  if (ref.context !== 'env' || site.field === 'step.env' || !name || name === '*' || name === '?')
+    return undefined;
+  return lookup(index.stepOf(unit, site)?.env ?? {}, name);
+}
+
+/** Keeps the first leaf of each key: the place where the source is first written. */
+function add(found: Map<string, TraceLeaf>, key: string, leaf: TraceLeaf): void {
+  if (!found.has(key)) found.set(key, leaf);
+}
+
+function ownLiteral(own: Binding, where: string): TraceLeaf {
+  return { role: 'literal', where, loc: own.valueLoc, text: JSON.stringify(own.value) };
+}
+
+/** The reference as written, on one line; a computed index at its end shows as `[…]`. */
+function refText(source: string, ref: LocatedRef): string {
+  const text = source
+    .slice(ref.start, ref.end)
+    .replace(/\s*([.[\]])\s*/g, '$1')
+    .replace(/\s+/g, ' ');
+  return ref.path.at(-1) === '?' ? `${text}[…]` : text;
 }
 
 function leafOf(u: Usage): TraceLeaf {

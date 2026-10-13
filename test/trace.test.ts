@@ -133,6 +133,308 @@ describe('trace', () => {
   });
 });
 
+describe('trace upstream to runtime contexts', () => {
+  const callee = yaml`
+    on:
+      workflow_call:
+        inputs:
+          title: { type: string }
+    jobs:
+      j:
+        runs-on: x
+        steps:
+          - run: echo
+  `;
+  const leavesOf = (t: ReturnType<typeof trace>) => t.leaves.map((l) => `${l.role} ${l.where}: ${l.text}`);
+
+  it('lists the contexts a caller passes, once per expression, next to the symbols', () => {
+    const { index } = load({
+      [`${WF}/callee.yml`]: callee,
+      [`${WF}/caller.yml`]: yaml`
+        on:
+          pull_request:
+          workflow_dispatch:
+            inputs:
+              x: { type: string }
+        jobs:
+          a:
+            uses: ./.github/workflows/callee.yml
+            with:
+              title: \${{ github.event.pull_request.title }}
+          b:
+            uses: ./.github/workflows/callee.yml
+            with:
+              title: \${{ inputs.x || github.event.commits[0].message }} \${{ github.event.commits[0].message }}
+          c:
+            needs: a
+            uses: ./.github/workflows/callee.yml
+            with:
+              title: \${{ format('{0}-{1}', toJSON(github), needs.a.result) }}
+          d:
+            uses: ./.github/workflows/callee.yml
+            with:
+              title: \${{ format('v{0}', 1) }}
+          e:
+            uses: ./.github/workflows/callee.yml
+            with:
+              title: \${{ github.event.inputs.x }}
+          f:
+            uses: ./.github/workflows/callee.yml
+            with:
+              title: plain
+      `,
+    });
+    const t = trace(index, sym.input(`${WF}/callee.yml`, 'title'), { direction: 'up' });
+    // `github.event.inputs.x` is the dispatch input itself: a symbol, not a context.
+    expect(t.children.map((c) => c.symbol)).toEqual([
+      sym.input(`${WF}/caller.yml`, 'x'),
+      sym.input(`${WF}/caller.yml`, 'x'),
+    ]);
+    const at = `${WF}/caller.yml › jobs`;
+    expect(leavesOf(t)).toEqual([
+      `literal ${at}.f: "plain"`,
+      `context ${at}.a: github.event.pull_request.title`,
+      `context ${at}.b: github.event.commits[0].message`,
+      `context ${at}.c: github`,
+      `context ${at}.c: needs.a.result`,
+      `expression ${at}.d: \${{ format('v{0}', 1) }}`,
+    ]);
+    const title = t.leaves.find((l) => l.text === 'github.event.pull_request.title')!;
+    expect([title.loc.file, title.loc.line, title.loc.column]).toEqual([`${WF}/caller.yml`, 10, 18]);
+  });
+
+  it("lists the contexts of a step's with: for an action's input", () => {
+    const { index } = load({
+      '.github/actions/greet/action.yml': yaml`
+        name: greet
+        description: x
+        inputs:
+          title: { description: x }
+        runs:
+          using: composite
+          steps:
+            - shell: bash
+              run: echo "\${{ inputs.title }}"
+      `,
+      [`${WF}/ci.yml`]: yaml`
+        on: pull_request
+        jobs:
+          j:
+            runs-on: x
+            steps:
+              - uses: actions/checkout@v4
+              - uses: ./.github/actions/greet
+                with:
+                  title: \${{ github.event.pull_request.title }}
+      `,
+    });
+    const t = trace(index, sym.input('.github/actions/greet', 'title'), { direction: 'up' });
+    expect(leavesOf(t)).toEqual([
+      `context ${WF}/ci.yml › jobs.j › steps[1]: github.event.pull_request.title`,
+    ]);
+  });
+
+  it('lists the contexts of outputs and env values, and nothing for a definition made of symbols only', () => {
+    const { index } = load({
+      [`${WF}/ci.yml`]: yaml`
+        on: push
+        env:
+          SHA: \${{ github.sha }}
+        jobs:
+          j:
+            runs-on: x
+            outputs:
+              os: \${{ runner.os }}
+              id: \${{ steps.s.outputs.id }}
+              late: \${{ env.SET_AT_RUNTIME }}
+            steps:
+              - id: s
+                run: echo "id=1" >> "$GITHUB_OUTPUT"
+      `,
+    });
+    const up = (s: string) => leavesOf(trace(index, s, { direction: 'up' }));
+    expect(up(sym.env(`${WF}/ci.yml`, undefined, 'SHA'))).toEqual([`context ${WF}/ci.yml: github.sha`]);
+    expect(up(sym.jobOutput(`${WF}/ci.yml`, 'j', 'os'))).toEqual([
+      `context ${WF}/ci.yml › jobs.j: runner.os`,
+    ]);
+    // An env value no `env:` declares is set at runtime (e.g. through $GITHUB_ENV).
+    expect(up(sym.jobOutput(`${WF}/ci.yml`, 'j', 'late'))).toEqual([
+      `context ${WF}/ci.yml › jobs.j: env.SET_AT_RUNTIME`,
+    ]);
+    const id = trace(index, sym.jobOutput(`${WF}/ci.yml`, 'j', 'id'), { direction: 'up' });
+    expect(id.children.map((c) => c.symbol)).toEqual([sym.stepOutput(`${WF}/ci.yml`, 'j', 's', 'id')]);
+    expect(id.leaves).toEqual([]);
+    // Downstream traces are unchanged: contexts are where a value comes from, not where it goes.
+    expect(trace(index, sym.jobOutput(`${WF}/ci.yml`, 'j', 'os')).leaves).toEqual([]);
+  });
+});
+
+describe('trace upstream: what the review found', () => {
+  const leavesOf = (t: ReturnType<typeof trace>) => t.leaves.map((l) => `${l.role} ${l.where}: ${l.text}`);
+  const action = (inputs: string) => yaml`
+    name: a
+    description: x
+    inputs:
+      ${inputs}
+    runs:
+      using: composite
+      steps:
+        - shell: bash
+          run: echo
+  `;
+
+  it("follows a step's own env: to its literal, its contexts and the symbols it reads", () => {
+    const { index } = load({
+      '.github/actions/a/action.yml': action('v: { description: x }'),
+      [`${WF}/w.yml`]: yaml`
+        on:
+          pull_request:
+          workflow_dispatch:
+            inputs:
+              label: { type: string }
+        env:
+          OUT: wf
+        jobs:
+          j:
+            runs-on: x
+            steps:
+              - uses: ./.github/actions/a
+                env:
+                  LIT: literal
+                with:
+                  v: \${{ env.LIT }}
+              - uses: ./.github/actions/a
+                env:
+                  CTX: \${{ github.event.pull_request.title }}
+                with:
+                  v: \${{ env.CTX }}
+              - uses: ./.github/actions/a
+                env:
+                  MIX: \${{ env.OUT }}-\${{ inputs.label }}-\${{ github.event.pull_request.title }}
+                with:
+                  v: \${{ env.MIX }}
+              - uses: ./.github/actions/a
+                with:
+                  v: \${{ env.SET_AT_RUNTIME }}
+      `,
+    });
+    const t = trace(index, sym.input('.github/actions/a', 'v'), { direction: 'up' });
+    expect(t.children.map((c) => c.symbol)).toEqual([
+      sym.env(`${WF}/w.yml`, undefined, 'OUT'),
+      sym.input(`${WF}/w.yml`, 'label'),
+    ]);
+    const at = `${WF}/w.yml › jobs.j › steps`;
+    expect(leavesOf(t)).toEqual([
+      `literal ${at}[0]: "literal"`,
+      `context ${at}[1]: github.event.pull_request.title`,
+      `context ${at}[2]: github.event.pull_request.title`,
+      `context ${at}[3]: env.SET_AT_RUNTIME`,
+    ]);
+    // The context is located in the step's env:, where it is written.
+    const ctx = t.leaves[1]!;
+    expect([ctx.loc.line, ctx.loc.column]).toEqual([19, 20]);
+  });
+
+  it('writes each reference as written, on one line, once whatever its case', () => {
+    const { index } = load({
+      [`${WF}/callee.yml`]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              a: { type: string }
+              b: { type: string }
+              c: { type: string }
+              d: { type: string }
+        jobs:
+          j:
+            runs-on: x
+            steps:
+              - run: echo
+      `,
+      [`${WF}/caller.yml`]: yaml`
+        on: pull_request
+        jobs:
+          j:
+            uses: ./.github/workflows/callee.yml
+            with:
+              a: \${{ fromJSON(github.event.client_payload)[github.event.action] }}
+              b: \${{ github.event[github.event.action] }}
+              c: |
+                \${{ github.event.pull_request
+                  .title }}
+              d: \${{ github.event.pull_request.title }} \${{ GitHub.Event.Pull_Request.Title }}
+      `,
+    });
+    const texts = (name: string) =>
+      trace(index, sym.input(`${WF}/callee.yml`, name), { direction: 'up' }).leaves.map((l) => l.text);
+    expect(texts('a')).toEqual(['github.event.client_payload', 'github.event.action']);
+    expect(texts('b')).toEqual(['github.event[…]', 'github.event.action']);
+    expect(texts('c')).toEqual(['github.event.pull_request.title']);
+    expect(texts('d')).toEqual(['github.event.pull_request.title']);
+  });
+
+  it('names a step in an action by the action, and an expression that does not parse as invalid', () => {
+    const { index } = load({
+      '.github/actions/a/action.yml': action('v: { description: x }'),
+      '.github/actions/wrap/action.yml': yaml`
+        name: wrap
+        description: x
+        runs:
+          using: composite
+          steps:
+            - uses: ./.github/actions/a
+              with:
+                v: \${{ github.action_path }}
+            - uses: ./.github/actions/a
+              with:
+                v: \${{ github.event.pull_request.title ==== }}
+      `,
+    });
+    expect(leavesOf(trace(index, sym.input('.github/actions/a', 'v'), { direction: 'up' }))).toEqual([
+      'context .github/actions/wrap › steps[0]: github.action_path',
+      'invalid .github/actions/wrap › steps[1]: github.event.pull_request.title ====',
+    ]);
+  });
+
+  it('lists plain values of env variables and outputs as literals', () => {
+    const { index } = load({
+      '.github/actions/a/action.yml': yaml`
+        name: a
+        description: x
+        outputs:
+          fixed: { description: x, value: constant }
+        runs:
+          using: composite
+          steps: []
+      `,
+      [`${WF}/w.yml`]: yaml`
+        on:
+          workflow_call:
+            outputs:
+              fixed: { value: constant }
+        env:
+          MODE: fast
+        jobs:
+          j:
+            runs-on: x
+            env:
+              LEVEL: 3
+            outputs:
+              o: fixed-value
+            steps:
+              - run: echo
+      `,
+    });
+    const up = (s: string) => leavesOf(trace(index, s, { direction: 'up' }));
+    const w = `${WF}/w.yml`;
+    expect(up(sym.env(w, undefined, 'MODE'))).toEqual([`literal ${w}: "fast"`]);
+    expect(up(sym.env(w, 'j', 'LEVEL'))).toEqual([`literal ${w} › jobs.j: 3`]);
+    expect(up(sym.jobOutput(w, 'j', 'o'))).toEqual([`literal ${w} › jobs.j: "fixed-value"`]);
+    expect(up(sym.output(w, 'fixed'))).toEqual([`literal ${w}: "constant"`]);
+    expect(up(sym.output('.github/actions/a', 'fixed'))).toEqual(['literal .github/actions/a: "constant"']);
+  });
+});
+
 describe('resolveSymbols', () => {
   const { index } = load(files);
   it.each([
@@ -476,11 +778,12 @@ describe('trace: sources upstream', () => {
 
   it('lists the literal values and omissions of the steps that use an action', () => {
     const t = trace(index, sym.input(A, 'v'), { direction: 'up' });
-    // `github.sha` is set at runtime: neither a source in the graph nor a literal.
+    // `github.sha` is set at runtime: not a symbol in the graph, so the trace ends at it, as a context.
     expect(t.children).toEqual([]);
     expect(t.leaves.map((l) => `${l.role} ${l.where} ${l.text}`)).toEqual([
       `omitted ${W} › jobs.build › steps[2] (not passed)`,
       `literal ${WRAP} › steps[0] "literal"`,
+      `context ${W} › jobs.build › steps[1] github.sha`,
     ]);
   });
 });

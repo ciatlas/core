@@ -1,8 +1,11 @@
+import type { Json } from './expressions';
 import type {
   ActionDecl,
+  Binding,
   ExprSite,
   JobDecl,
   LocatedRef,
+  OutputDecl,
   StepDecl,
   UnitDecl,
   UsesRef,
@@ -174,6 +177,14 @@ export const sym = {
   remote: (raw: string) => `remote:${raw}`,
 };
 
+/**
+ * What sets a symbol's value, in the workflow or action `unit`: an expression `site`, or a plain YAML `value` (no
+ * expression) at `loc`, such as `env: { MODE: fast }`; `job` names the job of a job's env or output.
+ */
+export type Definition =
+  | { unit: UnitDecl; site: ExprSite }
+  | { unit: UnitDecl; job?: string; value: Json; loc: Loc };
+
 export interface CallSite {
   caller: WorkflowDecl;
   job: JobDecl;
@@ -198,11 +209,13 @@ export class ProjectIndex {
   readonly callSites: CallSite[] = [];
   readonly actionUses: ActionUse[] = [];
   private readonly sitesById = new Map<number, ExprSite>();
+  private readonly definitions = new Map<string, Definition[]>();
 
   constructor(readonly project: Project) {
     for (const wf of project.workflows.values()) this.indexWorkflow(wf);
     for (const a of project.actions.values()) this.indexAction(a);
     for (const unit of this.units()) for (const site of unit.sites) this.indexSite(unit, site);
+    for (const unit of this.units()) this.indexLiterals(unit);
   }
 
   units(): UnitDecl[] {
@@ -248,6 +261,16 @@ export class ProjectIndex {
 
   usagesOf(symbol: string): Usage[] {
     return this.usages.get(symbol) ?? [];
+  }
+
+  /**
+   * What sets a symbol's value. Expressions (see `sinkOf`): each caller's `with:` for a reusable workflow's input, each
+   * `with:` of a step using an action for the action's input, a job's `outputs:` entry for its output, and so on. Plain
+   * values of env variables and outputs. A caller's or step's plain value or omission of an input is not listed: `trace`
+   * reads those from the calls.
+   */
+  definitionsOf(symbol: string): Definition[] {
+    return this.definitions.get(symbol) ?? [];
   }
 
   outgoing(symbol: string, kind?: EdgeKind): GraphEdge[] {
@@ -623,9 +646,50 @@ export class ProjectIndex {
     return (callee?.call && lookup(callee.call.outputs, name)?.name) ?? name;
   }
 
+  private define(symbol: string, def: Definition) {
+    const list = this.definitions.get(symbol);
+    if (list) list.push(def);
+    else this.definitions.set(symbol, [def]);
+  }
+
+  /** Env variables and outputs written as plain values (an expression is a site, indexed by `indexSite`). */
+  private indexLiterals(unit: UnitDecl) {
+    const u = unit.path;
+    if (unit.kind === 'action') {
+      this.literalOutputs(unit, unit.outputs, (name) => sym.output(u, name));
+      return;
+    }
+    this.literalEnv(unit, undefined, unit.env);
+    this.literalOutputs(unit, unit.call?.outputs ?? {}, (name) => sym.output(u, name));
+    for (const job of Object.values(unit.jobs)) {
+      this.literalEnv(unit, job.id, job.env);
+      this.literalOutputs(unit, job.outputs, (name) => sym.jobOutput(u, job.id, name), job.id);
+    }
+  }
+
+  private literalEnv(unit: UnitDecl, job: string | undefined, env: Record<string, Binding>) {
+    for (const e of Object.values(env)) {
+      if (!e.site)
+        this.define(sym.env(unit.path, job, e.name), { unit, job, value: e.value, loc: e.valueLoc });
+    }
+  }
+
+  private literalOutputs(
+    unit: UnitDecl,
+    outputs: Record<string, OutputDecl>,
+    symbolOf: (name: string) => string,
+    job?: string,
+  ) {
+    for (const o of Object.values(outputs)) {
+      if (!o.site && o.value !== undefined)
+        this.define(symbolOf(o.name), { unit, job, value: o.value, loc: o.loc });
+    }
+  }
+
   private indexSite(unit: UnitDecl, site: ExprSite) {
     this.sitesById.set(site.id, site);
     const sink = this.sinkOf(unit, site);
+    if (sink) this.define(sink, { unit, site });
     for (const seg of site.segments) {
       for (const ref of seg.refs) {
         for (const symbol of this.readsOf(unit, site, ref)) this.addUsage(unit, site, ref, symbol, sink);
