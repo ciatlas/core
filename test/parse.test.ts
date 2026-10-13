@@ -13,6 +13,7 @@ import {
   scanRunWrites,
   siteAt,
 } from '@ciatlas/core';
+import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { WF, yaml } from './helpers';
 
@@ -20,6 +21,23 @@ const parse = (text: string, repo?: string) =>
   parseWorkflowFile('.github/workflows/w.yml', text, createParseContext(repo));
 const lineCol = (l: Loc) => `${l.line}:${l.column}-${l.endLine}:${l.endColumn}`;
 const loc0: Loc = { file: 'f', line: 1, column: 1, endLine: 1, endColumn: 1 };
+
+/** A workflow whose one job has `steps`: its lines, indented under `steps:`, joined with `eol`. */
+const stepWorkflow = (steps: string[], eol = '\n') =>
+  ['on: push', 'jobs:', '  j:', '    runs-on: x', '    steps:', ...steps, ''].join(eol);
+
+/** Each reference as `<the source text at its location>@<line>:<column>`. */
+function locatedRefs(text: string): string[] {
+  const lines = text.split(/\r?\n/);
+  return parse(text).sites.flatMap((site) =>
+    site.segments.flatMap((seg) =>
+      seg.refs.map((r) => {
+        const written = lines[r.loc.line - 1]!.slice(r.loc.column - 1, r.loc.endColumn - 1);
+        return `${written}@${r.loc.line}:${r.loc.column}`;
+      }),
+    ),
+  );
+}
 
 describe('parseWorkflowFile — triggers and interface', () => {
   it.each([
@@ -522,6 +540,101 @@ describe('reference locations', () => {
       ['ab 6:24-6:33'],
       ['c 6:46-6:54'],
     ]);
+  });
+
+  it('skips copies of a reference inside string literals (#11)', () => {
+    // The format string holds the reference's text before the reference itself.
+    const text = stepWorkflow([
+      '      - uses: a/b@v1',
+      '        with:',
+      "          title: ${{ format('github.event.pull_request.title={0}', github.event.pull_request.title) }}",
+    ]);
+    expect(locatedRefs(text)).toEqual(['github.event.pull_request.title@8:68']);
+  });
+
+  it('finds each segment after the one before it, and the same reference twice in order', () => {
+    // The second segment's string holds a whole `${{ inputs.a }}`, which is neither a segment nor a reference.
+    const text = stepWorkflow([
+      "      - run: echo ${{ inputs.a }} ${{ format('${{ inputs.a }}', inputs.a) }} ${{ inputs.a || inputs.a }}",
+    ]);
+    expect(locatedRefs(text)).toEqual(['inputs.a@6:23', 'inputs.a@6:65', 'inputs.a@6:82', 'inputs.a@6:94']);
+  });
+
+  it('skips a string with escaped quotes, and searches a bare if: too', () => {
+    const text = stepWorkflow([
+      "      - if: contains('inputs.a', inputs.a)",
+      "        run: echo ${{ format('it''s inputs.a', inputs.a) }}",
+    ]);
+    expect(locatedRefs(text)).toEqual(['inputs.a@6:34', 'inputs.a@7:48']);
+  });
+
+  it('locates references in a literal block of a CRLF file', () => {
+    // The decoded value has one character less per line break (and no indentation), so its offsets drift.
+    const text = stepWorkflow(
+      [
+        '      - run: |',
+        '          echo one',
+        "          echo ${{ format('inputs.a', inputs.a) }} ${{ inputs.b }}",
+        "          echo ${{ format('inputs.b', inputs.b) }}",
+      ],
+      '\r\n',
+    );
+    expect(locatedRefs(text)).toEqual(['inputs.a@8:39', 'inputs.b@8:56', 'inputs.b@9:39']);
+  });
+
+  it('locates references in a folded block whose string spans lines', () => {
+    const text = stepWorkflow([
+      '      - run: >',
+      "          echo ${{ format('inputs.a",
+      "          inputs.b', inputs.a, inputs.b) }}",
+    ]);
+    expect(parse(text).sites[0]!.text).toBe("echo ${{ format('inputs.a inputs.b', inputs.a, inputs.b) }}\n");
+    expect(locatedRefs(text)).toEqual(['inputs.a@8:22', 'inputs.b@8:32']);
+  });
+
+  it('locates references in a double-quoted scalar with escapes', () => {
+    // run: "echo \"${{ format('inputs.a', inputs.a) }}\"\t${{ inputs.b }}"
+    const text = stepWorkflow([
+      '      - run: "echo \\"${{ format(\'inputs.a\', inputs.a) }}\\"\\t${{ inputs.b }}"',
+    ]);
+    expect(parse(text).sites[0]!.text).toBe(`echo "\${{ format('inputs.a', inputs.a) }}"\t\${{ inputs.b }}`);
+    expect(locatedRefs(text)).toEqual(['inputs.a@6:45', 'inputs.b@6:65']);
+  });
+
+  it('locates references in a single-quoted scalar, which doubles every quote', () => {
+    const text = stepWorkflow([
+      "      - if: '''inputs.a'' == inputs.a'",
+      "        run: 'echo ${{ format(''inputs.a'', inputs.a) }} ${{ github.event[''action''] }}'",
+    ]);
+    expect(locatedRefs(text)).toEqual(['inputs.a@6:30', 'inputs.a@7:45', "github.event[''action'']@7:62"]);
+  });
+
+  it('places a reference after any string that holds its text, in every scalar style', () => {
+    // `format('<string>', inputs.a)`: whatever the string holds, the reference is the one after `, `.
+    const piece = fc.constantFrom('inputs.a', "''", ' ', '}}', '${{', 'x', '.');
+    const styles: Record<string, (expr: string) => string[]> = {
+      plain: (e) => [`      - run: echo ${e}`],
+      single: (e) => [`      - run: 'echo ${e.replaceAll("'", "''")}'`],
+      double: (e) => [`      - run: "echo ${e}"`],
+      literal: (e) => ['      - run: |', '          echo one', `          echo ${e}`],
+      folded: (e) => ['      - run: >-', '          echo', `          ${e}`],
+    };
+    fc.assert(
+      fc.property(
+        fc.array(piece, { maxLength: 8 }),
+        fc.constantFrom(...Object.keys(styles)),
+        fc.constantFrom('\n', '\r\n'),
+        (pieces, style, eol) => {
+          const text = stepWorkflow(styles[style]!(`\${{ format('${pieces.join('')}', inputs.a) }}`), eol);
+          const refs = parse(text).sites.flatMap((s) => s.segments.flatMap((seg) => seg.refs));
+          expect(refs).toHaveLength(1);
+          const { loc } = refs[0]!;
+          const line = text.split(/\r?\n/)[loc.line - 1]!;
+          const written = style === 'single' ? "'', inputs.a" : "', inputs.a";
+          expect(line.slice(loc.endColumn - 1 - written.length, loc.endColumn - 1)).toBe(written);
+        },
+      ),
+    );
   });
 });
 

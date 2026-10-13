@@ -12,7 +12,13 @@ import {
   visit,
   type YAMLMap,
 } from 'yaml';
-import { findTemplateSegments, type Json, parseExpression } from './expressions';
+import {
+  findTemplateSegments,
+  type Json,
+  type ParsedExpression,
+  parseExpression,
+  type TemplateSegment,
+} from './expressions';
 import type {
   ActionDecl,
   Binding,
@@ -202,47 +208,10 @@ function buildSite(
   ctx: ParseContext,
 ): ExprSite {
   const { source } = unit;
-  const [start, end] = node.range ?? [0, 0];
-  const raw = source.text.slice(start, end);
-  const segments: ExprSegment[] = [];
-
-  // Offsets in the decoded value drift from the source in folded/literal blocks, quoted strings with escapes and
-  // CRLF files, so each reference is located by searching for its own text in the raw scalar, in order.
-  let cursor = 0;
-  const locateSegment = (absInner: number, expr: ReturnType<typeof parseExpression>): ExprSegment => {
-    cursor = Math.max(cursor, absInner - start);
-    const refs = expr.refs.map((r) => {
-      const refText = expr.source.slice(r.start, r.end);
-      const found = refText ? raw.indexOf(refText, cursor) : -1;
-      if (found >= 0) {
-        cursor = found + refText.length;
-        return { ...r, loc: source.loc(start + found, start + found + refText.length) };
-      }
-      return { ...r, loc: source.loc(absInner + r.start, absInner + r.end) };
-    });
-    return { expr, loc: source.loc(absInner, absInner + expr.source.length), refs };
-  };
-
+  const scalar = rawScalar(source, node);
   const templated = findTemplateSegments(text);
-  const wholeIsTemplate =
-    templated.length === 1 && text.trim() === text.slice(templated[0]!.start, templated[0]!.end);
-  if (c.cond && !wholeIsTemplate && templated.length === 0) {
-    const inner = text.trim();
-    const expr = parseExpression(inner);
-    const idx = raw.indexOf(inner.slice(0, Math.min(inner.length, 40)));
-    segments.push(locateSegment(start + Math.max(0, idx), expr));
-  } else {
-    let searchFrom = 0;
-    for (const seg of templated) {
-      const idx = raw.indexOf('${{', searchFrom);
-      const absOpen = idx >= 0 ? start + idx : start;
-      if (idx >= 0) searchFrom = idx + 3;
-      const lead = seg.innerStart - seg.start;
-      const rawAfter = idx >= 0 ? raw.slice(idx + 3) : '';
-      const leadRaw = idx >= 0 ? 3 + (rawAfter.length - rawAfter.trimStart().length) : lead;
-      segments.push(locateSegment(absOpen + leadRaw, seg.expr));
-    }
-  }
+  const segments =
+    c.cond && templated.length === 0 ? [conditionSegment(scalar, text)] : templateSegments(scalar, templated);
 
   return {
     id: ctx.nextSiteId(),
@@ -254,10 +223,133 @@ function buildSite(
     ...(c.key !== undefined ? { key: c.key } : {}),
     yamlPath: p,
     text,
-    loc: source.loc(start, end),
+    loc: source.loc(scalar.start, scalar.start + scalar.raw.length),
     isCondition: c.cond,
     segments,
   };
+}
+
+/** A scalar as written, where the expressions of its decoded value are located. Offsets are relative to `raw`. */
+interface RawScalar {
+  source: SourceFile;
+  /** The scalar's offset in the file. */
+  start: number;
+  /** The scalar's source text: its quotes, escapes, indentation and line breaks included. */
+  raw: string;
+  /** An expression's string quote as written: a single-quoted scalar doubles each `'`. */
+  quote: string;
+  /** Where the value starts: past the opening quote of a quoted scalar. */
+  open: number;
+}
+
+function rawScalar(source: SourceFile, node: Scalar): RawScalar {
+  const [start, end] = node.range ?? [0, 0];
+  const quoted = node.type === 'QUOTE_SINGLE' || node.type === 'QUOTE_DOUBLE';
+  return {
+    source,
+    start,
+    raw: source.text.slice(start, end),
+    quote: node.type === 'QUOTE_SINGLE' ? "''" : "'",
+    open: quoted ? 1 : 0,
+  };
+}
+
+/** A bare `if:` is one expression: the whole value. */
+function conditionSegment(s: RawScalar, text: string): ExprSegment {
+  const inner = text.trim();
+  const at = s.raw.indexOf(inner.slice(0, Math.min(inner.length, 40)));
+  return locateExpression(s, Math.max(at, s.open), parseExpression(inner), false).segment;
+}
+
+/** Each `${{ }}` is found after the one before it ends, so a `${{` inside a string literal does not start one. */
+function templateSegments(s: RawScalar, templated: TemplateSegment[]): ExprSegment[] {
+  let searchFrom = 0;
+  return templated.map((seg) => {
+    const open = s.raw.indexOf('${{', searchFrom);
+    if (open < 0) return locateExpression(s, seg.innerStart - seg.start, seg.expr, true).segment;
+    const located = locateExpression(s, skipSpace(s.raw, open + 3), seg.expr, true);
+    searchFrom = located.end;
+    return located.segment;
+  });
+}
+
+function skipSpace(text: string, i: number): number {
+  let at = i;
+  while (at < text.length && /\s/.test(text[at]!)) at++;
+  return at;
+}
+
+/**
+ * Locates the expression that starts at `from` in the raw scalar. Offsets in the decoded value drift from the source in
+ * folded and literal blocks, quoted scalars with escapes and CRLF files, so each reference is found by its own text, in
+ * order, within the expression and outside its string literals (a copy of the text there is not the reference). A
+ * reference the source spells with an escape (`\x62` for `b` in a double-quoted scalar) keeps the expression's own
+ * offsets.
+ */
+function locateExpression(
+  s: RawScalar,
+  from: number,
+  expr: ParsedExpression,
+  closes: boolean,
+): { segment: ExprSegment; end: number } {
+  const scan = scanExpression(s.raw, from, s.quote, closes);
+  const at = s.start + from;
+  let cursor = from;
+  const refs = expr.refs.map((r) => {
+    // In a single-quoted scalar, a reference's own quotes (`github.event['action']`) are doubled too.
+    const written = expr.source.slice(r.start, r.end).replaceAll("'", s.quote);
+    const found = written ? indexOutside(s.raw, written, cursor, scan) : -1;
+    if (found < 0) return { ...r, loc: s.source.loc(at + r.start, at + r.end) };
+    cursor = found + written.length;
+    return { ...r, loc: s.source.loc(s.start + found, s.start + cursor) };
+  });
+  return { segment: { expr, loc: s.source.loc(at, at + expr.source.length), refs }, end: scan.end };
+}
+
+/** An expression as written: where it ends, and the `[start, end)` of each string literal, quotes included. */
+interface RawExpression {
+  end: number;
+  strings: [number, number][];
+}
+
+/**
+ * Scans an expression the way `findTemplateSegments` scans the decoded value: `quote` opens and closes a string, and a
+ * doubled one inside it is an escaped quote. With `closes`, the expression ends at the first `}}` outside a string;
+ * otherwise (a bare `if:`) at the end of the scalar.
+ */
+function scanExpression(raw: string, from: number, quote: string, closes: boolean): RawExpression {
+  const strings: [number, number][] = [];
+  let i = from;
+  while (i < raw.length) {
+    if (raw.startsWith(quote, i)) {
+      const end = stringEnd(raw, i + quote.length, quote);
+      strings.push([i, end]);
+      i = end;
+    } else if (closes && raw.startsWith('}}', i)) {
+      return { end: i, strings };
+    } else {
+      i++;
+    }
+  }
+  return { end: raw.length, strings };
+}
+
+/** Past the quote that closes the string whose text starts at `i`, or the end of the scalar when none does. */
+function stringEnd(raw: string, i: number, quote: string): number {
+  let at = raw.indexOf(quote, i);
+  while (at >= 0 && raw.startsWith(quote, at + quote.length)) at = raw.indexOf(quote, at + 2 * quote.length);
+  return at < 0 ? raw.length : at + quote.length;
+}
+
+/** The first copy of `text` from `from` that ends within the expression and does not start inside one of its strings. */
+function indexOutside(raw: string, text: string, from: number, scan: RawExpression): number {
+  let at = raw.indexOf(text, from);
+  while (at >= 0 && at + text.length <= scan.end) {
+    const inString = scan.strings.find(([start, end]) => at >= start && at < end);
+    if (!inString) return at;
+    at = raw.indexOf(text, inString[1]);
+  }
+  return -1;
 }
 
 // ---------------------------------------------------------------------------
