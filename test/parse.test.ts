@@ -1064,6 +1064,91 @@ describe('reference locations', () => {
     );
     expect(locatedRefs(text)).toEqual(['env.X@6:24', 'inputs.a@6:34', 'env.X@6:59', 'inputs.a@6:81']);
   });
+
+  it.each([
+    ['LF', '\n'],
+    ['CRLF', '\r\n'],
+  ])(
+    'skips a copy of a reference that is a property after a dot and spaces or line breaks (#25, %s)',
+    (_, eol) => {
+      // `fromJSON(env.X). inputs.a` reads the property `inputs` of fromJSON's result: the reference is the one after `||`.
+      // The dot can end a line of a block or a flow scalar, and a double-quoted scalar can write the spaces as escapes or
+      // join the next line with a `\`. A dot in a block's header comment is not in the value, and a reference after
+      // spaces that follow anything else than a dot is one.
+      const text = stepWorkflow(
+        [
+          '      - run: echo ${{ fromJSON(env.X). inputs.a || inputs.a }}',
+          '      - run: >',
+          '          echo ${{ fromJSON(env.X).',
+          '          inputs.a || inputs.a }}',
+          '      - run: |',
+          '          echo ${{ fromJSON(env.X).',
+          '',
+          '            inputs.a || inputs.a }}',
+          '      - run: "echo ${{ fromJSON(env.X).\\',
+          '          inputs.a || inputs.a }}"',
+          '      - run: "echo ${{ fromJSON(env.X)\\x2e\\t\\x20 inputs.a || inputs.a }}"',
+          "      - if: 'fromJSON(env.X).",
+          "          inputs.a || inputs.a'",
+          '        run: x',
+          '      - if: > # a dot.',
+          "          inputs.a == 'x'",
+          '        run: x',
+          '      - run: echo ${{ env.X || inputs.a }} ${{ env.X ||',
+          '          inputs.a }}',
+        ],
+        eol,
+      );
+      expect(locatedRefs(text)).toEqual([
+        'env.X@6:32',
+        'inputs.a@6:52',
+        'env.X@8:29',
+        'inputs.a@9:23',
+        'env.X@11:29',
+        'inputs.a@13:25',
+        'env.X@14:33',
+        'inputs.a@15:23',
+        'env.X@16:33',
+        'inputs.a@16:62',
+        'env.X@17:23',
+        'inputs.a@18:23',
+        'inputs.a@21:11',
+        'env.X@23:23',
+        'inputs.a@23:32',
+        'env.X@23:48',
+        'inputs.a@24:11',
+      ]);
+    },
+  );
+
+  it('skips a property after a dot and any spaces and line breaks, in every style (#25)', () => {
+    // `↵` is a line break and the indentation, which a literal block keeps and the other styles fold into a space; a
+    // `\` before it joins the lines of a double-quoted scalar, with nothing between the dot and the name.
+    const spaces: Record<string, string[]> = {
+      plain: [' ', '↵'],
+      single: [' ', '↵'],
+      double: [' ', '↵', '\\t', '\\x20', '\\↵'],
+      literal: [' ', '↵'],
+      folded: [' ', '↵'],
+    };
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...Object.keys(spaces)),
+        fc.array(fc.nat(), { minLength: 1, maxLength: 3 }),
+        fc.constantFrom('\n', '\r\n'),
+        (style, picks, eol) => {
+          const space = picks.map((n) => spaces[style]![n % spaces[style]!.length]).join('');
+          const [lines] = styles[style]!;
+          const expr = `\${{ fromJSON(env.X).${space}inputs.a || inputs.a }}`;
+          const text = stepWorkflow(lines(expr), eol).replaceAll('↵', `${eol}          `);
+          const refs = parse(text).sites.flatMap((s) => s.segments.flatMap((seg) => seg.refs));
+          expect(refs.map((r) => r.context)).toEqual(['env', 'inputs']);
+          const { loc } = refs[1]!;
+          expect(sourceAt(text, { ...loc, endColumn: loc.endColumn + 3 })).toBe('inputs.a }}');
+        },
+      ),
+    );
+  });
 });
 
 describe('scripts of actions/github-script', () => {

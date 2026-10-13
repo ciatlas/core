@@ -457,7 +457,8 @@ function stringEnd(raw: string, i: number, quote: string): number {
 
 /**
  * The first copy of `text` from `from` that ends within the expression, does not start inside one of its strings and
- * does not continue a name or property chain: in `fromJSON(env.X).inputs.a`, `.inputs.a` is a property, not a reference.
+ * does not continue a name or property chain: in `fromJSON(env.X).inputs.a` and `fromJSON(env.X). inputs.a`,
+ * `inputs.a` is a property, not a reference.
  */
 function indexOutside(s: RawScalar, text: string, from: number, scan: RawExpression): number {
   let at = s.raw.indexOf(text, from);
@@ -471,23 +472,51 @@ function indexOutside(s: RawScalar, text: string, from: number, scan: RawExpress
 
 const NAME_CHAR = /[\w.-]/;
 
-/** A `\` escape of a double-quoted scalar that ends the text, its backslash not itself escaped, with its hex digits. */
+/**
+ * A `\` escape of a double-quoted scalar that ends the text, its backslash not itself escaped: its hex digits, or the one
+ * character after the `\` (a space or a line break too), in the groups of `ESCAPE_AT_START`.
+ */
 const ESCAPE_AT_END =
-  /(?:^|[^\\])(?:\\\\)*\\(?:[0abtnvfreN_LP]|x([\dA-Fa-f]{2})|u([\dA-Fa-f]{4})|U([\dA-Fa-f]{8}))$/;
+  /(?:^|[^\\])(?:\\\\)*\\(?:x([\dA-Fa-f]{2})|u([\dA-Fa-f]{4})|U([\dA-Fa-f]{8})|([0abtnvfreN_LP \t\n\r]))$/;
 
 /**
- * Whether the character before `at` continues a name or property chain (`.`, a word character or `-`). A double-quoted
- * scalar may write that character as an escape.
+ * Whether the text at `at` continues a name or property chain: the character before it is `.`, a word character or `-`,
+ * or it is a `.` before spaces and line breaks (`fromJSON(env.X). inputs.a`, or a `.` that ends a line). A
+ * double-quoted scalar may write those characters as escapes, and join the lines with a `\`.
  */
 function continuesName(s: RawScalar, at: number): boolean {
-  const escaped = s.escapes ? ESCAPE_AT_END.exec(s.raw.slice(Math.max(0, at - 16), at)) : null;
-  return escaped ? escapesNameChar(escaped) : NAME_CHAR.test(s.raw[at - 1] ?? '');
+  const start = spaceStart(s, at);
+  const before = charBefore(s, start);
+  return start < at ? before === '.' : NAME_CHAR.test(before);
 }
 
-/** Whether an escape stands for a name character: `\x2e` is a `.`, and a letter escape (`\t`) a control or space. */
-function escapesNameChar(hex: RegExpExecArray): boolean {
-  const code = escapedCode(hex);
-  return code < 128 && NAME_CHAR.test(String.fromCharCode(code));
+/** Where the spaces and line breaks before `at` start, within the value: a block scalar's header line is not in it. */
+function spaceStart(s: RawScalar, at: number): number {
+  let i = at;
+  for (let n = spaceLengthBefore(s, i); n > 0 && i - n >= s.open; n = spaceLengthBefore(s, i)) i -= n;
+  return i;
+}
+
+/** The length of the space that ends at `at`: a character, or an escape that stands for one; 0 for anything else. */
+function spaceLengthBefore(s: RawScalar, at: number): number {
+  const esc = escapeBefore(s, at);
+  // None of the characters after an escape's `\` is a `\`.
+  if (esc) return escapesSpace(esc) ? esc[0].length - esc[0].lastIndexOf('\\') : 0;
+  return /\s/.test(s.raw[at - 1] ?? '') ? 1 : 0;
+}
+
+/**
+ * The character before `at` as the value reads it: a double-quoted scalar may write it as an escape. `\x2e` is a `.`,
+ * `\U0001002e` is not, and a letter escape (`\0`) reads as a control character; YAML decodes no code past U+10FFFF.
+ */
+function charBefore(s: RawScalar, at: number): string {
+  const esc = escapeBefore(s, at);
+  return esc ? String.fromCodePoint(Math.min(escapedCode(esc), 0x10ffff)) : (s.raw[at - 1] ?? '');
+}
+
+/** The escape that ends at `at`, in a double-quoted scalar. */
+function escapeBefore(s: RawScalar, at: number): RegExpExecArray | null {
+  return s.escapes ? ESCAPE_AT_END.exec(s.raw.slice(Math.max(0, at - 16), at)) : null;
 }
 
 // ---------------------------------------------------------------------------
