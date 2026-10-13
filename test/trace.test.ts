@@ -1380,6 +1380,9 @@ describe('trace upstream: input defaults', () => {
         `context ${CALLEE} › on.workflow_call.inputs.${name}.default github.event.inputs.x @${line}:40`,
       ]);
     }
+    // Nor is either default a use of the dispatch input x downstream.
+    const down = trace(index, sym.input(CALLEE, 'x'));
+    expect([down.children, down.leaves]).toEqual([[], []]);
   });
 
   it("shows no default for a required workflow_call input, which GitHub never uses, but does for an action's", () => {

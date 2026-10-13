@@ -1467,3 +1467,55 @@ describe('ProjectIndex.readsOf: whole and computed github reads (#22)', () => {
     expect(reads(path).every((r) => r.endsWith(': '))).toBe(true);
   });
 });
+
+// An input's default applies only when the workflow is called: GitHub evaluates a `workflow_call` input's default with
+// the caller's `github` context, and no context at all in a `workflow_dispatch` input's. So `github` there holds none of
+// the workflow's own inputs, which it holds only when the workflow is dispatched.
+describe('ProjectIndex.readsOf: github in an input default', () => {
+  const W = `${WF}/w.yml`;
+  const { index } = load(
+    {
+      [W]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              x: { type: string, required: false, default: '\${{ github.event.inputs.target }}' }
+              z: { type: string, required: false, default: '\${{ toJSON(github) }}' }
+          workflow_dispatch:
+            inputs:
+              target: { type: string, required: false }
+              d: { type: string, required: false, default: '\${{ github.event[matrix.k] }}' }
+        jobs:
+          j:
+            runs-on: x
+            steps:
+              - run: echo '\${{ inputs.x }} \${{ inputs.z }} \${{ github.event.inputs.target }}'
+      `,
+    },
+    { validateSchema: false },
+  );
+  const unit = index.unit(W)!;
+  const defaults = [...refsOf(unit)].filter(
+    ({ site, ref }) => site.field === 'input.default' && ref.context === 'github',
+  );
+
+  it('reads no dispatch input through github in an input’s default', () => {
+    expect(defaults.map(({ ref }) => [ref.context, ...ref.path].join('.'))).toEqual([
+      'github.event.inputs.target',
+      'github',
+      'github.event.?',
+    ]);
+    expect(defaults.map(({ site, ref }) => index.readsOf(unit, site, ref))).toEqual([[], [], []]);
+    expect(defaults.map(({ site, ref }) => index.resolveRef(unit, site, ref))).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it('still reads it in the jobs, where github.event.inputs is the workflow’s own when it is dispatched', () => {
+    const uses = (name: string) => index.usagesOf(sym.input(W, name)).map((u) => u.site.field);
+    expect(uses('target')).toEqual(['step.run']);
+    expect(uses('d')).toEqual([]);
+  });
+});

@@ -101,24 +101,36 @@ function inputNames(unit: UnitDecl): string[] {
   return [...declaredNames(unit.call?.inputs), ...dispatchInputNames(unit)];
 }
 
-/** The inputs `github.event.inputs` holds: a workflow's `workflow_dispatch` inputs. */
+/** The inputs a workflow declares under `workflow_dispatch`. */
 function dispatchInputNames(unit: UnitDecl): string[] {
   return unit.kind === 'workflow' ? declaredNames(unit.dispatch?.inputs) : [];
+}
+
+/**
+ * The inputs of its own that `github.event.inputs` may hold at a site: a workflow's `workflow_dispatch` inputs, which it
+ * holds when the workflow is dispatched. None in an action, whose `github` is its job's, nor in an input's default: GitHub
+ * evaluates a `workflow_call` input's default only when the workflow is called, with the caller's `github` context, and
+ * allows no context in a `workflow_dispatch` input's.
+ */
+function eventInputsAt(unit: UnitDecl, site: ExprSite): Record<string, { name: string }> {
+  if (unit.kind !== 'workflow' || site.field === 'input.default') return {};
+  return unit.dispatch?.inputs ?? {};
 }
 
 /**
  * The dispatch inputs a `github` reference reads without naming them, each as a reference naming it
  * (`github.event.inputs.<name>`). It may read them when each of its first two properties is `event` and `inputs`
  * (ignoring case), stands for any key (a `*` filter, a computed key) or is missing: a whole or computed `github`,
- * `github.event` or `github.event.inputs` reads every dispatch input, and `github[x].inputs.<name>` the one it names.
- * `undefined` for a reference that names its input outright (`resolveRef` reads it) or can read none.
+ * `github.event` or `github.event.inputs` reads every dispatch input it may hold at the site (see `eventInputsAt`), and
+ * `github[x].inputs.<name>` the one it names. `undefined` for a reference that names its input outright (`resolveRef`
+ * reads it) or can read none.
  */
-function eventMemberRefs(unit: UnitDecl, ref: LocatedRef): LocatedRef[] | undefined {
+function eventMemberRefs(unit: UnitDecl, site: ExprSite, ref: LocatedRef): LocatedRef[] | undefined {
   const [event, inputs, name] = ref.path;
   if (!(computed(event) || isKey(event, 'event')) || !(computed(inputs) || isKey(inputs, 'inputs')))
     return undefined;
   if (![event, inputs, name].some(computed)) return undefined;
-  return dispatchInputNames(unit)
+  return declaredNames(eventInputsAt(unit, site))
     .filter((n) => computed(name) || isKey(n, name!.toLowerCase()))
     .map((n) => ({ ...ref, path: ['event', 'inputs', n, ...ref.path.slice(3)] }));
 }
@@ -578,7 +590,7 @@ export class ProjectIndex {
    * are compared ignoring case, as GitHub looks them up (`github.Event.Inputs.x`, `needs.build.Outputs.y`).
    */
   resolveRef(unit: UnitDecl, site: ExprSite, ref: LocatedRef): string | undefined {
-    if (ref.context === 'github') return this.resolveEventInput(unit, ref.path);
+    if (ref.context === 'github') return this.resolveEventInput(unit, site, ref.path);
     const [a] = ref.path;
     if (computed(a)) return undefined;
     switch (ref.context) {
@@ -600,11 +612,12 @@ export class ProjectIndex {
   /**
    * `github.event.inputs.<name>`: this workflow's own input only when it is dispatched directly, so only an input it
    * declares under `workflow_dispatch`. GitHub accepts no other input in a dispatch, and a workflow that is called gets
-   * its caller's event, so a name only `workflow_call` declares, or none does, reads no input: it is the context.
+   * its caller's event, so a name only `workflow_call` declares, or none does, reads no input: it is the context. So
+   * does any name in an input's default, which applies only when the workflow is called (see `eventInputsAt`).
    */
-  private resolveEventInput(unit: UnitDecl, [a, b, c]: string[]): string | undefined {
+  private resolveEventInput(unit: UnitDecl, site: ExprSite, [a, b, c]: string[]): string | undefined {
     if (!isKey(a, 'event') || !isKey(b, 'inputs') || computed(c)) return undefined;
-    const input = unit.kind === 'workflow' && unit.dispatch ? lookup(unit.dispatch.inputs, c!) : undefined;
+    const input = lookup(eventInputsAt(unit, site), c!);
     return input && sym.input(unit.path, this.canonicalInput(unit, input.name));
   }
 
@@ -667,7 +680,8 @@ export class ProjectIndex {
    *   dispatched: `toJSON(github)`, `github[x]`, `github.*`, `toJSON(github.event)`, `github.event[x]`,
    *   `github.event.*`, `toJSON(github.event.inputs)` or `github.event.inputs[x]` read every one of them, and
    *   `github[x].inputs.<name>` the one it names (see `eventMemberRefs`). A workflow that is called gets its caller's
-   *   `github`, and an action its job's, so there they read none of the unit's inputs;
+   *   `github`, and an action its job's, so there they read none of the unit's inputs, nor in an input's default, which
+   *   applies only when the workflow is called;
    * - `toJSON(matrix)` or `matrix[inputs.key]`: every key of the job's matrix;
    * - `toJSON(secrets)` or `secrets[inputs.name]`: every secret the workflow declares under `workflow_call`;
    * - `toJSON(env)` or `env[inputs.name]`: every env variable in scope, a step's own read through their values.
@@ -702,7 +716,7 @@ export class ProjectIndex {
    * resolves the way the name written out does. `undefined` for any other reference.
    */
   private memberRefs(unit: UnitDecl, site: ExprSite, ref: LocatedRef): LocatedRef[] | undefined {
-    if (ref.context === 'github') return eventMemberRefs(unit, ref);
+    if (ref.context === 'github') return eventMemberRefs(unit, site, ref);
     if (!computed(ref.path[0])) return undefined;
     return this.memberNames(unit, site, ref.context)?.map((name) => ({
       ...ref,
