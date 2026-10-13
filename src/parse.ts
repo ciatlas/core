@@ -243,11 +243,14 @@ interface RawScalar {
   escapes: boolean;
   /** Where the value starts: past the opening quote of a quoted scalar, or past the header line of a block scalar. */
   open: number;
+  /** Where the value ends: at the closing quote of a quoted scalar. */
+  close: number;
 }
 
 function rawScalar(source: SourceFile, node: Scalar): RawScalar {
   const [start, end] = node.range ?? [0, 0];
   const raw = source.text.slice(start, end);
+  const quoted = node.type === 'QUOTE_SINGLE' || node.type === 'QUOTE_DOUBLE';
   return {
     source,
     start,
@@ -255,6 +258,7 @@ function rawScalar(source: SourceFile, node: Scalar): RawScalar {
     quote: node.type === 'QUOTE_SINGLE' ? "''" : "'",
     escapes: node.type === 'QUOTE_DOUBLE',
     open: valueStart(node.type, raw),
+    close: quoted ? raw.length - 1 : raw.length,
   };
 }
 
@@ -326,7 +330,7 @@ const escapedCode = (esc: RegExpExecArray) => Number.parseInt(esc[1] ?? esc[2] ?
  * folded and literal blocks, quoted scalars with escapes and CRLF files, so each reference is found by its own text, in
  * the order they are written, within the expression and outside its string literals (a copy of the text there is not
  * the reference). A reference the source spells with an escape (`\x62` for `b` in a double-quoted scalar) keeps the
- * expression's own offsets.
+ * expression's own offsets. The expression ends where the source ends it, before its `}}` or the end of the value.
  */
 function locateExpression(
   s: RawScalar,
@@ -334,7 +338,7 @@ function locateExpression(
   expr: ParsedExpression,
   closes: boolean,
 ): { segment: ExprSegment; end: number } {
-  const scan = scanExpression(s.raw, from, s.quote, closes);
+  const scan = scanExpression(s, from, closes);
   const at = s.start + from;
   let cursor = from;
   const locs = new Map<ExprRef, Loc>();
@@ -350,7 +354,28 @@ function locateExpression(
     locs.set(r, s.source.loc(start, end));
   }
   const refs = expr.refs.map((r) => ({ ...r, loc: locs.get(r)! }));
-  return { segment: { expr, loc: s.source.loc(at, at + expr.source.length), refs }, end: scan.end };
+  const end = s.start + expressionEnd(s, from, scan.end);
+  return { segment: { expr, loc: s.source.loc(at, end), refs }, end: scan.end };
+}
+
+/**
+ * Where the expression from `from` ends before `to`: past its last character that is not a space, as the decoded
+ * value's `trim()` leaves it. An escape is one character: `\\t` is a `\` and a `t`, not a tab.
+ */
+function expressionEnd(s: RawScalar, from: number, to: number): number {
+  let end = from;
+  for (let i = from; i < to; ) {
+    const space = spaceLength(s, i);
+    i += space || charLength(s, i);
+    if (!space) end = i;
+  }
+  return end;
+}
+
+/** The length of the character at `at` as written: an escape's in a double-quoted scalar, else 1. */
+function charLength(s: RawScalar, at: number): number {
+  const esc = s.escapes ? ESCAPE_AT_START.exec(s.raw.slice(at, at + 10)) : null;
+  return esc ? esc[0].length : 1;
 }
 
 /**
@@ -401,14 +426,15 @@ interface RawExpression {
 }
 
 /**
- * Scans an expression the way `findTemplateSegments` scans the decoded value: `quote` opens and closes a string, and a
- * doubled one inside it is an escaped quote. With `closes`, the expression ends at the first `}}` outside a string;
- * otherwise (a bare `if:`) at the end of the scalar.
+ * Scans an expression the way `findTemplateSegments` scans the decoded value: the scalar's `quote` opens and closes a
+ * string, and a doubled one inside it is an escaped quote. With `closes`, the expression ends at the first `}}` outside
+ * a string; otherwise (a bare `if:`), and without one, at the end of the value.
  */
-function scanExpression(raw: string, from: number, quote: string, closes: boolean): RawExpression {
+function scanExpression(s: RawScalar, from: number, closes: boolean): RawExpression {
+  const { raw, quote } = s;
   const strings: [number, number][] = [];
   let i = from;
-  while (i < raw.length) {
+  while (i < s.close) {
     if (raw.startsWith(quote, i)) {
       const end = stringEnd(raw, i + quote.length, quote);
       strings.push([i, end]);
@@ -419,7 +445,7 @@ function scanExpression(raw: string, from: number, quote: string, closes: boolea
       i++;
     }
   }
-  return { end: raw.length, strings };
+  return { end: s.close, strings };
 }
 
 /** Past the quote that closes the string whose text starts at `i`, or the end of the scalar when none does. */

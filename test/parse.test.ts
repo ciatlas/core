@@ -976,6 +976,66 @@ describe('reference locations', () => {
     ]);
   });
 
+  it('ends an expression where the source ends it, past line breaks, doubled quotes and escapes (#24)', () => {
+    // The end was the start plus the decoded expression's length, which drifts from the source in a block whose
+    // expression spans lines and in a quoted scalar that doubles quotes or writes escapes. `\\t` is a `\` and a `t`, and
+    // a `\t` before `}}` or the closing quote is a space the decoded value trims. The last `${{` has no `}}`.
+    const text = stepWorkflow([
+      '      - run: |',
+      "          echo ${{ fromJSON('[",
+      '          1',
+      "          ]') == foo.bar }} ${{ inputs.b }}",
+      '      - run: >',
+      '          echo ${{ inputs.a ==',
+      '',
+      '            inputs.b }}',
+      '      - run: "echo ${{ format(\'\\t\\x41\', inputs.a)\\t}} ${{ inputs.a\\\\t }} ${{ inputs.b "',
+      "      - if: \"inputs.a == '\\u0009' \\t\\",
+      '          "',
+      '        run: x',
+      "      - if: 'inputs.a == ''x'''",
+      '        run: x',
+      '      - if: |',
+      '          inputs.a ==',
+      "          'x'",
+      '',
+      '        run: x',
+    ]);
+    expect(parse(text).sites.flatMap((s) => s.segments.map((seg) => sourceAt(text, seg.loc)))).toEqual([
+      "fromJSON('[\n          1\n          ]') == foo.bar",
+      'inputs.b',
+      'inputs.a ==\n\n            inputs.b',
+      "format('\\t\\x41', inputs.a)",
+      'inputs.a\\\\t',
+      'inputs.b',
+      "inputs.a == '\\u0009'",
+      "inputs.a == ''x''",
+      "inputs.a ==\n          'x'",
+    ]);
+  });
+
+  it('ends each expression where it is written to end, whatever its strings hold, in every style (#24)', () => {
+    fc.assert(
+      fc.property(
+        fc.array(piece, { maxLength: 8 }),
+        fc.array(piece, { maxLength: 8 }),
+        fc.constantFrom(...Object.keys(styles)),
+        fc.constantFrom('\n', '\r\n'),
+        (a, b, style, eol) => {
+          const [lines, lineBreak] = styles[style]!;
+          const exprs = [`format('${a.join('')}', inputs.a)`, `github.event['${b.join('')}'] == ''`];
+          const template = exprs.map((e) => `\${{ ${e} }}`).join(' ');
+          const text = stepWorkflow(lines(template), eol).replaceAll('⏎', lineBreak(eol));
+          const quote = style === 'single' ? "''" : "'";
+          const segments = parse(text).sites.flatMap((s) => s.segments);
+          expect(segments.map((seg) => sourceAt(text, seg.loc))).toEqual(
+            exprs.map((e) => e.replaceAll("'", quote).replaceAll('⏎', lineBreak(eol))),
+          );
+        },
+      ),
+    );
+  });
+
   it('skips a copy of a reference that continues a name or a property chain', () => {
     // `.inputs.a` is a property of fromJSON's result, and `my-inputs.a` and `myinputs.a` are longer names.
     const text = stepWorkflow([
