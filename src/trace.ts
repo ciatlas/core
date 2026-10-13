@@ -31,12 +31,12 @@ export interface TraceLeaf {
    * when that is not another symbol: `literal` (a plain value: passed by a caller or a step, an env variable's or
    * output's own value, or an input's default), `omitted` (a caller or step does not pass the input), `value`,
    * `missing` and `dynamic` (a matrix key's combinations), `context` (read from a context the graph does not follow,
-   * such as `github.event.pull_request.title` or `runner.os`, from the caller's event: `github.event.inputs.<name>` in
-   * a workflow that can be called, or from a whole object that may hold more than the members the files declare, such
-   * as `toJSON(secrets)`; `text` is the reference), `invalid` (an expression that does not parse, or, in an input's
-   * default, a reference to a context or a call to a function GitHub does not allow there; `text` is then the
-   * reference, or the function's name and `()` at the expression's place) and `expression` (an expression that reads
-   * no context, e.g. a `format()` of literals).
+   * such as `github.event.pull_request.title` or `runner.os`, from the caller's event: `github` in a workflow that can
+   * be called (`github.event.inputs.<name>`, `toJSON(github)`), or from a whole object that may hold more than the
+   * members the files declare, such as `toJSON(secrets)` or `toJSON(github)`; `text` is the reference), `invalid` (an
+   * expression that does not parse, or, in an input's default, a reference to a context or a call to a function GitHub
+   * does not allow there; `text` is then the reference, or the function's name and `()` at the expression's place) and
+   * `expression` (an expression that reads no context, e.g. a `format()` of literals).
    *
    * When a caller or step omits an input, its `default:` is the value there, so the input's trace also ends at the
    * default, after the calls: a `literal`, or the `context`, `invalid` or `expression` leaves of an expression, with
@@ -74,8 +74,8 @@ export interface TraceNode {
    * - `jobs.<id>`: `secrets: inherit`, naming the calling job that passes the secret on, in both directions;
    * - `the default of inputs.<name>`: upstream, the expression of an input's default, which reads the parent (another
    *   input or a `vars` value) where a caller or step omits the input;
-   * - `when dispatched`: upstream, for a workflow input read through `github.event.inputs`, which holds the input only
-   *   when the workflow is dispatched (see `readsCallerEvent`).
+   * - `when dispatched`: upstream, for a workflow input read through `github` (`github.event.inputs.<name>`,
+   *   `toJSON(github)`), whose event holds the input only when the workflow is dispatched (see `readsCallerEvent`).
    */
   via?: { loc: Loc; text: string; note?: string };
   children: TraceNode[];
@@ -192,7 +192,8 @@ function matrixSymbol(symbol: string, unit: string): { job: string; key: string 
 
 /**
  * `called`: the symbol is a workflow input entered through a caller's `with:`, so the workflow runs as a called one,
- * and its `github.event.inputs` reads take the caller's event, not this value (see `readsCallerEvent`).
+ * and its reads through `github` (`github.event.inputs.<name>`, `toJSON(github)`, directly or through the step's own
+ * env) take the caller's event, not this value (see `usageReadsCallerEvent`).
  */
 function down(
   index: ProjectIndex,
@@ -216,7 +217,8 @@ function down(
 
 /**
  * What a symbol is expanded once for downstream: the symbol, and whether it is `called` when that changes its reads,
- * that is for an input the workflow reads through `github.event.inputs`. Each symbol is expanded at most twice.
+ * that is for an input the workflow reads through `github` (see `usageReadsCallerEvent`). Each symbol is expanded at
+ * most twice.
  */
 function downKey(index: ProjectIndex, symbol: string, called: boolean): string {
   const skips = called && index.usagesOf(symbol).some((u) => usageReadsCallerEvent(index, u));
@@ -340,34 +342,42 @@ function readsEverySecret(index: ProjectIndex, unit: UnitDecl, site: ExprSite, r
 }
 
 /**
- * Whether a read is `github.event.inputs…` in a workflow that can be called. GitHub gives a called workflow its
- * caller's `github` context ("the github context is always associated with the caller workflow"), with the caller's
- * event payload, so there `github.event.inputs` holds the caller's own dispatch inputs, or nothing, and never the
- * values passed in `with:`. The graph resolves the read to the workflow's input, which holds only when the workflow
- * is dispatched.
+ * Whether a read is of `github` in a workflow that can be called. GitHub gives a called workflow its caller's `github`
+ * context ("the github context is always associated with the caller workflow"), with the caller's event payload, so
+ * there `github.event.inputs`, and a whole or computed `github` or `github.event`, hold the caller's own dispatch
+ * inputs, or nothing, and never the values passed in `with:`. The graph reads them as the workflow's dispatch inputs,
+ * which they hold only when the workflow is dispatched.
  */
 function readsCallerEvent(index: ProjectIndex, u: { site: ExprSite; ref: LocatedRef }): boolean {
   const unit = index.project.workflows.get(u.site.ownerPath);
-  return !!unit?.call && isEventInputs(u.ref);
+  return !!unit?.call && readsGithub(u.ref);
 }
 
-const isEventInputs = (ref: LocatedRef) =>
-  ref.context === 'github' && ref.path[0] === 'event' && ref.path[1] === 'inputs';
+/**
+ * Whether a reference reads `github`. The only symbols it can read are dispatch inputs, through `github.event`:
+ * `github.event.inputs.<name>`, or a whole or computed `github`, `github.event` or `github.event.inputs` (see
+ * `ProjectIndex.readsOf`).
+ */
+const readsGithub = (ref: LocatedRef) => ref.context === 'github';
 
 /**
- * Whether a usage reads its symbol only through `github.event.inputs` in a workflow that can be called (see
- * `readsCallerEvent`): directly, or through the step's own env values it reads (`env.X`, where the step's `env:` has
- * `X: ${{ github.event.inputs.z }}`, or a whole `env`, which reads every own value), which the graph resolves to what
- * the values read.
+ * Whether a usage reads its symbol only through `github` in a workflow that can be called: directly
+ * (`github.event.inputs.<name>`, `toJSON(github)`, `github.event[x]`), or through the step's own env values it reads
+ * (`env.X`, where the step's `env:` has `X: ${{ toJSON(github) }}`, or a whole `env`, which reads every own value),
+ * which the graph resolves to what the values read. The symbol is then one of the workflow's `workflow_dispatch`
+ * inputs, which `github.event` holds only when the workflow is dispatched: when it is called, GitHub gives it the
+ * caller's `github` context and event (see `readsCallerEvent`), so the usage never takes in the value a caller passes
+ * in `with:`. A rule about that value, such as one that looks for an input a callee never takes in, can skip such
+ * usages.
  */
-function usageReadsCallerEvent(index: ProjectIndex, u: Usage): boolean {
+export function usageReadsCallerEvent(index: ProjectIndex, u: Usage): boolean {
   const wf = index.project.workflows.get(u.site.ownerPath);
   if (!wf?.call) return false;
-  if (isEventInputs(u.ref)) return true;
+  if (readsGithub(u.ref)) return true;
   const reads = ownEnv(index, wf, u.site, u.ref).flatMap((own) =>
     own.site ? refsReading(index, wf, own.site, u.symbol) : [],
   );
-  return reads.length > 0 && reads.every(isEventInputs);
+  return reads.length > 0 && reads.every(readsGithub);
 }
 
 /** The references of a site that read `symbol`. */
@@ -421,10 +431,11 @@ function endSources(index: ProjectIndex, symbol: string, fallback: InputDefault 
 }
 
 /**
- * A workflow input that a value reads only through `github.event.inputs`: the value entered when the workflow is
- * dispatched. When it is called, the read takes the caller's event instead (a `context` leaf, see `readsCallerEvent`),
- * so the callers' `with:` values, which the input holds then, are not where the value comes from: the input is shown,
- * but not traced on up, nor marked as expanded, so that a read of it through `inputs` still is.
+ * A workflow input that a value reads only through `github` (`github.event.inputs.<name>`, `toJSON(github)`, directly
+ * or through the step's own env): the value entered when the workflow is dispatched. When it is called, the read takes
+ * the caller's event instead (a `context` leaf, see `readsCallerEvent`), so the callers' `with:` values, which the
+ * input holds then, are not where the value comes from: the input is shown, but not traced on up, nor marked as
+ * expanded, so that a read of it through `inputs` still is.
  */
 function dispatchedInput(index: ProjectIndex, symbol: string, depth: number, path: Set<string>): TraceNode {
   const node = base(index, symbol);
@@ -434,8 +445,8 @@ function dispatchedInput(index: ProjectIndex, symbol: string, depth: number, pat
 }
 
 /**
- * Whether every read of `from` in the site is `github.event.inputs` in a workflow that can be called, directly or
- * through the step's own env (see `usageReadsCallerEvent`).
+ * Whether every read of `from` in the site is through `github` in a workflow that can be called, directly or through
+ * the step's own env (see `usageReadsCallerEvent`).
  */
 function readsOnlyCallerEvent(index: ProjectIndex, from: string, siteId: number | undefined): boolean {
   const reads = index.usagesOf(from).filter((u) => u.site.id === siteId);
@@ -454,33 +465,23 @@ function flowParents(index: ProjectIndex, symbol: string, parent: Parent): Trace
         : `${e.from}@${e.loc ? `${e.loc.file}:${e.loc.line}:${e.loc.column}` : ''}`;
     if (seenEdges.has(key)) continue;
     seenEdges.add(key);
-    const p = flowParent(index, e, parent);
-    if (p) parents.push(p);
+    parents.push(flowParent(index, e, parent));
   }
   return parents;
 }
 
 /**
- * The parent a `flows` edge comes from, with how the value got here: `when dispatched` for a dispatch input alone.
- * None when the value reads only `github.event.inputs.<name>` and the workflow does not declare `<name>` under
- * `workflow_dispatch`: no dispatch sets it, so only the caller's event (the `context` leaf) is left.
+ * The parent a `flows` edge comes from, with how the value got here: `when dispatched` for a dispatch input alone. The
+ * graph reads only `workflow_dispatch` inputs through `github` (see `ProjectIndex.readsOf`), so such an edge never
+ * comes from an input that no dispatch sets.
  */
-function flowParent(index: ProjectIndex, e: GraphEdge, parent: Parent): TraceNode | undefined {
+function flowParent(index: ProjectIndex, e: GraphEdge, parent: Parent): TraceNode {
   const dispatched = readsOnlyCallerEvent(index, e.from, e.siteId);
-  if (dispatched && !isDispatchInput(index, e.from)) return undefined;
   const p = parent(e.from, dispatched);
   const site = e.siteId !== undefined ? index.site(e.siteId) : undefined;
   const note = dispatched ? { note: 'when dispatched' } : {};
   if (e.loc) p.via = { loc: e.loc, text: site ? short(site.text) : outputEdge(index, e), ...note };
   return p;
-}
-
-/** Whether `symbol` is an input its workflow declares under `workflow_dispatch`: the only ones a dispatch sets. */
-function isDispatchInput(index: ProjectIndex, symbol: string): boolean {
-  const unit = index.nodes.get(symbol)?.unit;
-  const wf = unit ? index.project.workflows.get(unit) : undefined;
-  const name = symbol.slice(symbol.indexOf('#inputs.') + '#inputs.'.length);
-  return !!wf?.dispatch && lookup(wf.dispatch.inputs, name) !== undefined;
 }
 
 /** A secret received through `secrets: inherit` comes from the caller's secret of the same name. */
@@ -868,8 +869,8 @@ function addCalls(found: Map<string, TraceLeaf>, at: SourceSite, seg: ExprSegmen
 }
 
 /**
- * What a reference in a definition reads: the symbols the graph resolves it to, or none for `github.event.inputs` in a
- * workflow that can be called, which holds the caller's event when the workflow is called (see `readsCallerEvent`), so
+ * What a reference in a definition reads: the symbols the graph resolves it to, or none for `github` in a workflow
+ * that can be called, which holds the caller's event when the workflow is called (see `readsCallerEvent`), so
  * the reference ends at that context, which the graph does not follow.
  */
 function definitionReads(index: ProjectIndex, unit: UnitDecl): Reader {
@@ -917,9 +918,11 @@ function ownEnv(index: ProjectIndex, unit: UnitDecl, site: ExprSite, ref: Locate
 
 /** Whether a reference names one member of its context: `env.NAME`, not `toJSON(env)`, `env.*` or `env[expr]`. */
 function namesMember(ref: LocatedRef): boolean {
-  const name = ref.path[0];
-  return !!name && name !== '*' && name !== '?';
+  return namesKey(ref.path[0]);
 }
+
+/** Whether a path segment names a key: it is not missing, a `*` filter or a computed `?` index. */
+const namesKey = (segment: string | undefined) => !!segment && segment !== '*' && segment !== '?';
 
 /**
  * Whether a whole object or computed key of `secrets`, `matrix`, `env` or `inputs` may hold members the files do not
@@ -932,10 +935,14 @@ function namesMember(ref: LocatedRef): boolean {
  *   through `core.exportVariable`), and so can what the runner runs before the first step: the `pre:` steps of the
  *   job's actions and a self-hosted runner's job-started hook. What they write is in the env of every later step;
  * - `inputs`, in an action: the runner puts every `with:` key of the step in it, declared or not, and only warns about
- *   the others.
+ *   the others;
+ * - `github`, when it stops at `github` or at one of its properties (`toJSON(github)`, `github.event`), or takes a
+ *   computed key or a `*` filter there (`github[x]`, `github.event.*`): the rest of the context and of the event is
+ *   there too, next to the dispatch inputs the graph reads it as.
  * A workflow's `inputs` and `github.event.inputs` hold the declared inputs only: GitHub rejects any other.
  */
 function holdsUndeclared(unit: UnitDecl, site: ExprSite, ref: LocatedRef): boolean {
+  if (ref.context === 'github') return !namesKey(ref.path[0]) || !namesKey(ref.path[1]);
   if (namesMember(ref)) return false;
   switch (ref.context) {
     case 'secrets':

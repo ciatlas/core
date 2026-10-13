@@ -1,4 +1,4 @@
-import { resolveSymbols, sym, type TraceNode, trace } from '@ciatlas/core';
+import { resolveSymbols, sym, type TraceNode, trace, usageReadsCallerEvent } from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 import { load, WF, yaml } from './helpers';
 
@@ -262,10 +262,12 @@ describe('trace upstream to runtime contexts', () => {
       `,
     });
     const t = trace(index, sym.input(`${WF}/callee.yml`, 'title'), { direction: 'up' });
-    // `github.event.inputs.x` is the dispatch input itself: a symbol, not a context.
-    expect(t.children.map((c) => c.symbol)).toEqual([
-      sym.input(`${WF}/caller.yml`, 'x'),
-      sym.input(`${WF}/caller.yml`, 'x'),
+    // `github.event.inputs.x` is the dispatch input itself: a symbol, not a context. `toJSON(github)` holds it too
+    // (#22), next to the rest of the context.
+    expect(t.children.map((c) => `${c.symbol} ${c.via?.loc.line}`)).toEqual([
+      `${WF}/caller.yml#inputs.x 14`,
+      `${WF}/caller.yml#inputs.x 19`,
+      `${WF}/caller.yml#inputs.x 27`,
     ]);
     const at = `${WF}/caller.yml › jobs`;
     expect(leavesOf(t)).toEqual([
@@ -1378,6 +1380,9 @@ describe('trace upstream: input defaults', () => {
         `context ${CALLEE} › on.workflow_call.inputs.${name}.default github.event.inputs.x @${line}:40`,
       ]);
     }
+    // Nor is either default a use of the dispatch input x downstream.
+    const down = trace(index, sym.input(CALLEE, 'x'));
+    expect([down.children, down.leaves]).toEqual([[], []]);
   });
 
   it("shows no default for a required workflow_call input, which GitHub never uses, but does for an action's", () => {
@@ -1881,6 +1886,51 @@ describe('trace: github.event.inputs in a workflow that can be called', () => {
     const g = trace(ghost, title, { direction: 'up' });
     expect(g.children.map((c) => c.via?.text)).toEqual(['${{ inputs.x || github.event.inputs.x }}']);
     expect(leavesOf(g)[0]).toBe(`context ${MID} › jobs.a: github.event.inputs.ghost`);
+    // Downstream, x is read through inputs.x only (#23): its github.event.inputs reads are not its own.
+    const down = trace(callName, x);
+    expect(down.children.map((c) => c.via?.text)).toEqual(['${{ inputs.x || github.event.inputs.x }}']);
+    expect(leavesOf(down)).toEqual([
+      `run script jobs.c › steps[0] › run: echo \${{ github.event.inputs.x }} \${{ inputs.x }}`,
+    ]);
+  });
+
+  it('ends at the context for a name no dispatch input declares in a workflow that is only dispatched', () => {
+    const ghostly = mid(`workflow_dispatch:
+        inputs:
+          d: { type: string }`).replace(
+      'title: ${{ github.event.inputs.x }}',
+      'title: ${{ github.event.inputs.ghost }}',
+    );
+    const { index: ghost } = load(files(ghostly), { validateSchema: false });
+    const t = trace(ghost, title, { direction: 'up' });
+    expect(t.children.map((c) => `${c.symbol} ${c.via?.text}`)).toEqual([
+      `${x} \${{ inputs.x || github.event.inputs.x }}`,
+    ]);
+    expect(leavesOf(t)).toEqual([
+      `context ${MID} › jobs.a: github.event.inputs.ghost`,
+      `context ${MID} › jobs.b: github.event.inputs.x`,
+    ]);
+    expect(ghost.nodes.has(sym.input(MID, 'ghost'))).toBe(false);
+  });
+
+  // GitHub looks properties up ignoring case (#28): `github.Event.INPUTS.x` is `github.event.inputs.x`.
+  it('reads github.event.inputs written in another case the same way', () => {
+    const { index: cased } = load(files(both.replaceAll('github.event.inputs.x', 'github.Event.INPUTS.x')));
+    const t = trace(cased, title, { direction: 'up' });
+    expect(t.children.map((c) => `${c.symbol} ${c.via?.note}`)).toEqual([
+      `${x} when dispatched`,
+      `${x} undefined`,
+    ]);
+    expect(leavesOf(t)).toEqual([
+      `context ${MID} › jobs.a: github.Event.INPUTS.x`,
+      `context ${MID} › jobs.b: github.Event.INPUTS.x`,
+    ]);
+    const called = trace(cased, sym.input(UPPER, 'foo')).children[0]!;
+    expect(called.children.map((c) => c.via?.text)).toEqual(['${{ inputs.x || github.Event.INPUTS.x }}']);
+    expect(trace(cased, x).children.map((c) => c.via?.text)).toEqual([
+      '${{ github.Event.INPUTS.x }}',
+      '${{ inputs.x || github.Event.INPUTS.x }}',
+    ]);
   });
 
   it('ends at the caller’s event in a workflow that is only called, as it did', () => {
@@ -2132,6 +2182,38 @@ describe('trace: input defaults and github.event.inputs', () => {
       { symbol: z, via: { note: 'when dispatched' }, children: [], leaves: [] },
     ]);
     expect(allLeaves(event)).toEqual([`context ${C} › jobs.b: github.event.inputs.z`]);
+  });
+
+  it('ends a workflow_call output that reads github at the context: it is evaluated only when the workflow is called', () => {
+    const { index } = load({
+      [TOP]: yaml`
+        on: pull_request
+        jobs:
+          t:
+            uses: ./.github/workflows/c.yml
+            with:
+              z: passed
+      `,
+      [C]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              z: { type: string }
+            outputs:
+              o: { value: '\${{ github.event.inputs.z }}' }
+          workflow_dispatch:
+            inputs:
+              z: { type: string }
+        jobs:
+          b:
+            runs-on: x
+            steps:
+              - run: echo
+      `,
+    });
+    const up = trace(index, sym.jobOutput(TOP, 't', 'o'), { direction: 'up' });
+    expect(JSON.stringify(up)).not.toContain('when dispatched');
+    expect(allLeaves(up)).toEqual([`context ${C}: github.event.inputs.z`]);
   });
 });
 
@@ -2552,5 +2634,158 @@ describe('trace: a whole env and github.event.inputs', () => {
     expect(leavesOf(up.children[0]!)).toEqual([`literal ${TOP} › jobs.t: "from-top"`]);
     expect(leavesOf(up)).toContain(event);
     expect(trace(index, sym.input(UPPER, 'q')).children[0]!.children.map((c) => c.symbol)).toEqual([v]);
+  });
+});
+
+// A whole or computed github read in a workflow that can be dispatched reads every dispatch input (#22): the debug step
+// that prints toJSON(github) uses them, and a value computed from it comes from them and from the rest of the context.
+describe('trace: whole and computed github reads (#22)', () => {
+  const DISP = `${WF}/disp.yml`;
+  const BOTH = `${WF}/both.yml`;
+  const UP = `${WF}/up.yml`;
+  const { index } = load({
+    [DISP]: yaml`
+      on:
+        workflow_dispatch:
+          inputs:
+            a: { type: string }
+            b: { type: string }
+      jobs:
+        j:
+          runs-on: x
+          outputs:
+            all: \${{ toJSON(github) }}
+            ev: \${{ toJSON(github.event.inputs) }}
+          steps:
+            - name: Dump
+              run: echo '\${{ toJSON(github) }}'
+    `,
+    [BOTH]: yaml`
+      on:
+        workflow_call:
+          inputs:
+            c: { type: string }
+            s: { type: string }
+        workflow_dispatch:
+          inputs:
+            s: { type: string }
+            d: { type: string }
+      jobs:
+        j:
+          runs-on: x
+          outputs:
+            all: \${{ toJSON(github) }}
+          steps:
+            - run: echo '\${{ toJSON(github.event) }}'
+    `,
+    [UP]: yaml`
+      on:
+        workflow_call:
+          inputs:
+            q: { type: string }
+      jobs:
+        b:
+          uses: ./.github/workflows/both.yml
+          with:
+            c: \${{ inputs.q }}
+            s: \${{ inputs.q }}
+    `,
+  });
+  const leavesOf = (t: TraceNode) => t.leaves.map((l) => `${l.role}: ${l.text}`);
+  const kids = (t: TraceNode) => t.children.map((c) => `${c.symbol}${c.via?.note ? ` (${c.via.note})` : ''}`);
+
+  it('traces a value computed from toJSON(github) up to every dispatch input and the github context', () => {
+    const t = trace(index, sym.jobOutput(DISP, 'j', 'all'), { direction: 'up' });
+    expect(kids(t)).toEqual([sym.input(DISP, 'a'), sym.input(DISP, 'b')]);
+    expect(leavesOf(t)).toEqual(['context: github']);
+    // github.event.inputs holds the dispatch inputs only.
+    const ev = trace(index, sym.jobOutput(DISP, 'j', 'ev'), { direction: 'up' });
+    expect([kids(ev), leavesOf(ev)]).toEqual([[sym.input(DISP, 'a'), sym.input(DISP, 'b')], []]);
+  });
+
+  it('lists the debug step that prints toJSON(github) among a dispatch input’s uses', () => {
+    const t = trace(index, sym.input(DISP, 'a'));
+    expect(t.children.map((c) => c.via?.text)).toEqual([
+      '${{ toJSON(github) }}',
+      '${{ toJSON(github.event.inputs) }}',
+    ]);
+    expect(t.leaves.map((l) => `${l.role} ${l.where}`)).toEqual(['run script jobs.j › steps[0] › run']);
+  });
+
+  it('reads the dispatch inputs only when dispatched in a workflow that can also be called', () => {
+    const t = trace(index, sym.jobOutput(BOTH, 'j', 'all'), { direction: 'up' });
+    expect(kids(t)).toEqual([
+      `${sym.input(BOTH, 's')} (when dispatched)`,
+      `${sym.input(BOTH, 'd')} (when dispatched)`,
+    ]);
+    expect(t.children.every((c) => c.children.length === 0 && c.leaves.length === 0)).toBe(true);
+    expect(leavesOf(t)).toEqual(['context: github']);
+    // A caller's with: value never flows on through github there: when called, github is the caller's.
+    const called = trace(index, sym.input(UP, 'q')).children;
+    expect(called.map((c) => [c.symbol, c.children.length, c.leaves.length])).toEqual([
+      [sym.input(BOTH, 'c'), 0, 0],
+      [sym.input(BOTH, 's'), 0, 0],
+    ]);
+    // From the input itself (dispatched or called), the reads are listed.
+    expect(trace(index, sym.input(BOTH, 's')).leaves).toHaveLength(1);
+    expect(trace(index, sym.input(BOTH, 'c')).leaves).toHaveLength(0);
+  });
+});
+
+// A called workflow gets its caller's `github` context, so a usage that reads an input only through `github`, directly or
+// through the step's own env, never takes in what a caller passes: rules about that value can tell it apart (#22).
+describe('usageReadsCallerEvent', () => {
+  const BOTH = `${WF}/both.yml`;
+  const DISP = `${WF}/disp.yml`;
+  const steps = yaml`
+    jobs:
+      j:
+        runs-on: x
+        strategy: { matrix: { k: [event] } }
+        steps:
+          - run: echo '\${{ github.event.inputs.target }} \${{ toJSON(github) }} \${{ github[matrix.k].inputs.target }}'
+          - env:
+              G: \${{ toJSON(github) }}
+              N: \${{ github.event.inputs.target }}
+            run: echo '\${{ env.G }} \${{ env.N }} \${{ toJSON(env) }}'
+          - env:
+              M: \${{ github.event.inputs.target }} \${{ inputs.target }}
+            run: echo '\${{ env.M }} \${{ inputs.target }}'
+  `;
+  const { index } = load({
+    [BOTH]: `on:\n  workflow_call:\n    inputs:\n      target: { type: string, required: false }\n  workflow_dispatch:\n    inputs:\n      target: { type: string, required: false }\n${steps}`,
+    [DISP]: `on:\n  workflow_dispatch:\n    inputs:\n      target: { type: string, required: false }\n${steps}`,
+  });
+  const reads = (path: string) =>
+    index
+      .usagesOf(sym.input(path, 'target'))
+      .map(
+        (u) =>
+          `${u.site.field} ${[u.ref.context, ...u.ref.path].join('.')}: ${usageReadsCallerEvent(index, u)}`,
+      );
+
+  it('tells the reads through github, or through the step’s own env values that read only github, in a workflow that can be called', () => {
+    expect(reads(BOTH)).toEqual([
+      'step.run github.event.inputs.target: true',
+      'step.run github: true',
+      'step.run github.?.inputs.target: true',
+      'step.env github: true',
+      'step.env github.event.inputs.target: true',
+      'step.run env.G: true',
+      'step.run env.N: true',
+      // A whole env reads the input through G and N, which read only github.
+      'step.run env: true',
+      'step.env github.event.inputs.target: true',
+      'step.env inputs.target: false',
+      // M reads it through inputs too: a usage for each of its two reads.
+      'step.run env.M: false',
+      'step.run env.M: false',
+      'step.run inputs.target: false',
+    ]);
+  });
+
+  it('is false in a workflow that cannot be called, whose github is its own', () => {
+    expect(reads(DISP).filter((r) => r.endsWith('true'))).toEqual([]);
+    expect(reads(DISP)).toHaveLength(13);
   });
 });
