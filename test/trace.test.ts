@@ -2029,4 +2029,47 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
       'context: env',
     ]);
   });
+
+  it('reads only the workflow_call inputs from a whole inputs in a workflow_call default', () => {
+    // A default applies when the workflow is called, and then `inputs` holds its workflow_call inputs only. A whole or
+    // computed read of it there reads each of them, `all` itself included (a cycle), and not `manual`, which only
+    // workflow_dispatch declares; they are all declared, so no `inputs` context either.
+    const CALLEE = `${WF}/callee.yml`;
+    const { index: defaults } = load({
+      [CALLEE]: yaml`
+        on:
+          workflow_dispatch:
+            inputs:
+              manual: { type: string }
+          workflow_call:
+            inputs:
+              all: { type: string, default: "\${{ toJSON(inputs) }}" }
+              pick: { type: string, default: "\${{ inputs[inputs.key] }}" }
+              key: { type: string }
+        jobs:
+          j: { runs-on: x, steps: [{ run: "echo \${{ inputs.manual }}" }] }
+      `,
+      [CALLER]: yaml`
+        on: push
+        jobs:
+          c: { uses: ./.github/workflows/callee.yml, with: { key: k } }
+      `,
+    });
+    const shown = (name: string) => {
+      const t = trace(defaults, sym.input(CALLEE, name), { direction: 'up' });
+      return {
+        children: t.children.map((c) => `${c.symbol.slice(CALLEE.length)}${c.stop ? ` (${c.stop})` : ''}`),
+        leaves: leavesOf(t),
+      };
+    };
+    const omitted = `omitted ${CALLER} › jobs.c: (not passed)`;
+    expect(shown('all')).toEqual({
+      children: ['#inputs.all (cycle)', '#inputs.pick', '#inputs.key (seen)'],
+      leaves: [omitted],
+    });
+    expect(shown('pick')).toEqual({
+      children: ['#inputs.all', '#inputs.pick (cycle)', '#inputs.key (seen)'],
+      leaves: [omitted],
+    });
+  });
 });
