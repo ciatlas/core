@@ -1818,7 +1818,8 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
     const t = trace(index, sym.input(A, 'v'), { direction: 'up' });
     expect(t.children.map((c) => c.symbol)).toEqual([sym.env(W, undefined, 'TOP')]);
     const at = `${W} › jobs.j › steps[1]`;
-    // The step runs after another, which may have written variables to $GITHUB_ENV: env stays a source too.
+    // Steps, and what the runner runs before the first one, may have written variables to $GITHUB_ENV: env stays a source
+    // too.
     expect(leavesOf(t)).toEqual([
       `literal ${at}: "plain"`,
       `context ${at}: github.sha`,
@@ -1826,7 +1827,7 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
     ]);
   });
 
-  it('keeps the env context next to the members once any step has run', () => {
+  it('keeps the env context next to the members in a job, before its first step too', () => {
     const B = '.github/actions/b';
     const { index: env } = load({
       [W]: yaml`
@@ -1842,6 +1843,7 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
               - uses: ./.github/actions/a
                 with:
                   v: \${{ toJSON(env) }}
+              - uses: step-security/harden-runner@v2
               - run: ./scripts/set-env.sh
               - uses: ./.github/actions/a
                 with:
@@ -1871,13 +1873,14 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
       const t = trace(env, symbol, { direction: 'up' });
       return [...t.children.map((c) => `${c.symbol} ${c.via?.loc.line}`), ...leavesOf(t)];
     };
-    // Step 0 runs first: env holds what the files declare. Step 2 runs after a script, which may write to $GITHUB_ENV
-    // (here through a script file, which the workflow does not show), as may any step. In action b, env also holds
-    // its caller's env.
+    // Any step can write to $GITHUB_ENV, here step 2 through a script file, which the workflow does not show. Before
+    // step 0, the runner runs the pre: steps of the job's actions (the one harden-runner may have) and, on a self-hosted
+    // runner, its job-started hook: they can write to it too. In action b, env also holds its caller's env.
     expect(ends(sym.input(A, 'v'))).toEqual([
       `${sym.env(W, undefined, 'W')} 12`,
-      `${sym.env(W, undefined, 'W')} 16`,
-      `context ${W} › jobs.j › steps[2]: env`,
+      `${sym.env(W, undefined, 'W')} 17`,
+      `context ${W} › jobs.j › steps[0]: env`,
+      `context ${W} › jobs.j › steps[3]: env`,
       `literal ${B} › steps[0]: "lit"`,
       `context ${B} › steps[0]: env`,
     ]);

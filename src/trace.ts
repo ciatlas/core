@@ -786,9 +786,10 @@ function namesMember(ref: LocatedRef): boolean {
  * them:
  * - `secrets`, always: `GITHUB_TOKEN` is always there, and `secrets: inherit` passes the caller's other secrets;
  * - `matrix`, when the matrix or part of its `include` is computed at runtime (see `MatrixDecl.includeDynamic`);
- * - `env`, in an action, which also has its caller's env, and in a job once a step has run: any step can write
- *   `$GITHUB_ENV` (a `run:` script, also through a script file it runs, or an action, through
- *   `core.exportVariable`), and what it writes is in the env of the steps after it;
+ * - `env`, always: in an action it also holds its caller's env, and in a job what was written to `$GITHUB_ENV` before
+ *   the site is evaluated. Any step can write it (a `run:` script, also through a script file it runs, or an action,
+ *   through `core.exportVariable`), and so can what the runner runs before the first step: the `pre:` steps of the
+ *   job's actions and a self-hosted runner's job-started hook. What they write is in the env of every later step;
  * - `inputs`, in an action: the runner puts every `with:` key of the step in it, declared or not, and only warns about
  *   the others.
  * A workflow's `inputs` and `github.event.inputs` hold the declared inputs only: GitHub rejects any other.
@@ -797,11 +798,10 @@ function holdsUndeclared(unit: UnitDecl, site: ExprSite, ref: LocatedRef): boole
   if (namesMember(ref)) return false;
   switch (ref.context) {
     case 'secrets':
+    case 'env':
       return true;
     case 'matrix':
       return keysAtRuntime(jobOf(unit, site)?.matrix);
-    case 'env':
-      return unit.kind === 'action' || stepRanBefore(unit, site);
     case 'inputs':
       return unit.kind === 'action';
     default:
@@ -817,16 +817,6 @@ function keysAtRuntime(matrix: MatrixDecl | undefined): boolean {
 /** The job a site of a workflow is in. */
 function jobOf(unit: UnitDecl, site: ExprSite): JobDecl | undefined {
   return unit.kind === 'workflow' && site.job ? unit.jobs[site.job] : undefined;
-}
-
-/**
- * Whether a step of the site's job has run when the site is evaluated: one before its step, or any for a job output,
- * which is evaluated once the steps are done. The job's other settings are evaluated before its first step.
- */
-function stepRanBefore(unit: UnitDecl, site: ExprSite): boolean {
-  const steps = jobOf(unit, site)?.steps ?? [];
-  if (site.step !== undefined) return steps.some((s) => s.index < site.step!);
-  return site.field === 'job.output' && steps.length > 0;
 }
 
 /** Keeps the first leaf of each key: the place where the source is first written. */
