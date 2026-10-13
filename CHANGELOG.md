@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.0.0](https://github.com/ciatlas/core/compare/v0.4.0...v1.0.0) (2026-10-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* **graph:** In a workflow that can be dispatched, `usagesOf` now lists a whole or computed read of `github` (`toJSON(github)`, `github[x]`, `github.event[x]`, `toJSON(github.event.inputs)`), and a read (`env.G`, `toJSON(env)`) of a step's own env value that holds one, as a whole usage of each `workflow_dispatch` input. `github.event.inputs.<name>` resolves only to a `workflow_dispatch` input, in any letter case, and `github` in an input's default or a `workflow_call` output's value reads no input. `readsContextDynamically(unit, 'inputs')` no longer counts any `github` read, so it returns false for a unit whose only dynamic reads are `toJSON(github.event)`, `toJSON(github.event.inputs)` or `github.event.inputs[x]`. A rule about the value a caller passes should skip the usages for which the new `usageReadsCallerEvent(index, usage)` is true: in a workflow that can be called, they read the caller's `github` context instead.
+
+### Features
+
+* **trace:** export usageReadsCallerEvent for rules about the value a caller passes ([#34](https://github.com/ciatlas/core/issues/34)) ([f5f4212](https://github.com/ciatlas/core/commit/f5f421270341be3bf6ccc5199e5dd6371bc119c5))
+
+
+### Bug Fixes
+
+* **graph:** compare context property names in any letter case, as GitHub does ([#34](https://github.com/ciatlas/core/issues/34)) ([f5f4212](https://github.com/ciatlas/core/commit/f5f421270341be3bf6ccc5199e5dd6371bc119c5))
+* **graph:** read a whole or computed github as the dispatch inputs it holds, and none where the workflow is only called ([#34](https://github.com/ciatlas/core/issues/34)) ([f5f4212](https://github.com/ciatlas/core/commit/f5f421270341be3bf6ccc5199e5dd6371bc119c5))
+* **graph:** resolve github.event.inputs.&lt;name&gt; only to a workflow_dispatch input ([#34](https://github.com/ciatlas/core/issues/34)) ([f5f4212](https://github.com/ciatlas/core/commit/f5f421270341be3bf6ccc5199e5dd6371bc119c5))
+
 ## [0.4.0](https://github.com/ciatlas/core/compare/v0.3.0...v0.4.0) (2026-10-13)
 
 
