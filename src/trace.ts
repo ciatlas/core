@@ -485,7 +485,7 @@ function inheritParents(index: ProjectIndex, symbol: string, parent: Parent): Tr
  * `secrets: inherit` (see `inheritedNames`): one parent per secret and expression, each the workflow's secret, which
  * `inheritParents` follows on up. The graph links the secrets the workflow declares (see `ProjectIndex.readsOf`), and
  * those the expression also reads by name, which `flowParents` lists already; downstream, `inheritedWholeReads` goes
- * the other way.
+ * the other way. The read's `secrets` context leaf stands for the secrets it gets that no parent lists.
  */
 function inheritedWholeParents(index: ProjectIndex, symbol: string, parent: Parent): TraceNode[] {
   return index.definitionsOf(symbol).flatMap((def) => {
@@ -518,10 +518,16 @@ function linkedSecrets(index: ProjectIndex, symbol: string, site: ExprSite): Set
 }
 
 /**
- * The secrets the files name that a workflow gets through `secrets: inherit`, once each ignoring case: those each
- * caller that hands it every secret declares or reads by name, and the ones that caller gets the same way, without
- * the automatic `GITHUB_TOKEN` or the secrets the workflow declares. A caller run by an event also has secrets no file
- * names: the `secrets` context leaf stands for them (see `holdsUndeclared`).
+ * The secrets a workflow gets through `secrets: inherit` that the callers handing them on name themselves, once each
+ * ignoring case: those each workflow that hands it every secret, directly or through others that do, declares or reads
+ * by name, without the automatic `GITHUB_TOKEN` or the secrets the workflow declares.
+ *
+ * Next to these and the secrets the graph links, the read's `secrets` context leaf (see `holdsUndeclared`) stands for
+ * every other secret the workflow gets: the automatic `GITHUB_TOKEN`, and each secret those callers have without
+ * declaring or reading it by name themselves. That is a secret only another of their callees reads by name (when
+ * top.yml hands every secret to named.yml, which reads `Z`, and to this workflow, `Z` is not listed here, though the
+ * trace down from top.yml's `Z` reaches this read), or one no file names, such as a repository secret of a workflow
+ * run by an event.
  */
 function inheritedNames(index: ProjectIndex, wf: WorkflowDecl): string[] {
   const names = new Map<string, string>();
