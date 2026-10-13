@@ -12,6 +12,7 @@ import type {
   WorkflowDecl,
 } from './ir';
 import { lookup } from './ir';
+import { BUILTIN_SECRETS, refsOf } from './queries';
 import type { Loc } from './source';
 
 export type SymbolKind =
@@ -78,6 +79,8 @@ export interface Usage {
 interface Read {
   symbol: string;
   whole: boolean;
+  /** For a whole read, the reference that names the symbol, which labels its node when it has none yet. */
+  member?: LocatedRef;
 }
 
 /** A path segment that names no key: the end of the path, a `*` filter or a `?` computed index. */
@@ -88,12 +91,37 @@ const isKey = (s: string | undefined, key: string) => s?.toLowerCase() === key;
 
 /** The reads of each member of a whole object, once per symbol, as reads the reference does not name. */
 function wholeReads(reads: Read[]): Read[] {
-  return [...new Set(reads.map((r) => r.symbol))].map((symbol) => ({ symbol, whole: true }));
+  const first = new Map<string, Read>();
+  for (const r of reads) if (!first.has(r.symbol)) first.set(r.symbol, { ...r, whole: true });
+  return [...first.values()];
 }
 
 /** The names of declared inputs, secrets or env variables, as declared. */
 const declaredNames = (decls: Record<string, { name: string }> | undefined) =>
   Object.values(decls ?? {}).map((d) => d.name);
+
+/** The secret every workflow holds, in the spelling GitHub documents it by. */
+const GITHUB_TOKEN = 'GITHUB_TOKEN';
+
+/** The secrets a workflow reads by name, each spelling once, as written. */
+function namedSecrets(wf: WorkflowDecl): string[] {
+  const names = new Set<string>();
+  for (const { ref } of refsOf(wf))
+    if (ref.context === 'secrets' && !computed(ref.path[0])) names.add(ref.path[0]!);
+  return [...names];
+}
+
+/** `names`, then each of `more` whose name, ignoring case, is not among them yet. */
+function addNames(names: string[], more: string[]): string[] {
+  const seen = new Set(names.map((n) => n.toLowerCase()));
+  const added: string[] = [];
+  for (const name of more) {
+    if (seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    added.push(name);
+  }
+  return [...names, ...added];
+}
 
 /** The inputs a unit declares (a workflow's `workflow_call` and `workflow_dispatch` inputs of one name are one). */
 function inputNames(unit: UnitDecl): string[] {
@@ -318,6 +346,8 @@ export class ProjectIndex {
   readonly actionUses: ActionUse[] = [];
   private readonly sitesById = new Map<number, ExprSite>();
   private readonly definitions = new Map<string, Definition[]>();
+  /** The secrets a whole `secrets` reads in each workflow, by path, once computed (see `secretNames`). */
+  private readonly heldSecrets = new Map<string, string[]>();
 
   constructor(readonly project: Project) {
     for (const wf of project.workflows.values()) this.indexWorkflow(wf);
@@ -687,7 +717,9 @@ export class ProjectIndex {
    *   `github`, and an action its job's, so there they read none of the unit's inputs, nor in an input's default or a
    *   `workflow_call` output's value, which GitHub evaluates only when the workflow is called;
    * - `toJSON(matrix)` or `matrix[inputs.key]`: every key of the job's matrix;
-   * - `toJSON(secrets)` or `secrets[inputs.name]`: every secret the workflow declares under `workflow_call`;
+   * - `toJSON(secrets)` or `secrets[inputs.name]`: every secret the workflow holds that the files name (see
+   *   `secretNames`): those it declares under `workflow_call` or reads by name, `GITHUB_TOKEN`, and those callers that
+   *   hand it every secret through `secrets: inherit` name;
    * - `toJSON(env)` or `env[inputs.name]`: every env variable in scope, a step's own read through their values.
    *
    * Variables are set in the repository's settings, not in its files, so a whole `vars` reads nothing. See
@@ -701,9 +733,15 @@ export class ProjectIndex {
     const one = this.resolveRef(unit, site, ref);
     if (one) return [{ symbol: one, whole: false }];
     const members = this.memberRefs(unit, site, ref);
-    if (members) return wholeReads(members.flatMap((m) => this.reads(unit, site, m)));
+    if (members) return wholeReads(members.flatMap((m) => this.memberReads(unit, site, m)));
     if (ref.context === 'env') return this.ownEnvReads(unit, site, ref);
     return this.outputReads(unit, site, ref).map((symbol) => ({ symbol, whole: true }));
+  }
+
+  /** What a reference naming one member of a whole object reads: the member, or what a step's own env value reads. */
+  private memberReads(unit: UnitDecl, site: ExprSite, member: LocatedRef): Read[] {
+    const one = this.resolveRef(unit, site, member);
+    return one ? [{ symbol: one, whole: true, member }] : this.reads(unit, site, member);
   }
 
   /** A step's own env value is not a symbol: a read of it reads what the value reads (from the outer env). */
@@ -736,12 +774,52 @@ export class ProjectIndex {
       case 'matrix':
         return matrixKeys(jobAt(unit, site));
       case 'secrets':
-        return unit.kind === 'workflow' ? declaredNames(unit.call?.secrets) : [];
+        return unit.kind === 'workflow' ? this.secretNames(unit) : [];
       case 'env':
         return this.envNames(unit, site);
       default:
         return undefined;
     }
+  }
+
+  /**
+   * The secrets a whole `secrets` holds in a workflow that the files name: each one it declares under `workflow_call`,
+   * each spelling it reads by name, then those it gets through `secrets: inherit` that the callers handing them on name
+   * (see `inheritedSecretNames`), and `GITHUB_TOKEN`, which GitHub gives every workflow. GitHub looks secret names up
+   * ignoring case, so those last two leave out a secret the workflow names in another case. A secret that neither the
+   * workflow nor those callers name, such as a repository secret no file names or one only another of their callees
+   * reads, has no symbol here.
+   */
+  private secretNames(wf: WorkflowDecl): string[] {
+    const known = this.heldSecrets.get(wf.path);
+    if (known) return known;
+    const own = [...declaredNames(wf.call?.secrets), ...namedSecrets(wf)];
+    const names = addNames(own, [...this.inheritedSecretNames(wf), GITHUB_TOKEN]);
+    this.heldSecrets.set(wf.path, names);
+    return names;
+  }
+
+  /**
+   * The secrets a workflow gets through `secrets: inherit` that the callers handing them on name: those each workflow
+   * that hands it every secret, directly or through others that do, declares or reads by name. Not `GITHUB_TOKEN`,
+   * which `secrets: inherit` does not pass.
+   */
+  private inheritedSecretNames(wf: WorkflowDecl): string[] {
+    return this.inheritingCallers(wf)
+      .flatMap((caller) => [...declaredNames(caller.call?.secrets), ...namedSecrets(caller)])
+      .filter((name) => !BUILTIN_SECRETS.has(name.toLowerCase()));
+  }
+
+  /** The workflows that hand `wf` every secret through `secrets: inherit`, and those that hand them every secret, … */
+  private inheritingCallers(wf: WorkflowDecl): WorkflowDecl[] {
+    const found = new Map<string, WorkflowDecl>([[wf.path, wf]]);
+    // A Map's iteration visits the entries added while it runs: each caller found is searched in turn.
+    for (const unit of found.values()) {
+      for (const c of this.callersOf(unit.path))
+        if (c.job.secretsInherit && !found.has(c.caller.path)) found.set(c.caller.path, c.caller);
+    }
+    found.delete(wf.path);
+    return [...found.values()];
   }
 
   /** The env variables in scope at a site: the step's own, the job's and the workflow's. */
@@ -885,10 +963,12 @@ export class ProjectIndex {
   private addUsage(unit: UnitDecl, site: ExprSite, ref: LocatedRef, read: Read, sink: string | undefined) {
     const { symbol } = read;
     if (!this.nodes.has(symbol)) {
+      // A secret only a whole read reads is labelled by its name (`secrets.GITHUB_TOKEN`), not by `secrets`.
+      const named = read.member ?? ref;
       this.node({
         id: symbol,
-        kind: ref.context === 'vars' ? 'var' : 'unresolved',
-        label: `${ref.context}.${ref.path.join('.')}`,
+        kind: named.context === 'vars' ? 'var' : 'unresolved',
+        label: `${named.context}.${named.path.join('.')}`,
         unit: unit.path,
       });
     }

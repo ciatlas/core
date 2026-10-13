@@ -1118,9 +1118,27 @@ describe('ProjectIndex.readsOf: whole inputs, matrix, secrets and env', () => {
     ],
     ['a computed matrix key reads every key', WHOLE, 'matrix.?.name', run, [matrix('os'), matrix('extra')]],
     ['toJSON(matrix) in a job without a matrix reads nothing', WHOLE, 'matrix', { job: 'k' }, []],
-    ['toJSON(secrets) reads every declared secret', WHOLE, 'secrets', run, [sym.secret(WHOLE, 'TOKEN')]],
-    ['a computed secret reads every declared secret', WHOLE, 'secrets.?', run, [sym.secret(WHOLE, 'TOKEN')]],
-    ['toJSON(secrets) without workflow_call reads nothing', PUSH, 'secrets', {}, []],
+    [
+      'toJSON(secrets) reads every declared secret, and GITHUB_TOKEN',
+      WHOLE,
+      'secrets',
+      run,
+      [sym.secret(WHOLE, 'TOKEN'), sym.secret(WHOLE, 'GITHUB_TOKEN')],
+    ],
+    [
+      'a computed secret reads every declared secret, and GITHUB_TOKEN',
+      WHOLE,
+      'secrets.?',
+      run,
+      [sym.secret(WHOLE, 'TOKEN'), sym.secret(WHOLE, 'GITHUB_TOKEN')],
+    ],
+    [
+      'toJSON(secrets) without workflow_call reads GITHUB_TOKEN',
+      PUSH,
+      'secrets',
+      {},
+      [sym.secret(PUSH, 'GITHUB_TOKEN')],
+    ],
     [
       'toJSON(github.event.inputs) reads every dispatch input',
       WHOLE,
@@ -1566,5 +1584,182 @@ describe('ProjectIndex.readsOf: github in a workflow_call output', () => {
 
   it('still reads it in the job whose output the workflow output reads', () => {
     expect(index.usagesOf(sym.input(W, 'target')).map((u) => u.site.field)).toEqual(['job.output']);
+  });
+});
+
+// A whole or computed `secrets` reads every secret the workflow holds: those it declares, those it reads by name, the
+// automatic GITHUB_TOKEN, and through `secrets: inherit` every secret its callers have (#27).
+describe('ProjectIndex.readsOf: every secret a whole secrets holds (#27)', () => {
+  const TOP = `${WF}/top.yml`;
+  const MID = `${WF}/mid.yml`;
+  const LIB = `${WF}/lib.yml`;
+  const LEAF = `${WF}/leaf.yml`;
+  const STRICT = `${WF}/strict.yml`;
+  const { index } = load({
+    [TOP]: yaml`
+      on: push
+      jobs:
+        call:
+          uses: ./.github/workflows/lib.yml
+          secrets: inherit
+        through:
+          uses: ./.github/workflows/mid.yml
+          secrets: inherit
+        strict:
+          uses: ./.github/workflows/strict.yml
+          secrets:
+            DECLARED: \${{ secrets.DEPLOY }}
+        use:
+          runs-on: x
+          outputs:
+            all: \${{ toJSON(secrets) }}
+          steps:
+            - run: echo '\${{ toJSON(secrets) }}' \${{ secrets.DEPLOY }} \${{ secrets.Npm }}
+    `,
+    [MID]: yaml`
+      on:
+        workflow_call:
+          secrets:
+            MINE: {}
+      jobs:
+        call:
+          uses: ./.github/workflows/leaf.yml
+          secrets: inherit
+    `,
+    [LIB]: yaml`
+      on:
+        workflow_call:
+          inputs:
+            k: { type: string }
+          secrets:
+            DECLARED: {}
+      jobs:
+        j:
+          runs-on: x
+          outputs:
+            all: \${{ toJSON(secrets) }}
+          steps:
+            - run: echo \${{ secrets[inputs.k] }} \${{ secrets.npm }} \${{ secrets.NPM }}
+    `,
+    [LEAF]: yaml`
+      on: workflow_call
+      jobs:
+        j:
+          runs-on: x
+          steps:
+            - run: echo '\${{ toJSON(secrets) }}' \${{ secrets.github_token }}
+    `,
+    [STRICT]: yaml`
+      on:
+        workflow_call:
+          secrets:
+            DECLARED: {}
+      jobs:
+        j:
+          runs-on: x
+          steps:
+            - run: echo '\${{ toJSON(secrets) }}' \${{ secrets.OTHER }}
+    `,
+  });
+  /** What the first whole or computed `secrets` reference of a workflow reads. */
+  const whole = (file: string) => {
+    const unit = index.unit(file)!;
+    const { site, ref } = [...refsOf(unit)].find(
+      ({ ref }) => ref.context === 'secrets' && (ref.path.length === 0 || ref.path[0] === '?'),
+    )!;
+    return index.readsOf(unit, site, ref);
+  };
+  const usages = (symbol: string) =>
+    index
+      .usagesOf(symbol)
+      .map((u) => `${u.site.field} ${[u.ref.context, ...u.ref.path].join('.')}${u.whole ? ' (whole)' : ''}`);
+
+  it.each([
+    [
+      'a workflow run by an event: the secrets it reads by name, each spelling, and GITHUB_TOKEN',
+      TOP,
+      [sym.secret(TOP, 'DEPLOY'), sym.secret(TOP, 'Npm'), sym.secret(TOP, 'GITHUB_TOKEN')],
+    ],
+    [
+      'a callee given every secret: its declared and named ones, then its callers’ in the first caller’s spelling',
+      LIB,
+      [
+        sym.secret(LIB, 'DECLARED'),
+        sym.secret(LIB, 'npm'),
+        sym.secret(LIB, 'NPM'),
+        sym.secret(LIB, 'DEPLOY'),
+        sym.secret(LIB, 'GITHUB_TOKEN'),
+      ],
+    ],
+    [
+      'a callee given every secret through another: what each workflow on the way names, in its own spelling of GITHUB_TOKEN',
+      LEAF,
+      [
+        sym.secret(LEAF, 'github_token'),
+        sym.secret(LEAF, 'MINE'),
+        sym.secret(LEAF, 'DEPLOY'),
+        sym.secret(LEAF, 'Npm'),
+      ],
+    ],
+    [
+      'a callee given secrets by name: its own, and GITHUB_TOKEN',
+      STRICT,
+      [sym.secret(STRICT, 'DECLARED'), sym.secret(STRICT, 'OTHER'), sym.secret(STRICT, 'GITHUB_TOKEN')],
+    ],
+  ] as const)('%s', (_, file, expected) => {
+    expect(whole(file)).toEqual(expected);
+  });
+
+  it('lists each whole read as a usage of those secrets, next to the reads by name', () => {
+    expect(usages(sym.secret(TOP, 'DEPLOY'))).toEqual([
+      'job.secrets secrets.DEPLOY',
+      'job.output secrets (whole)',
+      'step.run secrets (whole)',
+      'step.run secrets.DEPLOY',
+    ]);
+    // lib.yml reads `DEPLOY` only as a whole, from top.yml through `secrets: inherit`.
+    expect(usages(sym.secret(LIB, 'DEPLOY'))).toEqual([
+      'job.output secrets (whole)',
+      'step.run secrets.? (whole)',
+    ]);
+    expect(usages(sym.secret(LIB, 'npm'))).toEqual([
+      'job.output secrets (whole)',
+      'step.run secrets.? (whole)',
+      'step.run secrets.npm',
+    ]);
+    expect(usages(sym.secret(TOP, 'GITHUB_TOKEN'))).toEqual([
+      'job.output secrets (whole)',
+      'step.run secrets (whole)',
+    ]);
+  });
+
+  it('adds a node for a secret only a whole read reads, labelled by its name', () => {
+    expect(index.nodes.get(sym.secret(TOP, 'GITHUB_TOKEN'))).toEqual({
+      id: sym.secret(TOP, 'GITHUB_TOKEN'),
+      kind: 'unresolved',
+      label: 'secrets.GITHUB_TOKEN',
+      unit: TOP,
+    });
+    expect(index.nodes.get(sym.secret(LIB, 'DEPLOY'))).toMatchObject({
+      kind: 'unresolved',
+      label: 'secrets.DEPLOY',
+    });
+    // A secret only a caller names, which no whole read of mid.yml takes, has none.
+    expect(index.nodes.has(sym.secret(MID, 'DEPLOY'))).toBe(false);
+  });
+
+  it('lets each secret a whole read takes flow into what the site defines', () => {
+    expect(index.incoming(sym.jobOutput(LIB, 'j', 'all'), 'flows').map((e) => e.from)).toEqual([
+      sym.secret(LIB, 'DECLARED'),
+      sym.secret(LIB, 'npm'),
+      sym.secret(LIB, 'NPM'),
+      sym.secret(LIB, 'DEPLOY'),
+      sym.secret(LIB, 'GITHUB_TOKEN'),
+    ]);
+    expect(index.incoming(sym.jobOutput(TOP, 'use', 'all'), 'flows').map((e) => e.from)).toEqual([
+      sym.secret(TOP, 'DEPLOY'),
+      sym.secret(TOP, 'Npm'),
+      sym.secret(TOP, 'GITHUB_TOKEN'),
+    ]);
   });
 });

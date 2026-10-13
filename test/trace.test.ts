@@ -958,17 +958,22 @@ describe('trace: a read of every secret behind secrets: inherit (#20)', () => {
       lines(trace(index, sym.secret(MID, 'deploy'))),
     );
     expect(declared.usagesOf(sym.secret(LEAF, 'deploy'))).toHaveLength(4);
-    expect(index.usagesOf(sym.secret(LEAF, 'deploy'))).toEqual([]);
+    // So are its usages (#27).
+    expect(index.usagesOf(sym.secret(LEAF, 'deploy')).map((u) => [u.site.field, u.whole])).toEqual(
+      declared.usagesOf(sym.secret(LEAF, 'deploy')).map((u) => [u.site.field, u.whole]),
+    );
   });
 
   it('traces where the callee reads every secret up to the secrets its callers have, and the context', () => {
     const { index } = load(sinks());
     expect(lines(trace(index, sym.jobOutput(LEAF, 'a', 'all'), { direction: 'up' }))).toEqual([
       sym.jobOutput(LEAF, 'a', 'all'),
-      // GITHUB_TOKEN is always among the secrets, and mid.yml's callers may pass it more.
+      // mid.yml's callers may pass more secrets than the files name.
       '  context: secrets',
       `  ${sym.secret(LEAF, 'deploy')} via \${{ toJSON(secrets) }}`,
       `    ${sym.secret(MID, 'deploy')} via secrets: inherit (jobs.call)`,
+      // leaf.yml's own, which GitHub gives every workflow (#27).
+      `  ${sym.secret(LEAF, 'GITHUB_TOKEN')} via \${{ toJSON(secrets) }}`,
     ]);
     expect(lines(trace(index, sym.input(A, 'v'), { direction: 'up' }))).toEqual([
       sym.input(A, 'v'),
@@ -976,6 +981,7 @@ describe('trace: a read of every secret behind secrets: inherit (#20)', () => {
       '  context: github.event.action',
       `  ${sym.secret(LEAF, 'deploy')} via \${{ env.ALL }}`,
       `    ${sym.secret(MID, 'deploy')} via secrets: inherit (jobs.call)`,
+      `  ${sym.secret(LEAF, 'GITHUB_TOKEN')} via \${{ env.ALL }}`,
     ]);
   });
 
@@ -1010,6 +1016,7 @@ describe('trace: a read of every secret behind secrets: inherit (#20)', () => {
       `  ${sym.secret(LEAF, 'NPM')} via \${{ toJSON(secrets) }}`,
       `    ${sym.secret(MID, 'NPM')} via secrets: inherit (jobs.call)`,
       `      ${sym.secret(TOP, 'NPM')} via secrets: inherit (jobs.call)`,
+      `  ${sym.secret(LEAF, 'GITHUB_TOKEN')} via \${{ toJSON(secrets) }}`,
     ]);
   });
 
@@ -1032,6 +1039,7 @@ describe('trace: a read of every secret behind secrets: inherit (#20)', () => {
       '  context: secrets',
       `  ${sym.secret(LEAF, 'deploy')} via \${{ secrets.deploy }} \${{ toJSON(secrets) }}`,
       `    ${sym.secret(MID, 'deploy')} via secrets: inherit (jobs.call)`,
+      `  ${sym.secret(LEAF, 'GITHUB_TOKEN')} via \${{ secrets.deploy }} \${{ toJSON(secrets) }}`,
     ]);
     // Down, one child per expression, and a use per reference, as for a declared secret read both ways.
     expect(lines(trace(index, sym.secret(MID, 'deploy')))).toEqual([
@@ -1064,6 +1072,7 @@ describe('trace: a read of every secret behind secrets: inherit (#20)', () => {
       '  context: secrets',
       `  ${sym.secret(LEAF, 'deploy')} via \${{ secrets.deploy }} \${{ toJSON(secrets) }}`,
       `    ${sym.secret(MID, 'DEPLOY')} via secrets: inherit (jobs.call)`,
+      `  ${sym.secret(LEAF, 'GITHUB_TOKEN')} via \${{ secrets.deploy }} \${{ toJSON(secrets) }}`,
     ]);
   });
 
@@ -1110,9 +1119,13 @@ describe('trace: a read of every secret behind secrets: inherit (#20)', () => {
       sym.secret(LEAF, 'deploy'),
     ]);
     expect(trace(index, sym.secret(MID, 'GITHUB_TOKEN')).children).toEqual([]);
-    // Up from leaf.yml, mid.yml's secrets but its GITHUB_TOKEN.
+    // Up from leaf.yml, mid.yml's secrets but its GITHUB_TOKEN: leaf.yml has its own, which has no parent.
     const up = trace(index, sym.jobOutput(LEAF, 'a', 'all'), { direction: 'up' });
-    expect(up.children.map((c) => c.symbol)).toEqual([sym.secret(LEAF, 'deploy'), sym.secret(LEAF, 'other')]);
+    expect(up.children.map((c) => [c.symbol, c.children.length])).toEqual([
+      [sym.secret(LEAF, 'deploy'), 1],
+      [sym.secret(LEAF, 'other'), 1],
+      [sym.secret(LEAF, 'GITHUB_TOKEN'), 0],
+    ]);
     // declares.yml's own read is of its declared secret, which comes from mid.yml's binding, and the context.
     const own = trace(index, sym.secret(`${WF}/declares.yml`, 'deploy'), { direction: 'up' });
     expect(own.children.map((c) => [c.symbol, c.via?.text])).toEqual([
@@ -1166,15 +1179,92 @@ describe('trace: a read of every secret behind secrets: inherit (#20)', () => {
     expect(t.children.map((c) => c.symbol)).toEqual([sym.secret(LEAF, 'deploy')]);
     expect(t.children[0]!.leaves.map((l) => l.role)).toEqual(['run script', 'step env']);
     const up = trace(index, sym.jobOutput(LEAF, 'a', 'all'), { direction: 'up' });
-    expect(up.children.map((c) => c.symbol)).toEqual([sym.secret(LEAF, 'deploy')]);
+    expect(up.children.map((c) => c.symbol)).toEqual([
+      sym.secret(LEAF, 'deploy'),
+      sym.secret(LEAF, 'GITHUB_TOKEN'),
+    ]);
   });
 
-  it('leaves a whole read of a workflow no caller hands every secret to as it was', () => {
+  it('reads only GITHUB_TOKEN in a whole read of a workflow no caller hands every secret to', () => {
     const { index } = load({ ...sinks(), [MID]: files[MID]!.replace('secrets: inherit', 'secrets: {}') });
     expect(trace(index, sym.secret(MID, 'deploy')).children).toEqual([]);
     expect(lines(trace(index, sym.jobOutput(LEAF, 'a', 'all'), { direction: 'up' }))).toEqual([
       sym.jobOutput(LEAF, 'a', 'all'),
       '  context: secrets',
+      `  ${sym.secret(LEAF, 'GITHUB_TOKEN')} via \${{ toJSON(secrets) }}`,
+    ]);
+  });
+});
+
+describe('trace: every secret a whole read reads (#27)', () => {
+  const TOP = `${WF}/top.yml`;
+  const LIB = `${WF}/lib.yml`;
+  // top.yml, run by an event, reads `DEPLOY` by name and as a whole; it hands every secret to lib.yml, which reads it
+  // as `deploy` and as a whole.
+  const { index } = load({
+    [TOP]: yaml`
+      on: push
+      jobs:
+        call:
+          uses: ./.github/workflows/lib.yml
+          secrets: inherit
+        use:
+          runs-on: x
+          outputs:
+            all: \${{ toJSON(secrets) }}
+          steps:
+            - run: echo \${{ secrets.DEPLOY }}
+    `,
+    [LIB]: yaml`
+      on: workflow_call
+      jobs:
+        j:
+          runs-on: x
+          outputs:
+            all: \${{ toJSON(secrets) }}
+          steps:
+            - run: echo \${{ secrets.deploy }}
+    `,
+  });
+  const lines = (t: TraceNode, indent = ''): string[] => [
+    `${indent}${t.symbol}${t.via ? ` via ${t.via.text}${t.via.note ? ` (${t.via.note})` : ''}` : ''}${t.stop ? ` [${t.stop}]` : ''}`,
+    ...t.leaves.map((l) => `${indent}  ${l.role}: ${l.text}`),
+    ...t.children.flatMap((c) => lines(c, `${indent}  `)),
+  ];
+
+  it('follows a secret to where its workflow reads every secret, also in a workflow run by an event', () => {
+    expect(lines(trace(index, sym.secret(TOP, 'DEPLOY')))).toEqual([
+      sym.secret(TOP, 'DEPLOY'),
+      '  run script: echo ${{ secrets.DEPLOY }}',
+      `  ${sym.jobOutput(TOP, 'use', 'all')} via \${{ toJSON(secrets) }}`,
+      `  ${sym.secret(LIB, 'deploy')} via secrets: inherit (jobs.call)`,
+      '    run script: echo ${{ secrets.deploy }}',
+      `    ${sym.jobOutput(LIB, 'j', 'all')} via \${{ toJSON(secrets) }}`,
+    ]);
+  });
+
+  it('follows GITHUB_TOKEN to where its workflow reads every secret, and no further', () => {
+    expect(lines(trace(index, sym.secret(TOP, 'GITHUB_TOKEN')))).toEqual([
+      sym.secret(TOP, 'GITHUB_TOKEN'),
+      `  ${sym.jobOutput(TOP, 'use', 'all')} via \${{ toJSON(secrets) }}`,
+    ]);
+  });
+
+  it('traces a read of every secret up to each one its workflow holds that the files name, and the context', () => {
+    expect(lines(trace(index, sym.jobOutput(TOP, 'use', 'all'), { direction: 'up' }))).toEqual([
+      sym.jobOutput(TOP, 'use', 'all'),
+      // The repository's secrets no file names.
+      '  context: secrets',
+      `  ${sym.secret(TOP, 'DEPLOY')} via \${{ toJSON(secrets) }}`,
+      `  ${sym.secret(TOP, 'GITHUB_TOKEN')} via \${{ toJSON(secrets) }}`,
+    ]);
+    // lib.yml's own spelling of the secret top.yml hands it, and its own GITHUB_TOKEN.
+    expect(lines(trace(index, sym.jobOutput(LIB, 'j', 'all'), { direction: 'up' }))).toEqual([
+      sym.jobOutput(LIB, 'j', 'all'),
+      '  context: secrets',
+      `  ${sym.secret(LIB, 'deploy')} via \${{ toJSON(secrets) }}`,
+      `    ${sym.secret(TOP, 'DEPLOY')} via secrets: inherit (jobs.call)`,
+      `  ${sym.secret(LIB, 'GITHUB_TOKEN')} via \${{ toJSON(secrets) }}`,
     ]);
   });
 });
@@ -2661,8 +2751,12 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
       sym.input(W, 'only'),
       'context: matrix[…]',
     ]);
-    // GITHUB_TOKEN is always among the secrets; a caller's `secrets: inherit` passes others.
-    expect(ends('fixed', 's')).toEqual([sym.secret(W, 'DECL'), 'context: secrets']);
+    // GITHUB_TOKEN is always among the secrets (#27); a caller's `secrets: inherit` passes others.
+    expect(ends('fixed', 's')).toEqual([
+      sym.secret(W, 'DECL'),
+      sym.secret(W, 'GITHUB_TOKEN'),
+      'context: secrets',
+    ]);
     // Inputs hold only those declared, and so does the event of a workflow that is only dispatched.
     expect(ends('fixed', 'i')).toEqual([sym.input(W, 'only')]);
     expect(ends('j', 'e', D)).toEqual([sym.input(D, 'only')]);
@@ -2702,7 +2796,7 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
     expect(leavesOf(t)).toEqual([`context ${B} › steps[0]: inputs`]);
   });
 
-  it('keeps the context of a whole object the repository declares no member of', () => {
+  it('keeps the context of a whole object the repository declares no member of, and GITHUB_TOKEN', () => {
     const { index: other } = load({
       [W]: yaml`
         on: push
@@ -2719,7 +2813,8 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
       [`${A}/action.yml`]: index.project.actions.get(A)!.source.text,
     });
     const t = trace(other, sym.input(A, 'v'), { direction: 'up' });
-    expect(t.children).toEqual([]);
+    // Every workflow holds GITHUB_TOKEN (#27).
+    expect(t.children.map((c) => c.symbol)).toEqual([sym.secret(W, 'GITHUB_TOKEN')]);
     expect(t.leaves.map((l) => `${l.role}: ${l.text}`)).toEqual([
       'context: vars',
       'context: matrix',
