@@ -68,8 +68,8 @@ export interface Usage {
   /**
    * Set when the reference does not name the symbol: it reads a whole object (`toJSON(inputs)`, `needs.build.outputs`)
    * or indexes one with a computed key (`matrix[inputs.key]`), so it reads each member, this one among them (see
-   * `ProjectIndex.readsOf`). Rules about one particular member, such as how a condition treats an empty input, skip
-   * these.
+   * `ProjectIndex.readsOf`). Such a read does not single the member out: a rule about one particular member, such as
+   * how a condition treats an empty input, can tell it apart from a read that names the member.
    */
   whole?: true;
 }
@@ -734,6 +734,10 @@ export class ProjectIndex {
     return (reader?.needs ?? []).flatMap((n) => lookup(wf.jobs, n.id) ?? []);
   }
 
+  /**
+   * The step outputs a `steps` reference reads: of the step it names, or of each step a computed key may stand for
+   * (from a step, only the steps before it), every output or the one it names (see `pickOutputs`).
+   */
   private stepOutputReads(unit: UnitDecl, site: ExprSite, ref: LocatedRef): string[] {
     const [a] = ref.path;
     const steps = unit.kind === 'action' ? unit.steps : (jobAt(unit, site)?.steps ?? []);
