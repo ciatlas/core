@@ -1141,6 +1141,40 @@ describe('trace upstream: input defaults', () => {
       ],
     });
   });
+
+  it('finds every call GitHub does not allow in a default, once per function in each expression', () => {
+    // A call may sit under `!`, either side of a comparison, `&&` or `||`, a function's arguments, `( )`, or either
+    // side of an index. Each expression lists each function once, ignoring case, in the order it calls them; the same
+    // function in another expression is another leaf, at that expression.
+    const { index } = load({
+      [CALLEE]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              x:
+                type: string
+                default: >-
+                  \${{ !cancelled() || format('{0}', hashFiles('a')) }}
+                  \${{ fromJSON('{}')[always()] && (success()) }}
+                  \${{ failure() == hashFiles('b')[0] || success() || SUCCESS() }}
+        jobs:
+          j: { runs-on: x, steps: [{ run: echo }] }
+      `,
+      [CALLER]: caller,
+    });
+    const t = trace(index, sym.input(CALLEE, 'x'), { direction: 'up' });
+    const at = `invalid ${CALLEE} › on.workflow_call.inputs.x.default`;
+    expect(t.children).toEqual([]);
+    expect(leavesOf(t).slice(1)).toEqual([
+      `${at} cancelled() @7:15`,
+      `${at} hashFiles() @7:15`,
+      `${at} always() @8:15`,
+      `${at} success() @8:15`,
+      `${at} failure() @9:15`,
+      `${at} hashFiles() @9:15`,
+      `${at} success() @9:15`,
+    ]);
+  });
 });
 
 describe('resolveSymbols: more queries', () => {
