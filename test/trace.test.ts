@@ -1474,3 +1474,185 @@ describe('trace: github.event.inputs in a workflow that can be called', () => {
     expect(down.children.map((c) => c.via?.text)).toEqual(['${{ inputs.x || github.event.inputs.x }}']);
   });
 });
+
+// Networks of reusable calls, where the trace reaches a symbol along many paths. top.yml calls a workflow that can be
+// called and dispatched and reads github.event.inputs.x: the shapes where telling a called workflow from a dispatched
+// one could multiply the size of the trace.
+describe('trace: size on networks of reusable calls', () => {
+  const TOP = `${WF}/top.yml`;
+  const MID = `${WF}/mid.yml`;
+  const jobIds = (n: number) => Array.from({ length: n }, (_, i) => `j${i + 1}`);
+  const outputsOf = (jobs: string[]) => jobs.map((j) => `\${{ needs.${j}.outputs.o }}`).join('');
+  const count = (t: TraceNode): number => 1 + t.children.reduce((sum, c) => sum + count(c), 0);
+  /** The most times one symbol is expanded (stopped nodes and dispatch inputs alone are not expanded). */
+  const mostExpansions = (t: TraceNode) => {
+    const times = new Map<string, number>();
+    const visit = (n: TraceNode) => {
+      if (!n.stop && (n.children.length > 0 || n.leaves.length > 0))
+        times.set(n.symbol, (times.get(n.symbol) ?? 0) + 1);
+      n.children.forEach(visit);
+    };
+    visit(t);
+    return Math.max(...times.values());
+  };
+  const callTop = (callee: string) => yaml`
+    on: pull_request
+    jobs:
+      m:
+        uses: ./.github/workflows/${callee}.yml
+        with:
+          x: \${{ github.event.pull_request.title }}
+  `;
+
+  /** mid.yml's jobs j1..jN: each calls wK.yml with github.event.inputs.x and the outputs of every earlier job. */
+  const chain = (n: number) =>
+    jobIds(n).flatMap((id, k) => [
+      `  ${id}:`,
+      `    uses: ./.github/workflows/w${k + 1}.yml`,
+      ...(k > 0 ? [`    needs: [${jobIds(k).join(', ')}]`] : []),
+      `    with: { v: "\${{ github.event.inputs.x }}${outputsOf(jobIds(k))}" }`,
+    ]);
+
+  /** top.yml, and mid.yml with the jobs given; mid.yml's output is jobs.jN's. */
+  const network = (n: number, jobs: string[]) => ({
+    [TOP]: callTop('mid'),
+    [MID]: `${yaml`
+      on:
+        workflow_call:
+          inputs: { x: { type: string } }
+          outputs: { o: { value: "\${{ jobs.j${n}.outputs.o }}" } }
+        workflow_dispatch:
+          inputs: { x: { type: string } }
+      jobs:
+    `}${jobs.join('\n')}\n`,
+  });
+
+  /** A reusable workflow with input v, whose output o is its job j's, made of the lines given. */
+  const reusable = (job: string[]) =>
+    yaml`
+      on:
+        workflow_call:
+          inputs: { v: { type: string } }
+          outputs: { o: { value: "\${{ jobs.j.outputs.o }}" } }
+      jobs:
+        j:
+    ` + job.map((l) => `    ${l}\n`).join('');
+  const echoes = reusable(['runs-on: x', 'outputs: { o: "${{ inputs.v }}" }', 'steps: [{ run: echo }]']);
+
+  /** review2-B's gen-stress.py: each wK.yml echoes its input. */
+  const stress = (n: number) => ({
+    ...network(n, chain(n)),
+    ...Object.fromEntries(jobIds(n).map((_, k) => [`${WF}/w${k + 1}.yml`, echoes])),
+  });
+
+  /** review3-B's gen-shared-callee.py: each wK.yml gets its output from lK.yml, which mid.yml also calls directly. */
+  const sharedCallee = (n: number) => {
+    const all = outputsOf(jobIds(n));
+    const direct = jobIds(n).flatMap((_, k) => [
+      `  z${k + 1}:`,
+      `    uses: ./.github/workflows/l${k + 1}.yml`,
+      `    needs: [${jobIds(n).join(', ')}]`,
+      `    with: { v: "${all}" }`,
+    ]);
+    const wrapper = (k: number) =>
+      reusable([`uses: ./.github/workflows/l${k}.yml`, 'with: { v: "${{ inputs.v }}" }']);
+    return {
+      ...network(n, [...chain(n), ...direct]),
+      ...Object.fromEntries(
+        jobIds(n).flatMap((_, k) => [
+          [`${WF}/w${k + 1}.yml`, wrapper(k + 1)],
+          [`${WF}/l${k + 1}.yml`, echoes],
+        ]),
+      ),
+    };
+  };
+
+  /** review3-B's gen-action-stress.py: each wK.yml runs action aK, and mid.yml's job z runs every aK. */
+  const sharedAction = (n: number) => {
+    const uses = jobIds(n).flatMap((_, k) => [
+      `      - uses: ./.github/actions/a${k + 1}`,
+      `        with: { v: "${outputsOf(jobIds(n))}" }`,
+    ]);
+    const z = ['  z:', '    runs-on: x', `    needs: [${jobIds(n).join(', ')}]`, '    steps:', ...uses];
+    const runs = (k: number) =>
+      reusable([
+        'runs-on: x',
+        'outputs: { o: "${{ steps.s.outputs.o }}" }',
+        'steps:',
+        `  - { id: s, uses: ./.github/actions/a${k}, with: { v: "\${{ inputs.v }}" } }`,
+      ]);
+    const action = yaml`
+      name: a
+      description: d
+      inputs: { v: { description: v } }
+      outputs: { o: { description: o, value: "\${{ inputs.v }}" } }
+      runs:
+        using: composite
+        steps: [{ shell: bash, run: echo }]
+    `;
+    return {
+      ...network(n, [...chain(n), ...z]),
+      ...Object.fromEntries(
+        jobIds(n).flatMap((_, k) => [
+          [`${WF}/w${k + 1}.yml`, runs(k + 1)],
+          [`.github/actions/a${k + 1}/action.yml`, action],
+        ]),
+      ),
+    };
+  };
+
+  /**
+   * review3-B's gen-diamond.py: f-way diamonds k deep. top.yml calls w0.yml; each w<i>.yml calls a<i+1>_1..a<i+1>_f.yml,
+   * each of which calls w<i+1>.yml, so f^k chains of calls reach w<k>.yml. Only w0.yml can be dispatched, and it passes
+   * github.event.inputs.x on. With `every` (review4's gen-diamond-all.py and gen-diamond-only.py), every workflow can
+   * be called and dispatched and passes that value on.
+   */
+  const diamond = (f: number, k: number, every?: string) => {
+    const dispatch = '  workflow_dispatch:\n    inputs: { x: { type: string } }\n';
+    const head = (i: number) =>
+      `on:\n  workflow_call:\n    inputs: { x: { type: string } }\n    outputs: { o: { value: "\${{ jobs.out.outputs.o }}" } }\n${every || i === 0 ? dispatch : ''}jobs:\n`;
+    const out = (o: string, needs: string[]) =>
+      `  out:\n    runs-on: x\n${needs.length ? `    needs: [${needs.join(', ')}]\n` : ''}    outputs: { o: "${o}" }\n    steps: [{ run: echo }]\n`;
+    const pass = (i: number) => every ?? (i === 0 ? '${{ github.event.inputs.x }}' : '${{ inputs.x }}');
+    const calls = Array.from({ length: f }, (_, j) => `c${j + 1}`);
+    const repo: Record<string, string> = { [TOP]: callTop('w0') };
+    for (let i = 0; i <= k; i++) {
+      const fanOut = calls.map(
+        (c, j) => `  ${c}: { uses: ./.github/workflows/a${i + 1}_${j + 1}.yml, with: { x: "${pass(i)}" } }\n`,
+      );
+      repo[`${WF}/w${i}.yml`] =
+        head(i) + (i < k ? fanOut.join('') + out(outputsOf(calls), calls) : out(pass(i), []));
+      for (let j = 1; i < k && j <= f; j++)
+        repo[`${WF}/a${i + 1}_${j}.yml`] =
+          `${head(i + 1)}  c: { uses: ./.github/workflows/w${i + 1}.yml, with: { x: "${pass(i + 1)}" } }\n${out('${{ needs.c.outputs.o }}', ['c'])}`;
+    }
+    return repo;
+  };
+
+  // v0.2.0's node counts up from top.yml's job output at depths 12, 24, 36 and 48. Keeping track of the calls the trace
+  // came through multiplied them: with the chain of calls in the expansion key, `diamond 2-4, all` gave 303 nodes at
+  // depth 48, and larger diamonds grew as f^k.
+  const shapes: [string, Record<string, string>, number[]][] = [
+    ['stress 6', stress(6), [42, 42, 42, 42]],
+    ['shared callee 3', sharedCallee(3), [23, 36, 36, 36]],
+    ['shared action 3', sharedAction(3), [23, 36, 36, 36]],
+    ['diamond 2-4', diamond(2, 4), [22, 44, 64, 64]],
+    ['diamond 2-4, all', diamond(2, 4, '${{ inputs.x || github.event.inputs.x }}'), [22, 44, 64, 64]],
+    ['diamond 2-4, only', diamond(2, 4, '${{ github.event.inputs.x }}'), [22, 44, 64, 64]],
+  ];
+
+  it.each(shapes)(
+    'stays within twice v0.2.0’s size, each symbol expanded once up, at most twice down: %s',
+    (_name, files, v020) => {
+      const { index } = load(files);
+      const sizes = [12, 24, 36, 48].map((maxDepth) => {
+        const t = trace(index, sym.jobOutput(TOP, 'm', 'o'), { direction: 'up', maxDepth });
+        expect(mostExpansions(t)).toBe(1);
+        return count(t);
+      });
+      for (const [i, n] of sizes.entries()) expect(n).toBeLessThanOrEqual(2 * v020[i]!);
+      const first = index.nodes.has(MID) ? MID : `${WF}/w0.yml`;
+      expect(mostExpansions(trace(index, sym.input(first, 'x'), { maxDepth: 48 }))).toBeLessThanOrEqual(2);
+    },
+  );
+});
