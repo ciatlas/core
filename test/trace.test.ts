@@ -133,6 +133,83 @@ describe('trace', () => {
   });
 });
 
+describe('trace: the output of a reusable workflow or an action', () => {
+  const A = '.github/actions/build';
+  const { index } = load({
+    [`${A}/action.yml`]: yaml`
+      name: build
+      description: x
+      outputs:
+        digest:
+          description: x
+          value: \${{ steps.b.outputs.digest }}
+      runs:
+        using: composite
+        steps:
+          - id: b
+            shell: bash
+            run: echo "digest=1" >> "$GITHUB_OUTPUT"
+    `,
+    [`${WF}/build.yml`]: yaml`
+      on:
+        workflow_call:
+          outputs:
+            digest:
+              value: \${{ jobs.j.outputs.digest }}
+      jobs:
+        j:
+          runs-on: x
+          outputs:
+            digest: \${{ steps.b.outputs.digest }}
+          steps:
+            - uses: actions/checkout@v4
+            - id: b
+              uses: ./.github/actions/build
+    `,
+    [`${WF}/ci.yml`]: yaml`
+      on: push
+      jobs:
+        build:
+          uses: ./.github/workflows/build.yml
+        deploy:
+          needs: build
+          runs-on: x
+          steps:
+            - run: echo \${{ needs.build.outputs.digest }}
+    `,
+  });
+  /** The first branch of a trace, one line per node: the symbol, and how the value got there. */
+  const chain = (t: TraceNode): string[] => {
+    const via = t.via
+      ? ` via ${t.via.text}${t.via.note ? ` (${t.via.note})` : ''} @${t.via.loc.file}:${t.via.loc.line}`
+      : '';
+    return [`${t.symbol}${via}`, ...(t.children[0] ? chain(t.children[0]) : [])];
+  };
+
+  it('names the edge from an action’s output to the step that uses it an action output', () => {
+    expect(chain(trace(index, sym.output(A, 'digest')))).toEqual([
+      sym.output(A, 'digest'),
+      `${sym.stepOutput(`${WF}/build.yml`, 'j', 'b', 'digest')} via action output (exposed to the caller) @${A}/action.yml:4`,
+      `${sym.jobOutput(`${WF}/build.yml`, 'j', 'digest')} via \${{ steps.b.outputs.digest }} @${WF}/build.yml:10`,
+      `${sym.output(`${WF}/build.yml`, 'digest')} via \${{ jobs.j.outputs.digest }} @${WF}/build.yml:5`,
+      `${sym.jobOutput(`${WF}/ci.yml`, 'build', 'digest')} via workflow output (exposed to the caller) @${WF}/build.yml:4`,
+    ]);
+  });
+
+  it('names the same edges upstream, from the job’s output back to the action’s', () => {
+    expect(
+      chain(trace(index, sym.jobOutput(`${WF}/ci.yml`, 'build', 'digest'), { direction: 'up' })),
+    ).toEqual([
+      sym.jobOutput(`${WF}/ci.yml`, 'build', 'digest'),
+      `${sym.output(`${WF}/build.yml`, 'digest')} via workflow output @${WF}/build.yml:4`,
+      `${sym.jobOutput(`${WF}/build.yml`, 'j', 'digest')} via \${{ jobs.j.outputs.digest }} @${WF}/build.yml:5`,
+      `${sym.stepOutput(`${WF}/build.yml`, 'j', 'b', 'digest')} via \${{ steps.b.outputs.digest }} @${WF}/build.yml:10`,
+      `${sym.output(A, 'digest')} via action output @${A}/action.yml:4`,
+      `${sym.stepOutput(A, undefined, 'b', 'digest')} via \${{ steps.b.outputs.digest }} @${A}/action.yml:6`,
+    ]);
+  });
+});
+
 describe('trace upstream to runtime contexts', () => {
   const callee = yaml`
     on:

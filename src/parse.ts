@@ -13,6 +13,7 @@ import {
   type YAMLMap,
 } from 'yaml';
 import {
+  type ExprRef,
   findTemplateSegments,
   type Json,
   type ParsedExpression,
@@ -323,9 +324,9 @@ const escapedCode = (esc: RegExpExecArray) => Number.parseInt(esc[1] ?? esc[2] ?
 /**
  * Locates the expression that starts at `from` in the raw scalar. Offsets in the decoded value drift from the source in
  * folded and literal blocks, quoted scalars with escapes and CRLF files, so each reference is found by its own text, in
- * order, within the expression and outside its string literals (a copy of the text there is not the reference). A
- * reference the source spells with an escape (`\x62` for `b` in a double-quoted scalar) keeps the expression's own
- * offsets.
+ * the order they are written, within the expression and outside its string literals (a copy of the text there is not
+ * the reference). A reference the source spells with an escape (`\x62` for `b` in a double-quoted scalar) keeps the
+ * expression's own offsets.
  */
 function locateExpression(
   s: RawScalar,
@@ -336,15 +337,61 @@ function locateExpression(
   const scan = scanExpression(s.raw, from, s.quote, closes);
   const at = s.start + from;
   let cursor = from;
-  const refs = expr.refs.map((r) => {
+  const locs = new Map<ExprRef, Loc>();
+  // A chain's computed indexes are listed from the right (`a[b][c]` lists `c` before `b`): searched in that order, the
+  // search would start past the reference on the left.
+  for (const r of expr.refs.toSorted((a, b) => a.start - b.start)) {
     // In a single-quoted scalar, a reference's own quotes (`github.event['action']`) are doubled too.
     const written = expr.source.slice(r.start, r.end).replaceAll("'", s.quote);
-    const found = written ? indexOutside(s, written, cursor, scan) : -1;
-    if (found < 0) return { ...r, loc: s.source.loc(at + r.start, at + r.end) };
-    cursor = found + written.length;
-    return { ...r, loc: s.source.loc(s.start + found, s.start + cursor) };
-  });
+    const span = written ? spanOf(s, written, cursor, scan) : undefined;
+    // A computed index can sit inside the reference before it (`github.event[inputs.x].y`): search on from its start.
+    if (span) cursor = span[0] + 1;
+    const [start, end] = span ? [s.start + span[0], s.start + span[1]] : [at + r.start, at + r.end];
+    locs.set(r, s.source.loc(start, end));
+  }
+  const refs = expr.refs.map((r) => ({ ...r, loc: locs.get(r)! }));
   return { segment: { expr, loc: s.source.loc(at, at + expr.source.length), refs }, end: scan.end };
+}
+
+/**
+ * Where a reference is written from `from`: as the expression reads it, or else word by word. A reference holds spaces
+ * and line breaks only between its names or in a bracketed key (`github.event['a\nb']`), which the source may write
+ * as a line break and indentation, a blank line or an escape. Its first word is then found as `indexOutside` finds it,
+ * and each word after it past the spaces before it; where they do not follow, at the next copy of the first word. An
+ * earlier copy can be another reference (`inputs.ab` before `inputs\n.ab`, as a chain's computed indexes are visited
+ * from the right) or the start of one not found (`github.event['a\x63']`).
+ */
+function spanOf(
+  s: RawScalar,
+  written: string,
+  from: number,
+  scan: RawExpression,
+): [number, number] | undefined {
+  const found = indexOutside(s, written, from, scan);
+  if (found >= 0) return [found, found + written.length];
+  const [first = '', ...rest] = written.split(/\s+/);
+  if (rest.length === 0) return undefined;
+  let start = indexOutside(s, first, from, scan);
+  while (start >= 0) {
+    const end = wordsEnd(s, rest, start + first.length);
+    if (end !== undefined && end <= scan.end) return [start, end];
+    start = indexOutside(s, first, start + 1, scan);
+  }
+  return undefined;
+}
+
+/**
+ * The end of `words` written from `from`, each after at least one space, line break or space escape: with none, the
+ * words would join (`inputs['a b']` would match `inputs['ab']`).
+ */
+function wordsEnd(s: RawScalar, words: string[], from: number): number | undefined {
+  let end = from;
+  for (const word of words) {
+    const at = skipSpace(s, end);
+    if (at === end || !s.raw.startsWith(word, at)) return undefined;
+    end = at + word.length;
+  }
+  return end;
 }
 
 /** An expression as written: where it ends, and the `[start, end)` of each string literal, quotes included. */

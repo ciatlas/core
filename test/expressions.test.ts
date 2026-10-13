@@ -92,6 +92,32 @@ describe('parseExpression references', () => {
     ]);
   });
 
+  it('records offsets after string literals that span lines (#14)', () => {
+    // The lexer counts a newline inside a string in a token's line, but measures its column from the last newline
+    // outside a string.
+    const airflow = 'contains(fromJSON(\'[\n  "a",\n  "b"\n]\'), github.event.sender.login)';
+    expect(parseExpression(airflow).refs.map((r) => airflow.slice(r.start, r.end))).toEqual([
+      'github.event.sender.login',
+    ]);
+    // Several of them, CRLF, escaped quotes, a newline outside strings between them, and a reference that is one.
+    const src =
+      "format('a\r\nit''s\r\n', inputs.a) == format('x''\n''\ny', inputs.b,\n  'c\nd') && github.event['x\ny'].z || env.E";
+    expect(parseExpression(src).refs.map((r) => src.slice(r.start, r.end))).toEqual([
+      'inputs.a',
+      'inputs.b',
+      "github.event['x\ny'].z",
+      'env.E',
+    ]);
+  });
+
+  it('keys condition uses and fallbacks by the offsets of references after such a string (#14)', () => {
+    const src = "contains(fromJSON('[\n1\n]'), inputs.a) || inputs.b || 'x'";
+    const p = parseExpression(src);
+    expect(p.refs.map((r) => r.start)).toEqual([src.indexOf('inputs.a'), src.indexOf('inputs.b')]);
+    expect([...conditionUses(p).keys()]).toEqual(p.refs.map((r) => r.start));
+    expect([...fallbacksOf(p).keys()]).toEqual([src.indexOf('inputs.b')]);
+  });
+
   it('reads number indexes as path segments', () => {
     const src = "github.event.commits[0].message == steps.s.outputs['x']";
     const [commits, x] = parseExpression(src).refs;
@@ -121,6 +147,8 @@ describe('parseExpression references', () => {
     expect(p.error?.message).toMatch(/Unexpected symbol/);
     expect(p.error?.offset).toBe(12);
     expect(parseExpression('foo.bar').error?.message).toMatch(/named-value/);
+    const after = "fromJSON('[\n1\n]') == foo.bar";
+    expect(parseExpression(after).error?.offset).toBe(after.indexOf('foo'));
   });
 });
 
