@@ -672,6 +672,53 @@ describe('reference locations', () => {
     );
   });
 
+  it('locates references after a string that spans lines (#14)', () => {
+    // A folded block keeps the line breaks around more-indented lines, so the string holds them (apache/airflow).
+    const text = stepWorkflow([
+      '      - if: >',
+      "          contains(fromJSON('[",
+      '            "a",',
+      '            "b"',
+      "            ]'), github.event.sender.login) && inputs.a",
+      '        run: x',
+    ]);
+    expect(parse(text).sites[0]!.text).toContain('\'[\n  "a",\n  "b"\n  ]\'');
+    expect(locatedRefs(text)).toEqual(['github.event.sender.login@10:18', 'inputs.a@10:48']);
+  });
+
+  it('places references after strings that span lines, in every style that can break one (#14)', () => {
+    // `⏎` is a line break in the decoded string: as written in a literal block, a blank line in the folded and flow
+    // styles (which fold a single one into a space) and an escape in a double-quoted scalar.
+    const piece = fc.constantFrom('inputs.a', "''", ' ', '}}', '${{', 'x', '.', '⏎');
+    const styles: Record<string, [(expr: string) => string[], (eol: string) => string]> = {
+      literal: [(e) => ['      - run: |', `          echo ${e}`], (eol) => `${eol}          `],
+      folded: [(e) => ['      - run: >-', `          echo ${e}`], (eol) => `${eol}${eol}          `],
+      plain: [(e) => [`      - run: echo ${e}`], (eol) => `${eol}${eol}          `],
+      single: [(e) => [`      - run: 'echo ${e.replaceAll("'", "''")}'`], (eol) => `${eol}${eol}          `],
+      double: [(e) => [`      - run: "echo ${e}"`], () => '\\r\\n'],
+    };
+    fc.assert(
+      fc.property(
+        fc.array(piece, { maxLength: 8 }),
+        fc.array(piece, { maxLength: 8 }),
+        fc.constantFrom(...Object.keys(styles)),
+        fc.constantFrom('\n', '\r\n'),
+        (a, b, style, eol) => {
+          const [lines, lineBreak] = styles[style]!;
+          const expr = `\${{ format('${a.join('')}', inputs.a, '${b.join('')}', inputs.b) }}`;
+          const text = stepWorkflow(lines(expr), eol).replaceAll('⏎', lineBreak(eol));
+          const refs = parse(text).sites.flatMap((s) => s.segments.flatMap((seg) => seg.refs));
+          expect(refs.map((r) => r.path[0])).toEqual(['a', 'b']);
+          for (const { loc, path } of refs) {
+            const line = text.split(/\r?\n/)[loc.line - 1]!;
+            const written = `${style === 'single' ? "''" : "'"}, inputs.${path[0]}`;
+            expect(line.slice(loc.endColumn - 1 - written.length, loc.endColumn - 1)).toBe(written);
+          }
+        },
+      ),
+    );
+  });
+
   it("skips a block scalar's header line and its comment", () => {
     // A block scalar's range starts at `|` or `>`, so its header comment was searched as part of the value: a `'` there
     // opened a string, and a `${{` or a copy of a bare if's first 40 characters was taken for the expression.
