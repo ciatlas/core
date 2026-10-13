@@ -66,8 +66,11 @@ export interface TraceNode {
   unit?: string;
   loc?: Loc;
   /**
-   * How the value got here from the parent node. `note` qualifies it: `when dispatched` for a workflow input read
-   * through `github.event.inputs`, which holds the input only when the workflow is dispatched (see `readsCallerEvent`).
+   * How the value got here from the parent node: the expression it passes through, `secrets: inherit`, or `workflow
+   * output` or `action output` for the output of a reusable workflow or an action that becomes the output of the job or
+   * step using it (with the note `exposed to the caller` downstream). `note` qualifies it: `when dispatched` for a
+   * workflow input read through `github.event.inputs`, which holds the input only when the workflow is dispatched (see
+   * `readsCallerEvent`).
    */
   via?: { loc: Loc; text: string; note?: string };
   children: TraceNode[];
@@ -239,7 +242,10 @@ function addReads(
   }
 }
 
-/** Propagation that is structural rather than an expression (callee output → caller job output, etc.). */
+/**
+ * Propagation that is structural rather than an expression: a reusable workflow's output to the calling job's output,
+ * an action's output to the output of the step that uses it.
+ */
 function structuralChildren(
   index: ProjectIndex,
   symbol: string,
@@ -250,9 +256,18 @@ function structuralChildren(
     .filter((e) => e.siteId === undefined)
     .map((e) => {
       const c = child(e.to);
-      if (e.loc) c.via = { loc: e.loc, text: 'workflow output', note: 'exposed to the caller' };
+      if (e.loc) c.via = { loc: e.loc, text: outputEdge(index, e), note: 'exposed to the caller' };
       return c;
     });
+}
+
+/**
+ * What a structural `flows` edge carries: `action output` when it comes from an action's output, `workflow output`
+ * when it comes from a reusable workflow's. The unit of its `from` symbol says which.
+ */
+function outputEdge(index: ProjectIndex, e: GraphEdge): string {
+  const unit = index.nodes.get(e.from)?.unit;
+  return unit && index.project.actions.has(unit) ? 'action output' : 'workflow output';
 }
 
 /** `secrets: inherit` forwards the secret under the same name, possibly through workflows that never read it. */
@@ -409,7 +424,7 @@ function flowParent(index: ProjectIndex, e: GraphEdge, parent: Parent): TraceNod
   const p = parent(e.from, dispatched);
   const site = e.siteId !== undefined ? index.site(e.siteId) : undefined;
   const note = dispatched ? { note: 'when dispatched' } : {};
-  if (e.loc) p.via = { loc: e.loc, text: site ? short(site.text) : 'workflow output', ...note };
+  if (e.loc) p.via = { loc: e.loc, text: site ? short(site.text) : outputEdge(index, e), ...note };
   return p;
 }
 
