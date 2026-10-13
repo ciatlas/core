@@ -107,10 +107,10 @@ function dispatchInputNames(unit: UnitDecl): string[] {
 }
 
 /**
- * The inputs of its own that `github.event.inputs` may hold at a site: a workflow's `workflow_dispatch` inputs, which it
- * holds when the workflow is dispatched. None in an action, whose `github` is its job's, nor in an input's default: GitHub
- * evaluates a `workflow_call` input's default only when the workflow is called, with the caller's `github` context, and
- * allows no context in a `workflow_dispatch` input's.
+ * The inputs of its own that `github.event.inputs` may hold at a site: a workflow's `workflow_dispatch` inputs, which
+ * it holds when the workflow is dispatched. None in an action, whose `github` is its job's, nor in an input's default:
+ * GitHub evaluates a `workflow_call` input's default only when the workflow is called, with the caller's `github`
+ * context, and allows no context in a `workflow_dispatch` input's.
  */
 function eventInputsAt(unit: UnitDecl, site: ExprSite): Record<string, { name: string }> {
   if (unit.kind !== 'workflow' || site.field === 'input.default') return {};

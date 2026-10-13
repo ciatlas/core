@@ -192,7 +192,8 @@ function matrixSymbol(symbol: string, unit: string): { job: string; key: string 
 
 /**
  * `called`: the symbol is a workflow input entered through a caller's `with:`, so the workflow runs as a called one,
- * and its `github.event.inputs` reads take the caller's event, not this value (see `readsCallerEvent`).
+ * and its reads through `github` (`github.event.inputs.<name>`, `toJSON(github)`, directly or through the step's own
+ * env) take the caller's event, not this value (see `usageReadsCallerEvent`).
  */
 function down(
   index: ProjectIndex,
@@ -216,7 +217,8 @@ function down(
 
 /**
  * What a symbol is expanded once for downstream: the symbol, and whether it is `called` when that changes its reads,
- * that is for an input the workflow reads through `github.event.inputs`. Each symbol is expanded at most twice.
+ * that is for an input the workflow reads through `github` (see `usageReadsCallerEvent`). Each symbol is expanded at
+ * most twice.
  */
 function downKey(index: ProjectIndex, symbol: string, called: boolean): string {
   const skips = called && index.usagesOf(symbol).some((u) => usageReadsCallerEvent(index, u));
@@ -361,11 +363,12 @@ const readsGithub = (ref: LocatedRef) => ref.context === 'github';
 /**
  * Whether a usage reads its symbol only through `github` in a workflow that can be called: directly
  * (`github.event.inputs.<name>`, `toJSON(github)`, `github.event[x]`), or through the step's own env values it reads
- * (`env.X`, where the step's `env:` has `X: ${{ toJSON(github) }}`, or a whole `env`, which reads every own value), which
- * the graph resolves to what the values read. The symbol is then one of the workflow's `workflow_dispatch` inputs,
- * which `github.event` holds only when the workflow is dispatched: when it is called, GitHub gives it the caller's
- * `github` context and event (see `readsCallerEvent`), so the usage never takes in the value a caller passes in `with:`.
- * A rule about that value, such as one that looks for an input a callee never takes in, can skip such usages.
+ * (`env.X`, where the step's `env:` has `X: ${{ toJSON(github) }}`, or a whole `env`, which reads every own value),
+ * which the graph resolves to what the values read. The symbol is then one of the workflow's `workflow_dispatch`
+ * inputs, which `github.event` holds only when the workflow is dispatched: when it is called, GitHub gives it the
+ * caller's `github` context and event (see `readsCallerEvent`), so the usage never takes in the value a caller passes
+ * in `with:`. A rule about that value, such as one that looks for an input a callee never takes in, can skip such
+ * usages.
  */
 export function usageReadsCallerEvent(index: ProjectIndex, u: Usage): boolean {
   const wf = index.project.workflows.get(u.site.ownerPath);
@@ -428,10 +431,11 @@ function endSources(index: ProjectIndex, symbol: string, fallback: InputDefault 
 }
 
 /**
- * A workflow input that a value reads only through `github.event.inputs`: the value entered when the workflow is
- * dispatched. When it is called, the read takes the caller's event instead (a `context` leaf, see `readsCallerEvent`),
- * so the callers' `with:` values, which the input holds then, are not where the value comes from: the input is shown,
- * but not traced on up, nor marked as expanded, so that a read of it through `inputs` still is.
+ * A workflow input that a value reads only through `github` (`github.event.inputs.<name>`, `toJSON(github)`, directly
+ * or through the step's own env): the value entered when the workflow is dispatched. When it is called, the read takes
+ * the caller's event instead (a `context` leaf, see `readsCallerEvent`), so the callers' `with:` values, which the
+ * input holds then, are not where the value comes from: the input is shown, but not traced on up, nor marked as
+ * expanded, so that a read of it through `inputs` still is.
  */
 function dispatchedInput(index: ProjectIndex, symbol: string, depth: number, path: Set<string>): TraceNode {
   const node = base(index, symbol);
@@ -441,8 +445,8 @@ function dispatchedInput(index: ProjectIndex, symbol: string, depth: number, pat
 }
 
 /**
- * Whether every read of `from` in the site is `github.event.inputs` in a workflow that can be called, directly or
- * through the step's own env (see `usageReadsCallerEvent`).
+ * Whether every read of `from` in the site is through `github` in a workflow that can be called, directly or through
+ * the step's own env (see `usageReadsCallerEvent`).
  */
 function readsOnlyCallerEvent(index: ProjectIndex, from: string, siteId: number | undefined): boolean {
   const reads = index.usagesOf(from).filter((u) => u.site.id === siteId);
@@ -468,8 +472,8 @@ function flowParents(index: ProjectIndex, symbol: string, parent: Parent): Trace
 
 /**
  * The parent a `flows` edge comes from, with how the value got here: `when dispatched` for a dispatch input alone. The
- * graph resolves `github.event.inputs.<name>` only to a `workflow_dispatch` input, so such an edge never comes from an
- * input that no dispatch sets.
+ * graph reads only `workflow_dispatch` inputs through `github` (see `ProjectIndex.readsOf`), so such an edge never
+ * comes from an input that no dispatch sets.
  */
 function flowParent(index: ProjectIndex, e: GraphEdge, parent: Parent): TraceNode {
   const dispatched = readsOnlyCallerEvent(index, e.from, e.siteId);
