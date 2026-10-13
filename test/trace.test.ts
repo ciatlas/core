@@ -1656,3 +1656,52 @@ describe('trace: size on networks of reusable calls', () => {
     },
   );
 });
+
+// An input's default (#13) where a value reads the input only through github.event.inputs (#10).
+describe('trace: input defaults and github.event.inputs', () => {
+  const TOP = `${WF}/top.yml`;
+  const C = `${WF}/c.yml`;
+  const allLeaves = (t: TraceNode): string[] => [
+    ...t.leaves.map((l) => `${l.role} ${l.where}: ${l.text}`),
+    ...t.children.flatMap(allLeaves),
+  ];
+
+  it('leaves the default of an input a call omits out where it is read only through github.event.inputs', () => {
+    const { index } = load({
+      [TOP]: yaml`
+        on: pull_request
+        jobs:
+          t:
+            uses: ./.github/workflows/c.yml
+      `,
+      [C]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              z: { type: string, default: from-call }
+          workflow_dispatch:
+            inputs:
+              z: { type: string, default: from-dispatch }
+        jobs:
+          b:
+            runs-on: x
+            outputs:
+              event: \${{ github.event.inputs.z }}
+              input: \${{ inputs.z }}
+            steps:
+              - run: echo
+      `,
+    });
+    const z = sym.input(C, 'z');
+    // Through inputs.z: top.yml omits z, so z is its workflow_call default.
+    const input = trace(index, sym.jobOutput(C, 'b', 'input'), { direction: 'up' });
+    expect(allLeaves(input)).toContain(`literal ${C} › on.workflow_call.inputs.z.default: "from-call"`);
+    // Through github.event.inputs.z: when c.yml is called, and its default applies, the read is top.yml's event; when
+    // it is dispatched, the value entered. The dispatch input is shown alone, without the default of the call.
+    const event = trace(index, sym.jobOutput(C, 'b', 'event'), { direction: 'up' });
+    expect(event.children).toMatchObject([
+      { symbol: z, via: { note: 'when dispatched' }, children: [], leaves: [] },
+    ]);
+    expect(allLeaves(event)).toEqual([`context ${C} › jobs.b: github.event.inputs.z`]);
+  });
+});
