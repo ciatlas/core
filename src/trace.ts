@@ -1,6 +1,7 @@
 import { type ActionUse, type Definition, type GraphNode, type ProjectIndex, sym, type Usage } from './graph';
 import {
   type Binding,
+  type ExprSegment,
   type ExprSite,
   type InputDecl,
   type LocatedRef,
@@ -19,13 +20,18 @@ export interface TraceLeaf {
    * output's own value, or an input's default), `omitted` (a caller or step does not pass the input), `value`,
    * `missing` and `dynamic` (a matrix key's combinations), `context` (read from a context the graph does not follow,
    * such as `github.event.pull_request.title` or `runner.os`; `text` is the reference), `invalid` (an expression that
-   * does not parse) and `expression` (an expression that reads no context, e.g. a `format()` of literals).
+   * does not parse, or a reference in an input's default to a context GitHub does not allow there; `text` is then the
+   * reference) and `expression` (an expression that reads no context, e.g. a `format()` of literals).
    *
    * When a caller or step omits an input, its `default:` is the value there, so the input's trace also ends at the
    * default, after the calls: a `literal`, or the `context`, `invalid` or `expression` leaves of an expression, with
    * `where` naming it (`<unit> › on.workflow_call.inputs.<name>.default`, `<unit> › inputs.<name>.default` in an
-   * action). The symbols an expression default reads (another input, `vars`) are the node's children. A default no
-   * call falls back to is not shown.
+   * action). A `workflow_call` input's default may read `github`, `inputs` and `vars`: the inputs and variables it
+   * reads are the node's children, and `github` is the caller's (`github.event.inputs.<name>` is the caller's event,
+   * not this workflow's input), a `context`. An action input's default may read the calling job's `github`,
+   * `strategy`, `matrix`, `job` and `runner`, each a `context`. A reference to any other context there (`env`,
+   * `secrets`, `steps`, `needs`, an action's `inputs` or `vars`) is `invalid`. A default no call falls back to is not
+   * shown, nor is a required `workflow_call` input's: GitHub fails the run when a caller omits that input.
    */
   role: string;
   where: string;
@@ -355,7 +361,7 @@ interface InputDefault {
  */
 function omittedDefault(index: ProjectIndex, symbol: string): InputDefault | undefined {
   const declared = calledInput(index, symbol);
-  if (!declared?.input.hasDefault) return undefined;
+  if (!declared || !defaultApplies(declared.unit, declared.input)) return undefined;
   const { unit, input } = declared;
   if (callsOf(index, unit.path).every((c) => lookup(c.with, input.name))) return undefined;
   const at = unit.kind === 'action' ? 'inputs' : 'on.workflow_call.inputs';
@@ -378,16 +384,43 @@ function calledInput(index: ProjectIndex, symbol: string): { unit: UnitDecl; inp
 const callInputs = (unit: UnitDecl) => (unit.kind === 'action' ? unit.inputs : (unit.call?.inputs ?? {}));
 
 /**
- * The default as a source: a plain value (`literal`), or what its expression reads that is not a symbol, as for a
- * definition. GitHub lets a `workflow_call` input's default read `github`, `inputs` and `vars`, and an action input's
- * `github`, `strategy`, `matrix`, `job`, `runner` and `hashFiles()`; for an action, those are the calling job's.
+ * Whether GitHub uses the input's default when a call omits it. It does not for a required `workflow_call` input: the
+ * run fails instead. An action's `required` is not enforced, so its default applies.
  */
+const defaultApplies = (unit: UnitDecl, input: InputDecl) =>
+  input.hasDefault && !(unit.kind === 'workflow' && input.required);
+
+/** The default as a source: a plain value (`literal`), or what its expression reads that is not a symbol. */
 function defaultSources(index: ProjectIndex, d: InputDefault): TraceLeaf[] {
   const { input, where } = d;
-  if (input.defaultSite) return siteSources(index, d.unit, input.defaultSite, where);
+  if (input.defaultSite) {
+    return siteSources(index, d.unit, input.defaultSite, where, (site, ref) =>
+      defaultReads(index, d, site, ref),
+    );
+  }
   return [
     { role: 'literal', where, loc: input.defaultLoc ?? input.loc, text: JSON.stringify(input.default) },
   ];
+}
+
+/**
+ * The contexts GitHub evaluates an input's default with (its schemas' `workflow-call-input-default` and
+ * `input-default-context`): a `workflow_call` input's, the caller's `github`, and `inputs` and `vars`; an action
+ * input's, the calling job's `github`, `strategy`, `matrix`, `job` and `runner` (and `hashFiles()`, a function).
+ */
+const DEFAULT_CONTEXTS: Record<UnitDecl['kind'], ReadonlySet<string>> = {
+  workflow: new Set(['github', 'inputs', 'vars']),
+  action: new Set(['github', 'strategy', 'matrix', 'job', 'runner']),
+};
+
+/**
+ * What a reference in an input's default reads: the inputs and variables a `workflow_call` default names, no symbol
+ * for the other contexts it may read (`github` is the caller's, so `github.event.inputs.<name>` there is not this
+ * workflow's input), and `invalid` for a context GitHub does not allow in that default.
+ */
+function defaultReads(index: ProjectIndex, d: InputDefault, site: ExprSite, ref: LocatedRef): Reads {
+  if (!DEFAULT_CONTEXTS[d.unit.kind].has(ref.context)) return 'invalid';
+  return ref.context === 'inputs' || ref.context === 'vars' ? index.readsOf(d.unit, site, ref) : [];
 }
 
 /** The symbols an expression default reads (another input, `vars`): one parent each. */
@@ -399,7 +432,9 @@ function defaultParents(
   const site = d.input.defaultSite;
   if (!site) return [];
   const reads = site.segments.flatMap((seg) =>
-    seg.refs.flatMap((ref) => index.readsOf(d.unit, site, ref).map((symbol) => ({ symbol, ref }))),
+    seg.refs.flatMap((ref) =>
+      symbolsOf(defaultReads(index, d, site, ref)).map((symbol) => ({ symbol, ref })),
+    ),
   );
   const seen = new Set<string>();
   return reads.flatMap(({ symbol, ref }) => {
@@ -439,10 +474,27 @@ function definitionSources(index: ProjectIndex, def: Definition): TraceLeaf[] {
   return siteSources(index, unit, site, placeOf(unit, site.job, site.step));
 }
 
-/** What an expression site reads that is not a symbol, or the expression itself when it reads nothing. */
-function siteSources(index: ProjectIndex, unit: UnitDecl, site: ExprSite, where: string): TraceLeaf[] {
+/** The symbols a reference reads, or `invalid` for a context GitHub does not allow where it is written. */
+type Reads = string[] | 'invalid';
+
+/** What a reference in `site` reads. */
+type Reader = (site: ExprSite, ref: LocatedRef) => Reads;
+
+const symbolsOf = (reads: Reads): string[] => (reads === 'invalid' ? [] : reads);
+
+/**
+ * What an expression site reads that is not a symbol, or the expression itself when it reads nothing. `reads` says
+ * what each of its references reads (the graph's `readsOf` by default).
+ */
+function siteSources(
+  index: ProjectIndex,
+  unit: UnitDecl,
+  site: ExprSite,
+  where: string,
+  reads: Reader = (s, ref) => index.readsOf(unit, s, ref),
+): TraceLeaf[] {
   const found = new Map<string, TraceLeaf>();
-  collectSources(index, unit, site, where, found);
+  collectSources(index, unit, { site, where, reads }, found);
   const readsNothing = site.segments.every((seg) => seg.refs.length === 0 && !seg.expr.error);
   if (readsNothing) return [{ role: 'expression', where, loc: site.loc, text: short(site.text) }];
   return [...found.values()];
@@ -455,14 +507,21 @@ function placeOf(unit: UnitDecl, job?: string, step?: number): string {
     .join(' › ');
 }
 
+/** The site whose sources are collected, the place its leaves name, and what each of its references reads. */
+interface SourceSite {
+  site: ExprSite;
+  where: string;
+  reads: Reader;
+}
+
 /** Adds the leaves for what `site` reads that is not a symbol, once per context (contexts ignore case). */
 function collectSources(
   index: ProjectIndex,
   unit: UnitDecl,
-  site: ExprSite,
-  where: string,
+  at: SourceSite,
   found: Map<string, TraceLeaf>,
 ): void {
+  const { site, where } = at;
   for (const seg of site.segments) {
     if (seg.expr.error) {
       add(found, `invalid@${seg.loc.line}:${seg.loc.column}`, {
@@ -474,17 +533,26 @@ function collectSources(
     }
     for (const ref of seg.refs) {
       const own = ownEnv(index, unit, site, ref);
-      if (own?.site) collectSources(index, unit, own.site, where, found);
+      if (own?.site) collectSources(index, unit, { ...at, site: own.site }, found);
       else if (own) add(found, `literal@${own.valueLoc.line}:${own.valueLoc.column}`, ownLiteral(own, where));
-      else if (index.readsOf(unit, site, ref).length === 0)
-        add(found, `context:${[ref.context, ...ref.path].join('.').toLowerCase()}`, {
-          role: 'context',
-          where,
-          loc: ref.loc,
-          text: refText(seg.expr.source, ref),
-        });
+      else addRead(found, where, seg, ref, at.reads(site, ref));
     }
   }
+}
+
+/** A reference that reads no symbol ends the trace: at its context, or as `invalid` where GitHub does not allow it. */
+function addRead(
+  found: Map<string, TraceLeaf>,
+  where: string,
+  seg: ExprSegment,
+  ref: LocatedRef,
+  reads: Reads,
+): void {
+  const leaf = { where, loc: ref.loc, text: refText(seg.expr.source, ref) };
+  if (reads === 'invalid')
+    add(found, `invalid@${ref.loc.line}:${ref.loc.column}`, { role: 'invalid', ...leaf });
+  else if (reads.length === 0)
+    add(found, `context:${[ref.context, ...ref.path].join('.').toLowerCase()}`, { role: 'context', ...leaf });
 }
 
 /**

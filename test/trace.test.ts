@@ -947,6 +947,117 @@ describe('trace upstream: input defaults', () => {
       'input.default on.workflow_call.inputs.x.default',
     ]);
   });
+
+  const caller = 'on: push\njobs:\n  a: { uses: ./.github/workflows/callee.yml }\n';
+
+  it("ends at github.event.inputs in a workflow_call default as a context: the caller's event, not this input", () => {
+    // The default applies only when the workflow is called, and then `github` is the caller's.
+    const { index } = load({
+      [CALLEE]: yaml`
+        on:
+          workflow_dispatch:
+            inputs:
+              x: { type: string, default: d }
+          workflow_call:
+            inputs:
+              x: { type: string, default: "\${{ github.event.inputs.x }}" }
+              y: { type: string, default: "\${{ github.event.inputs.x }}" }
+        jobs:
+          j: { runs-on: x, steps: [{ run: echo }] }
+      `,
+      [CALLER]: caller,
+    });
+    for (const [name, line] of [
+      ['x', 7],
+      ['y', 8],
+    ] as const) {
+      const t = trace(index, sym.input(CALLEE, name), { direction: 'up' });
+      expect(t.children).toEqual([]);
+      expect(leavesOf(t)).toEqual([
+        `omitted ${CALLER} › jobs.a (not passed) @3:14`,
+        `context ${CALLEE} › on.workflow_call.inputs.${name}.default github.event.inputs.x @${line}:40`,
+      ]);
+    }
+  });
+
+  it("shows no default for a required workflow_call input, which GitHub never uses, but does for an action's", () => {
+    // GitHub fails the run when a caller omits a required workflow_call input; an action's `required` is not enforced.
+    const { index } = load({
+      [CALLEE]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              req: { type: string, required: true, default: never-used }
+        jobs:
+          j: { runs-on: x, steps: [{ uses: ./.github/actions/a }] }
+      `,
+      [CALLER]: caller,
+      [`${A}/action.yml`]: action('req: { description: x, required: true, default: used }'),
+    });
+    expect(leavesOf(trace(index, sym.input(CALLEE, 'req'), { direction: 'up' }))).toEqual([
+      `omitted ${CALLER} › jobs.a (not passed) @3:14`,
+    ]);
+    expect(leavesOf(trace(index, sym.input(A, 'req'), { direction: 'up' }))).toEqual([
+      `omitted ${CALLEE} › jobs.j › steps[0] (not passed) @6:36`,
+      `literal ${A} › inputs.req.default "used" @4:51`,
+    ]);
+  });
+
+  it('ends at a context GitHub does not allow in a default as invalid, and follows none of them', () => {
+    // An action input's default may read github, strategy, matrix, job and runner; a workflow_call input's github,
+    // inputs and vars.
+    const { index } = load({
+      [`${A}/action.yml`]: action(
+        [
+          'a: { description: x, default: "${{ inputs.b }} ${{ vars.V }} ${{ steps.s.outputs.v }} ${{ job.status }}" }',
+          'b: { description: x, default: "${{ env.E }} ${{ secrets.S }} ${{ needs.n.outputs.o }} ${{ env.E }}" }',
+        ].join('\n      '),
+      ),
+      [CALLEE]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              w: { type: string, default: "\${{ secrets.S }} \${{ env.E }} \${{ matrix.os }} \${{ inputs.v }}" }
+              v: { type: string }
+            secrets:
+              S: { required: false }
+        env:
+          E: e
+        jobs:
+          j: { runs-on: x, steps: [{ uses: ./.github/actions/a }] }
+      `,
+      [CALLER]: caller,
+    });
+    const shown = (symbol: string) => {
+      const t = trace(index, symbol, { direction: 'up' });
+      return {
+        children: t.children.map((c) => c.symbol),
+        leaves: t.leaves.map((l) => `${l.role} ${l.text}`),
+      };
+    };
+    expect(shown(sym.input(A, 'a'))).toEqual({
+      children: [],
+      leaves: [
+        'omitted (not passed)',
+        'invalid inputs.b',
+        'invalid vars.V',
+        'invalid steps.s.outputs.v',
+        'context job.status',
+      ],
+    });
+    // Each place is a leaf of its own, as for an expression that does not parse.
+    expect(shown(sym.input(A, 'b')).leaves).toEqual([
+      'omitted (not passed)',
+      'invalid env.E',
+      'invalid secrets.S',
+      'invalid needs.n.outputs.o',
+      'invalid env.E',
+    ]);
+    expect(shown(sym.input(CALLEE, 'w'))).toEqual({
+      children: [sym.input(CALLEE, 'v')],
+      leaves: ['omitted (not passed)', 'invalid secrets.S', 'invalid env.E', 'invalid matrix.os'],
+    });
+  });
 });
 
 describe('resolveSymbols: more queries', () => {
