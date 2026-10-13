@@ -2,6 +2,7 @@ import {
   BUILTIN_SECRETS,
   chainTo,
   isCallOnly,
+  needsSecret,
   readsContextDynamically,
   refsOf,
   secretsNeededBy,
@@ -163,7 +164,7 @@ describe('secretsNeededBy', () => {
     [`${WF}/other.yml`]: callerOf('workflow_call', reads('secrets.NOT_INHERITED')),
   });
   const needed = (file: string) =>
-    [...secretsNeededBy(index, project.workflows.get(`${WF}/${file}`)!)].sort();
+    [...secretsNeededBy(index, project.workflows.get(`${WF}/${file}`)!).names].sort();
 
   it('lists the secrets a workflow reads by name, as written, without the automatic token', () => {
     expect(needed('other.yml')).toEqual(['NOT_INHERITED']);
@@ -174,5 +175,72 @@ describe('secretsNeededBy', () => {
     // `X` is read by top.yml's own `secrets:` mapping; other.yml's secret is not handed over by inherit.
     expect(needed('top.yml')).toEqual(['DEPLOY', 'LOOP', 'Lib_Token', 'X']);
     expect(needed('loop.yml')).toEqual(['LOOP', 'Lib_Token']);
+  });
+
+  it('says when a workflow reads every secret: its own whole or computed read, and none by name', () => {
+    expect(secretsNeededBy(index, project.workflows.get(`${WF}/top.yml`)!).all).toBe(true);
+    for (const file of ['lib.yml', 'loop.yml', 'other.yml'])
+      expect(secretsNeededBy(index, project.workflows.get(`${WF}/${file}`)!).all).toBe(false);
+  });
+});
+
+describe('secretsNeededBy: a read of every secret (#20)', () => {
+  const reads = (expr: string) => `  read:\n    runs-on: x\n    steps:\n      - run: echo \${{ ${expr} }}`;
+  const { project, index } = load({
+    // Behind `secrets: inherit`, a whole or computed read gets every secret the caller has.
+    [`${WF}/whole.yml`]: callerOf('workflow_call', reads('toJSON(secrets)')),
+    [`${WF}/star.yml`]: callerOf('workflow_call', reads('secrets.*')),
+    [`${WF}/computed.yml`]: callerOf('workflow_call', reads('secrets[inputs.name]')),
+    [`${WF}/named.yml`]: callerOf('workflow_call', reads('secrets.ONE')),
+    [`${WF}/via-whole.yml`]: callerOf('workflow_call', call('c', 'whole.yml', 'secrets: inherit')),
+    [`${WF}/via-star.yml`]: callerOf('workflow_call', call('c', 'star.yml', 'secrets: inherit')),
+    [`${WF}/via-computed.yml`]: callerOf('workflow_call', call('c', 'computed.yml', 'secrets: inherit')),
+    // Two levels down, next to a callee that reads one secret by name.
+    [`${WF}/deep.yml`]: callerOf(
+      'push',
+      call('a', 'named.yml', 'secrets: inherit'),
+      call('b', 'via-whole.yml', 'secrets: inherit'),
+    ),
+    // A callee called with `secrets:` gets the named ones only: the caller reads them by name.
+    [`${WF}/declares.yml`]: callerOf(
+      '\n  workflow_call:\n    secrets:\n      ONE: {}',
+      reads('toJSON(secrets)'),
+    ),
+    [`${WF}/explicit.yml`]: callerOf(
+      'push',
+      call('c', 'declares.yml', 'secrets:', '  ONE: ${{ secrets.ONE }}'),
+    ),
+  });
+  const of = (file: string) => {
+    const n = secretsNeededBy(index, project.workflows.get(`${WF}/${file}`)!);
+    return { names: [...n.names].sort(), all: n.all };
+  };
+
+  it.each(['whole', 'star', 'computed'])(
+    'counts the callee’s %s read of secrets as a read of every secret',
+    (kind) => {
+      expect(of(`${kind}.yml`)).toEqual({ names: [], all: true });
+      expect(of(`via-${kind}.yml`)).toEqual({ names: [], all: true });
+    },
+  );
+
+  it('keeps the names next to it, through every level of secrets: inherit', () => {
+    expect(of('deep.yml')).toEqual({ names: ['ONE'], all: true });
+  });
+
+  it('does not follow a callee called with secrets:', () => {
+    expect(of('explicit.yml')).toEqual({ names: ['ONE'], all: false });
+  });
+
+  it('needs every secret but the automatic token when it reads every secret, else the names, ignoring case', () => {
+    const all = secretsNeededBy(index, project.workflows.get(`${WF}/deep.yml`)!);
+    expect(['one', 'TWO', 'GITHUB_TOKEN', 'github_token'].map((n) => needsSecret(all, n))).toEqual([
+      true,
+      true,
+      false,
+      false,
+    ]);
+    const named = secretsNeededBy(index, project.workflows.get(`${WF}/explicit.yml`)!);
+    expect(['one', 'ONE', 'TWO'].map((n) => needsSecret(named, n))).toEqual([true, true, false]);
   });
 });
