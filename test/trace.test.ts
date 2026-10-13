@@ -1,4 +1,4 @@
-import { resolveSymbols, sym, trace } from '@ciatlas/core';
+import { resolveSymbols, sym, type TraceNode, trace } from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 import { load, WF, yaml } from './helpers';
 
@@ -1193,5 +1193,544 @@ describe('resolveSymbols: more queries', () => {
     expect(ids('mid.yml:leaf')).toEqual([]);
     expect(ids('mid.yml:INPUTS.CFG')).toEqual([`${WF}/mid.yml#inputs.cfg`]);
     expect(ids('mid.yml:nope')).toEqual([]);
+  });
+});
+
+// GitHub gives a called workflow its caller's `github` context, event payload included, so in a workflow that can be
+// called `github.event.inputs` is the caller's own event, never what the caller passes in `with:`.
+describe('trace: github.event.inputs in a workflow that can be called', () => {
+  const MID = `${WF}/mid.yml`;
+  const TOP = `${WF}/top.yml`;
+  const UPPER = `${WF}/upper.yml`;
+  const CALLEE = `${WF}/callee.yml`;
+  const mid = (on: string) => yaml`
+    on:
+      ${on}
+    jobs:
+      a:
+        uses: ./.github/workflows/callee.yml
+        with:
+          title: \${{ github.event.inputs.x }}
+      b:
+        uses: ./.github/workflows/callee.yml
+        with:
+          title: \${{ inputs.x || github.event.inputs.x }}
+      c:
+        runs-on: x
+        steps:
+          - run: echo \${{ github.event.inputs.x }} \${{ inputs.x }}
+  `;
+  const both = mid(`workflow_call:
+        inputs:
+          x: { type: string }
+      workflow_dispatch:
+        inputs:
+          x: { type: string }`);
+  const files = (midText: string) => ({
+    [MID]: midText,
+    [CALLEE]: yaml`
+      on:
+        workflow_call:
+          inputs:
+            title: { type: string }
+      jobs:
+        j:
+          runs-on: x
+          steps:
+            - run: echo
+    `,
+    [TOP]: yaml`
+      on: pull_request
+      jobs:
+        m:
+          uses: ./.github/workflows/mid.yml
+          with:
+            x: \${{ github.event.pull_request.title }}
+    `,
+    [UPPER]: yaml`
+      on:
+        workflow_call:
+          inputs:
+            foo: { type: string }
+      jobs:
+        m:
+          uses: ./.github/workflows/mid.yml
+          with:
+            x: \${{ inputs.foo }}
+    `,
+  });
+  const { index } = load(files(both));
+  const title = sym.input(CALLEE, 'title');
+  const x = sym.input(MID, 'x');
+  const leavesOf = (t: TraceNode) => t.leaves.map((l) => `${l.role} ${l.where}: ${l.text}`);
+  const allLeaves = (t: TraceNode): string[] => [...leavesOf(t), ...t.children.flatMap(allLeaves)];
+  const lineOf = (file: string, needle: string) => {
+    const text = index.unit(file)?.source.text ?? '';
+    return text.slice(0, text.indexOf(needle)).split('\n').length;
+  };
+  const parentsVia = (t: TraceNode, field: string) =>
+    t.children.filter((c) => c.via?.loc.line === lineOf(MID, field));
+
+  it('keeps the read in the graph, for the dispatched case and the rules that count reads', () => {
+    expect(index.incoming(title, 'flows').map((e) => e.from)).toEqual([x, x, x]);
+    expect(index.usagesOf(x).map((u) => [u.ref.context, ...u.ref.path].join('.'))).toEqual([
+      'github.event.inputs.x',
+      'inputs.x',
+      'github.event.inputs.x',
+      'github.event.inputs.x',
+      'inputs.x',
+    ]);
+  });
+
+  it('traces a value read only through github.event.inputs up to the dispatch input and the caller’s event', () => {
+    const t = trace(index, title, { direction: 'up' });
+    const [onlyEvent] = parentsVia(t, 'title: ${{ github.event.inputs.x }}');
+    // When dispatched, the dispatch input: entered by whoever dispatches mid.yml, so nothing above it.
+    expect(onlyEvent).toMatchObject({ symbol: x, children: [], leaves: [] });
+    expect(onlyEvent!.stop).toBeUndefined();
+    expect(onlyEvent!.via?.note).toBe('when dispatched');
+    // When called, the caller's event, once per definition, at the reference.
+    expect(leavesOf(t)).toEqual([
+      `context ${MID} › jobs.a: github.event.inputs.x`,
+      `context ${MID} › jobs.b: github.event.inputs.x`,
+    ]);
+    expect(t.leaves[0]!.loc.line).toBe(lineOf(MID, 'title: ${{ github.event.inputs.x }}'));
+    // `inputs.x` in the same expression does hold the callers' values: top.yml's pull request title, upper.yml's foo.
+    // The dispatch input alone is not marked as expanded, so this parent still is.
+    const [both] = parentsVia(t, 'title: ${{ inputs.x ||');
+    expect(both!.symbol).toBe(x);
+    expect(both!.via?.note).toBeUndefined();
+    expect(both!.children.map((c) => c.symbol)).toEqual([sym.input(UPPER, 'foo')]);
+    expect(leavesOf(both!)).toEqual([`context ${TOP} › jobs.m: github.event.pull_request.title`]);
+    expect(allLeaves(t).filter((l) => l.includes('pull_request'))).toHaveLength(1);
+  });
+
+  it('shows the dispatch input alone even where the trace comes up from a caller', () => {
+    // Up from top.yml's job, mid.yml runs as called there; the trace does not keep track of that, so the dispatch input
+    // is still listed, as a parent with nothing above it: top.yml's pull request title is never a source.
+    const outputs = mid(`workflow_call:
+        inputs:
+          x: { type: string }
+        outputs:
+          o:
+            value: \${{ jobs.d.outputs.e }}
+      workflow_dispatch:
+        inputs:
+          x: { type: string }`).replace(
+      '  c:\n',
+      '  d:\n    runs-on: x\n    outputs:\n      e: ${{ github.event.inputs.x }}\n    steps: [{ run: echo }]\n  c:\n',
+    );
+    const t = trace(load(files(outputs)).index, sym.jobOutput(TOP, 'm', 'o'), { direction: 'up' });
+    const e = t.children[0]!.children[0]!;
+    expect(e.symbol).toBe(sym.jobOutput(MID, 'd', 'e'));
+    expect(e.children).toMatchObject([
+      { symbol: x, children: [], leaves: [], via: { note: 'when dispatched' } },
+    ]);
+    expect(allLeaves(t)).toEqual([`context ${MID} › jobs.d: github.event.inputs.x`]);
+  });
+
+  it('does not let a caller’s with: value flow on through github.event.inputs', () => {
+    const t = trace(index, sym.input(UPPER, 'foo'));
+    const [called] = t.children;
+    expect(called!.symbol).toBe(x);
+    // Only `inputs.x` carries foo on: to jobs.b's title and to jobs.c's script.
+    expect(called!.children.map((c) => `${c.symbol} ${c.via?.text}`)).toEqual([
+      `${title} \${{ inputs.x || github.event.inputs.x }}`,
+    ]);
+    expect(leavesOf(called!)).toEqual([
+      `run script jobs.c › steps[0] › run: echo \${{ github.event.inputs.x }} \${{ inputs.x }}`,
+    ]);
+    // From the input itself (dispatched or called), every read is listed.
+    const root = trace(index, x);
+    expect(root.children.map((c) => c.via?.text)).toEqual([
+      '${{ github.event.inputs.x }}',
+      '${{ inputs.x || github.event.inputs.x }}',
+    ]);
+    expect(root.leaves).toHaveLength(2);
+  });
+
+  describe('through the step’s own env', () => {
+    const ACTION = '.github/actions/a';
+    const WFP = `${WF}/wf.yml`;
+    const z = sym.input(WFP, 'z');
+    /** wf.yml's step s passes `env.X` to action a, where the step's own `X` is the value given. */
+    const repo = (value: string) =>
+      load({
+        [WFP]: yaml`
+          on:
+            workflow_dispatch:
+              inputs: { z: { type: string } }
+            workflow_call:
+              inputs: { z: { type: string } }
+          jobs:
+            j:
+              runs-on: x
+              outputs:
+                o: \${{ steps.s.outputs.out }}
+              steps:
+                - id: s
+                  uses: ./.github/actions/a
+                  env:
+                    X: ${value}
+                  with:
+                    v: \${{ env.X }}
+        `,
+        [TOP]: yaml`
+          on: workflow_dispatch
+          jobs:
+            t:
+              uses: ./.github/workflows/wf.yml
+              with:
+                z: from-top
+        `,
+        [UPPER]: yaml`
+          on:
+            workflow_call:
+              inputs: { q: { type: string } }
+          jobs:
+            t:
+              uses: ./.github/workflows/wf.yml
+              with:
+                z: \${{ inputs.q }}
+        `,
+        [`${ACTION}/action.yml`]: yaml`
+          name: a
+          description: d
+          inputs: { v: { description: v } }
+          outputs: { out: { description: o, value: "\${{ inputs.v }}" } }
+          runs:
+            using: composite
+            steps: [{ shell: bash, run: echo }]
+        `,
+      }).index;
+    const eventOnly = repo('${{ github.event.inputs.z }}');
+    const v = sym.input(ACTION, 'v');
+
+    it('traces a value read through the step’s own env up to the dispatch input alone, as a direct read', () => {
+      const t = trace(eventOnly, sym.jobOutput(WFP, 'j', 'o'), { direction: 'up' });
+      const input = t.children[0]!.children[0]!.children[0]!;
+      expect(input.symbol).toBe(v);
+      expect(input.children).toMatchObject([
+        { symbol: z, children: [], leaves: [], via: { text: '${{ env.X }}', note: 'when dispatched' } },
+      ]);
+      // The caller's event, at the reference in the step's env; top.yml's value is never a source.
+      expect(leavesOf(input)).toEqual([`context ${WFP} › jobs.j › steps[0]: github.event.inputs.z`]);
+      expect(allLeaves(t)).not.toContainEqual(expect.stringContaining('from-top'));
+    });
+
+    it('does not let a caller’s with: value flow on through the step’s own env', () => {
+      const t = trace(eventOnly, sym.input(UPPER, 'q'));
+      expect(t.children.map((c) => c.symbol)).toEqual([z]);
+      expect(t.children[0]!.children).toEqual([]);
+      expect(t.children[0]!.leaves).toEqual([]);
+      // From the input itself, the step's reads are listed.
+      expect(trace(eventOnly, z).children.map((c) => `${c.symbol} ${c.via?.text}`)).toEqual([
+        `${v} \${{ env.X }}`,
+      ]);
+    });
+
+    it('traces the input on up when the step’s own env also reads it through inputs', () => {
+      const both = repo('${{ inputs.z || github.event.inputs.z }}');
+      const up = trace(both, v, { direction: 'up' });
+      expect(up.children.map((c) => `${c.symbol} ${c.via?.note}`)).toEqual([`${z} undefined`]);
+      expect(leavesOf(up.children[0]!)).toEqual([`literal ${TOP} › jobs.t: "from-top"`]);
+      expect(leavesOf(up)).toEqual([`context ${WFP} › jobs.j › steps[0]: github.event.inputs.z`]);
+      expect(trace(both, sym.input(UPPER, 'q')).children[0]!.children.map((c) => c.symbol)).toEqual([v]);
+    });
+  });
+
+  it('leaves a workflow that is only dispatched as it was', () => {
+    const { index: dispatched } = load(
+      files(
+        mid(`workflow_dispatch:
+        inputs:
+          x: { type: string }`),
+      ),
+    );
+    const t = trace(dispatched, title, { direction: 'up' });
+    expect(t.children.map((c) => `${c.symbol} ${c.via?.note}`)).toEqual([`${x} undefined`, `${x} undefined`]);
+    expect(t.children[1]).toMatchObject({ stop: 'seen' });
+    expect(t.leaves).toEqual([]);
+    expect(trace(dispatched, x).children).toHaveLength(2);
+  });
+
+  it('lists no dispatch input for a name that only workflow_call declares, or that none does', () => {
+    const triggers = `workflow_call:
+        inputs:
+          x: { type: string }
+      workflow_dispatch:
+        inputs:
+          d: { type: string }`;
+    // x is not a dispatch input: github.event.inputs.x is empty when mid.yml is dispatched and the caller's event when
+    // it is called, so job a ends at the context alone. Job b's inputs.x still holds the callers' values.
+    const { index: callName } = load(files(mid(triggers)));
+    const t = trace(callName, title, { direction: 'up' });
+    expect(t.children.map((c) => `${c.symbol} ${c.via?.text} ${c.via?.note}`)).toEqual([
+      `${x} \${{ inputs.x || github.event.inputs.x }} undefined`,
+    ]);
+    expect(leavesOf(t)).toEqual([
+      `context ${MID} › jobs.a: github.event.inputs.x`,
+      `context ${MID} › jobs.b: github.event.inputs.x`,
+    ]);
+    // A name no trigger declares: the context alone too.
+    const ghostly = mid(triggers).replace(
+      'title: ${{ github.event.inputs.x }}',
+      'title: ${{ github.event.inputs.ghost }}',
+    );
+    const { index: ghost } = load(files(ghostly), { validateSchema: false });
+    const g = trace(ghost, title, { direction: 'up' });
+    expect(g.children.map((c) => c.via?.text)).toEqual(['${{ inputs.x || github.event.inputs.x }}']);
+    expect(leavesOf(g)[0]).toBe(`context ${MID} › jobs.a: github.event.inputs.ghost`);
+  });
+
+  it('ends at the caller’s event in a workflow that is only called, as it did', () => {
+    const { index: called } = load(
+      files(
+        mid(`workflow_call:
+        inputs:
+          x: { type: string }`),
+      ),
+    );
+    const t = trace(called, title, { direction: 'up' });
+    expect(t.children.map((c) => `${c.symbol} ${c.via?.text}`)).toEqual([
+      `${x} \${{ inputs.x || github.event.inputs.x }}`,
+    ]);
+    expect(leavesOf(t)).toEqual([
+      `context ${MID} › jobs.a: github.event.inputs.x`,
+      `context ${MID} › jobs.b: github.event.inputs.x`,
+    ]);
+    const down = trace(called, sym.input(UPPER, 'foo')).children[0]!;
+    expect(down.children.map((c) => c.via?.text)).toEqual(['${{ inputs.x || github.event.inputs.x }}']);
+  });
+});
+
+// Networks of reusable calls, where the trace reaches a symbol along many paths. top.yml calls a workflow that can be
+// called and dispatched and reads github.event.inputs.x: the shapes where telling a called workflow from a dispatched
+// one could multiply the size of the trace.
+describe('trace: size on networks of reusable calls', () => {
+  const TOP = `${WF}/top.yml`;
+  const MID = `${WF}/mid.yml`;
+  const jobIds = (n: number) => Array.from({ length: n }, (_, i) => `j${i + 1}`);
+  const outputsOf = (jobs: string[]) => jobs.map((j) => `\${{ needs.${j}.outputs.o }}`).join('');
+  const count = (t: TraceNode): number => 1 + t.children.reduce((sum, c) => sum + count(c), 0);
+  /** The most times one symbol is expanded (stopped nodes and dispatch inputs alone are not expanded). */
+  const mostExpansions = (t: TraceNode) => {
+    const times = new Map<string, number>();
+    const visit = (n: TraceNode) => {
+      if (!n.stop && (n.children.length > 0 || n.leaves.length > 0))
+        times.set(n.symbol, (times.get(n.symbol) ?? 0) + 1);
+      n.children.forEach(visit);
+    };
+    visit(t);
+    return Math.max(...times.values());
+  };
+  const callTop = (callee: string) => yaml`
+    on: pull_request
+    jobs:
+      m:
+        uses: ./.github/workflows/${callee}.yml
+        with:
+          x: \${{ github.event.pull_request.title }}
+  `;
+
+  /** mid.yml's jobs j1..jN: each calls wK.yml with github.event.inputs.x and the outputs of every earlier job. */
+  const chain = (n: number) =>
+    jobIds(n).flatMap((id, k) => [
+      `  ${id}:`,
+      `    uses: ./.github/workflows/w${k + 1}.yml`,
+      ...(k > 0 ? [`    needs: [${jobIds(k).join(', ')}]`] : []),
+      `    with: { v: "\${{ github.event.inputs.x }}${outputsOf(jobIds(k))}" }`,
+    ]);
+
+  /** top.yml, and mid.yml with the jobs given; mid.yml's output is jobs.jN's. */
+  const network = (n: number, jobs: string[]) => ({
+    [TOP]: callTop('mid'),
+    [MID]: `${yaml`
+      on:
+        workflow_call:
+          inputs: { x: { type: string } }
+          outputs: { o: { value: "\${{ jobs.j${n}.outputs.o }}" } }
+        workflow_dispatch:
+          inputs: { x: { type: string } }
+      jobs:
+    `}${jobs.join('\n')}\n`,
+  });
+
+  /** A reusable workflow with input v, whose output o is its job j's, made of the lines given. */
+  const reusable = (job: string[]) =>
+    yaml`
+      on:
+        workflow_call:
+          inputs: { v: { type: string } }
+          outputs: { o: { value: "\${{ jobs.j.outputs.o }}" } }
+      jobs:
+        j:
+    ` + job.map((l) => `    ${l}\n`).join('');
+  const echoes = reusable(['runs-on: x', 'outputs: { o: "${{ inputs.v }}" }', 'steps: [{ run: echo }]']);
+
+  /** review2-B's gen-stress.py: each wK.yml echoes its input. */
+  const stress = (n: number) => ({
+    ...network(n, chain(n)),
+    ...Object.fromEntries(jobIds(n).map((_, k) => [`${WF}/w${k + 1}.yml`, echoes])),
+  });
+
+  /** review3-B's gen-shared-callee.py: each wK.yml gets its output from lK.yml, which mid.yml also calls directly. */
+  const sharedCallee = (n: number) => {
+    const all = outputsOf(jobIds(n));
+    const direct = jobIds(n).flatMap((_, k) => [
+      `  z${k + 1}:`,
+      `    uses: ./.github/workflows/l${k + 1}.yml`,
+      `    needs: [${jobIds(n).join(', ')}]`,
+      `    with: { v: "${all}" }`,
+    ]);
+    const wrapper = (k: number) =>
+      reusable([`uses: ./.github/workflows/l${k}.yml`, 'with: { v: "${{ inputs.v }}" }']);
+    return {
+      ...network(n, [...chain(n), ...direct]),
+      ...Object.fromEntries(
+        jobIds(n).flatMap((_, k) => [
+          [`${WF}/w${k + 1}.yml`, wrapper(k + 1)],
+          [`${WF}/l${k + 1}.yml`, echoes],
+        ]),
+      ),
+    };
+  };
+
+  /** review3-B's gen-action-stress.py: each wK.yml runs action aK, and mid.yml's job z runs every aK. */
+  const sharedAction = (n: number) => {
+    const uses = jobIds(n).flatMap((_, k) => [
+      `      - uses: ./.github/actions/a${k + 1}`,
+      `        with: { v: "${outputsOf(jobIds(n))}" }`,
+    ]);
+    const z = ['  z:', '    runs-on: x', `    needs: [${jobIds(n).join(', ')}]`, '    steps:', ...uses];
+    const runs = (k: number) =>
+      reusable([
+        'runs-on: x',
+        'outputs: { o: "${{ steps.s.outputs.o }}" }',
+        'steps:',
+        `  - { id: s, uses: ./.github/actions/a${k}, with: { v: "\${{ inputs.v }}" } }`,
+      ]);
+    const action = yaml`
+      name: a
+      description: d
+      inputs: { v: { description: v } }
+      outputs: { o: { description: o, value: "\${{ inputs.v }}" } }
+      runs:
+        using: composite
+        steps: [{ shell: bash, run: echo }]
+    `;
+    return {
+      ...network(n, [...chain(n), ...z]),
+      ...Object.fromEntries(
+        jobIds(n).flatMap((_, k) => [
+          [`${WF}/w${k + 1}.yml`, runs(k + 1)],
+          [`.github/actions/a${k + 1}/action.yml`, action],
+        ]),
+      ),
+    };
+  };
+
+  /**
+   * review3-B's gen-diamond.py: f-way diamonds k deep. top.yml calls w0.yml; each w<i>.yml calls a<i+1>_1..a<i+1>_f.yml,
+   * each of which calls w<i+1>.yml, so f^k chains of calls reach w<k>.yml. Only w0.yml can be dispatched, and it passes
+   * github.event.inputs.x on. With `every` (review4's gen-diamond-all.py and gen-diamond-only.py), every workflow can
+   * be called and dispatched and passes that value on.
+   */
+  const diamond = (f: number, k: number, every?: string) => {
+    const dispatch = '  workflow_dispatch:\n    inputs: { x: { type: string } }\n';
+    const head = (i: number) =>
+      `on:\n  workflow_call:\n    inputs: { x: { type: string } }\n    outputs: { o: { value: "\${{ jobs.out.outputs.o }}" } }\n${every || i === 0 ? dispatch : ''}jobs:\n`;
+    const out = (o: string, needs: string[]) =>
+      `  out:\n    runs-on: x\n${needs.length ? `    needs: [${needs.join(', ')}]\n` : ''}    outputs: { o: "${o}" }\n    steps: [{ run: echo }]\n`;
+    const pass = (i: number) => every ?? (i === 0 ? '${{ github.event.inputs.x }}' : '${{ inputs.x }}');
+    const calls = Array.from({ length: f }, (_, j) => `c${j + 1}`);
+    const repo: Record<string, string> = { [TOP]: callTop('w0') };
+    for (let i = 0; i <= k; i++) {
+      const fanOut = calls.map(
+        (c, j) => `  ${c}: { uses: ./.github/workflows/a${i + 1}_${j + 1}.yml, with: { x: "${pass(i)}" } }\n`,
+      );
+      repo[`${WF}/w${i}.yml`] =
+        head(i) + (i < k ? fanOut.join('') + out(outputsOf(calls), calls) : out(pass(i), []));
+      for (let j = 1; i < k && j <= f; j++)
+        repo[`${WF}/a${i + 1}_${j}.yml`] =
+          `${head(i + 1)}  c: { uses: ./.github/workflows/w${i + 1}.yml, with: { x: "${pass(i + 1)}" } }\n${out('${{ needs.c.outputs.o }}', ['c'])}`;
+    }
+    return repo;
+  };
+
+  // v0.2.0's node counts up from top.yml's job output at depths 12, 24, 36 and 48. Keeping track of the calls the trace
+  // came through multiplied them: with the chain of calls in the expansion key, `diamond 2-4, all` gave 303 nodes at
+  // depth 48, and larger diamonds grew as f^k.
+  const shapes: [string, Record<string, string>, number[]][] = [
+    ['stress 6', stress(6), [42, 42, 42, 42]],
+    ['shared callee 3', sharedCallee(3), [23, 36, 36, 36]],
+    ['shared action 3', sharedAction(3), [23, 36, 36, 36]],
+    ['diamond 2-4', diamond(2, 4), [22, 44, 64, 64]],
+    ['diamond 2-4, all', diamond(2, 4, '${{ inputs.x || github.event.inputs.x }}'), [22, 44, 64, 64]],
+    ['diamond 2-4, only', diamond(2, 4, '${{ github.event.inputs.x }}'), [22, 44, 64, 64]],
+  ];
+
+  it.each(shapes)(
+    'stays within twice v0.2.0’s size, each symbol expanded once up, at most twice down: %s',
+    (_name, files, v020) => {
+      const { index } = load(files);
+      const sizes = [12, 24, 36, 48].map((maxDepth) => {
+        const t = trace(index, sym.jobOutput(TOP, 'm', 'o'), { direction: 'up', maxDepth });
+        expect(mostExpansions(t)).toBe(1);
+        return count(t);
+      });
+      for (const [i, n] of sizes.entries()) expect(n).toBeLessThanOrEqual(2 * v020[i]!);
+      const first = index.nodes.has(MID) ? MID : `${WF}/w0.yml`;
+      expect(mostExpansions(trace(index, sym.input(first, 'x'), { maxDepth: 48 }))).toBeLessThanOrEqual(2);
+    },
+  );
+});
+
+// An input's default (#13) where a value reads the input only through github.event.inputs (#10).
+describe('trace: input defaults and github.event.inputs', () => {
+  const TOP = `${WF}/top.yml`;
+  const C = `${WF}/c.yml`;
+  const allLeaves = (t: TraceNode): string[] => [
+    ...t.leaves.map((l) => `${l.role} ${l.where}: ${l.text}`),
+    ...t.children.flatMap(allLeaves),
+  ];
+
+  it('leaves the default of an input a call omits out where it is read only through github.event.inputs', () => {
+    const { index } = load({
+      [TOP]: yaml`
+        on: pull_request
+        jobs:
+          t:
+            uses: ./.github/workflows/c.yml
+      `,
+      [C]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              z: { type: string, default: from-call }
+          workflow_dispatch:
+            inputs:
+              z: { type: string, default: from-dispatch }
+        jobs:
+          b:
+            runs-on: x
+            outputs:
+              event: \${{ github.event.inputs.z }}
+              input: \${{ inputs.z }}
+            steps:
+              - run: echo
+      `,
+    });
+    const z = sym.input(C, 'z');
+    // Through inputs.z: top.yml omits z, so z is its workflow_call default.
+    const input = trace(index, sym.jobOutput(C, 'b', 'input'), { direction: 'up' });
+    expect(allLeaves(input)).toContain(`literal ${C} › on.workflow_call.inputs.z.default: "from-call"`);
+    // Through github.event.inputs.z: when c.yml is called, and its default applies, the read is top.yml's event; when
+    // it is dispatched, the value entered. The dispatch input is shown alone, without the default of the call.
+    const event = trace(index, sym.jobOutput(C, 'b', 'event'), { direction: 'up' });
+    expect(event.children).toMatchObject([
+      { symbol: z, via: { note: 'when dispatched' }, children: [], leaves: [] },
+    ]);
+    expect(allLeaves(event)).toEqual([`context ${C} › jobs.b: github.event.inputs.z`]);
   });
 });
