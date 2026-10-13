@@ -39,6 +39,14 @@ function locatedRefs(text: string): string[] {
   );
 }
 
+/** The source text from a location's start to its end, which may be on a later line. */
+function sourceAt(text: string, l: Loc): string {
+  const lines = text.split('\n');
+  const offset = (line: number, column: number) =>
+    lines.slice(0, line - 1).reduce((n, s) => n + s.length + 1, column - 1);
+  return text.slice(offset(l.line, l.column), offset(l.endLine, l.endColumn));
+}
+
 describe('parseWorkflowFile — triggers and interface', () => {
   it.each([
     ['on: push', ['push']],
@@ -667,6 +675,192 @@ describe('reference locations', () => {
           const line = text.split(/\r?\n/)[loc.line - 1]!;
           const written = style === 'single' ? "'', inputs.a" : "', inputs.a";
           expect(line.slice(loc.endColumn - 1 - written.length, loc.endColumn - 1)).toBe(written);
+        },
+      ),
+    );
+  });
+
+  it('locates references after a string that spans lines (#14)', () => {
+    // A folded block keeps the line breaks around more-indented lines, so the string holds them (apache/airflow).
+    const text = stepWorkflow([
+      '      - if: >',
+      "          contains(fromJSON('[",
+      '            "a",',
+      '            "b"',
+      "            ]'), github.event.sender.login) && inputs.a",
+      '        run: x',
+    ]);
+    expect(parse(text).sites[0]!.text).toContain('\'[\n  "a",\n  "b"\n  ]\'');
+    expect(locatedRefs(text)).toEqual(['github.event.sender.login@10:18', 'inputs.a@10:48']);
+  });
+
+  // `⏎` is a line break in the decoded string: as written in a literal block, a blank line in the folded and flow
+  // styles (which fold a single one into a space) and an escape in a double-quoted scalar.
+  const piece = fc.constantFrom('inputs.a', "''", ' ', '}}', '${{', 'x', '.', '⏎');
+  const styles: Record<string, [(expr: string) => string[], (eol: string) => string]> = {
+    literal: [(e) => ['      - run: |', `          echo ${e}`], (eol) => `${eol}          `],
+    folded: [(e) => ['      - run: >-', `          echo ${e}`], (eol) => `${eol}${eol}          `],
+    plain: [(e) => [`      - run: echo ${e}`], (eol) => `${eol}${eol}          `],
+    single: [(e) => [`      - run: 'echo ${e.replaceAll("'", "''")}'`], (eol) => `${eol}${eol}          `],
+    double: [(e) => [`      - run: "echo ${e}"`], () => '\\r\\n'],
+  };
+
+  it('places references after strings that span lines, and one whose key spans lines, in every style (#14)', () => {
+    fc.assert(
+      fc.property(
+        fc.array(piece, { maxLength: 8 }),
+        fc.array(piece, { maxLength: 8 }),
+        fc.array(piece, { maxLength: 8 }),
+        fc.constantFrom(...Object.keys(styles)),
+        fc.constantFrom('\n', '\r\n'),
+        (a, b, c, style, eol) => {
+          const [lines, lineBreak] = styles[style]!;
+          const expr = `\${{ format('${a.join('')}', inputs.a, '${b.join('')}', inputs.b) == github.event['${c.join('')}'] }}`;
+          const text = stepWorkflow(lines(expr), eol).replaceAll('⏎', lineBreak(eol));
+          const refs = parse(text).sites.flatMap((s) => s.segments.flatMap((seg) => seg.refs));
+          expect(refs.map((r) => r.path[0])).toEqual(['a', 'b', 'event']);
+          const quote = style === 'single' ? "''" : "'";
+          for (const { loc, path } of refs.slice(0, 2)) {
+            const line = text.split(/\r?\n/)[loc.line - 1]!;
+            const written = `${quote}, inputs.${path[0]}`;
+            expect(line.slice(loc.endColumn - 1 - written.length, loc.endColumn - 1)).toBe(written);
+          }
+          const key = c.join('').replaceAll("'", quote).replaceAll('⏎', lineBreak(eol));
+          expect(sourceAt(text, refs[2]!.loc)).toBe(`github.event[${quote}${key}${quote}]`);
+        },
+      ),
+    );
+  });
+
+  it('locates a reference whose own text spans lines, word by word (#14)', () => {
+    // A line break in a bracketed key or between the names is written with indentation, as a blank line or as an
+    // escape, or folds into a space: the source does not hold the reference as the expression reads it.
+    const text = stepWorkflow([
+      '      - run: |',
+      '          echo ${{ inputs.a ==',
+      "            github.event['a",
+      "            b'].c }} ${{ steps.s.outputs",
+      '            .v }}',
+      '      - run: >-',
+      "          echo ${{ format('',",
+      "          inputs.a) == github.event['a",
+      '',
+      "          b'] }}",
+      "      - run: \"echo ${{ format('\\n', inputs.a) == github.event['a\\nb'] }}\"",
+      '      - run: echo ${{ inputs.a == github.event',
+      '          .action }}',
+    ]);
+    expect(parse(text).sites.map((s) => s.text)).toContain('echo ${{ inputs.a == github.event .action }}');
+    expect(
+      parse(text).sites.flatMap((s) =>
+        s.segments.flatMap((seg) =>
+          seg.refs.map((r) => `${sourceAt(text, r.loc)}@${r.loc.line}:${r.loc.column}`),
+        ),
+      ),
+    ).toEqual([
+      'inputs.a@7:20',
+      "github.event['a\n            b'].c@8:13",
+      'steps.s.outputs\n            .v@9:26',
+      'inputs.a@13:11',
+      "github.event['a\n\n          b']@13:24",
+      'inputs.a@16:37',
+      "github.event['a\\nb']@16:50",
+      'inputs.a@17:23',
+      'github.event\n          .action@17:35',
+    ]);
+  });
+
+  it('finds the words of a reference only with a space between them, at any copy of its first word (#14)', () => {
+    // A reference the source spells with an escape is not found and leaves the search where it was, so a copy of the
+    // words joined with nothing between them (`inputs['ab']`), or of the first word (`github.event['a`), can be ahead.
+    const text = stepWorkflow([
+      '      - run: |',
+      '          echo ${{ toJSON(github.event[inputs.ab][inputs',
+      '            .ab]) }}',
+      "      - run: \"echo ${{ format('{0}{1}', inputs['\\x61 b'], inputs['ab']) }}\"",
+      "      - run: \"echo ${{ github.event['a\\x63'] == github.event['a\\nb'] }}\"",
+    ]);
+    // `inputs['a b']` and `github.event['ac']` are spelled with an escape and keep the expression's offsets: only their
+    // start is checked.
+    const escaped = new Set(['a b', 'ac']);
+    expect(
+      parse(text).sites.flatMap((s) =>
+        s.segments.flatMap((seg) =>
+          seg.refs.map((r) => {
+            const written = escaped.has(r.path.at(-1)!) ? '' : sourceAt(text, r.loc);
+            return `${written}@${r.loc.line}:${r.loc.column}`;
+          }),
+        ),
+      ),
+    ).toEqual([
+      'github.event@7:27',
+      'inputs\n            .ab@7:51',
+      'inputs.ab@7:40',
+      '@9:41',
+      "inputs['ab']@9:59",
+      '@10:24',
+      "github.event['a\\nb']@10:49",
+    ]);
+  });
+
+  it("finds a chain's computed indexes in the order they are written", () => {
+    // They are listed from the right; searched in that order, the left one was not found past the right one and kept
+    // the expression's offsets, which drift with doubled quotes, an indented line or an escape before it.
+    const text = stepWorkflow([
+      "      - run: 'echo ${{ toJSON(github.event[github.event[''a'']][github.event[''b'']]) }}'",
+      '      - run: |',
+      '          echo ${{ toJSON(',
+      "            github.event[github.event['a']][github.event['b']]) }}",
+      "      - run: \"echo ${{ toJSON(\\tgithub.event[github.event['a']][github.event['b']]) }}\"",
+    ]);
+    expect(locatedRefs(text)).toEqual([
+      'github.event@6:31',
+      "github.event[''b'']@6:65",
+      "github.event[''a'']@6:44",
+      'github.event@9:13',
+      "github.event['b']@9:45",
+      "github.event['a']@9:26",
+      'github.event@10:33',
+      "github.event['b']@10:65",
+      "github.event['a']@10:46",
+    ]);
+  });
+
+  it('finds a computed index inside a reference that goes on past it', () => {
+    // The search went on from the end of `github.event[inputs.x].y`, past its own index `inputs.x`, which then took the
+    // place of the later `inputs.x`.
+    const text = stepWorkflow([
+      '      - run: echo ${{ github.event[inputs.x].y == inputs.x }}',
+      '      - run: |',
+      '          echo ${{ needs[inputs.job].outputs.v }}',
+    ]);
+    expect(locatedRefs(text)).toEqual([
+      'github.event[inputs.x].y@6:23',
+      'inputs.x@6:36',
+      'inputs.x@6:51',
+      'needs[inputs.job].outputs.v@8:20',
+      'inputs.job@8:26',
+    ]);
+  });
+
+  it('places a key that spans lines past an index that writes it without the spaces, in every style (#14)', () => {
+    fc.assert(
+      fc.property(
+        fc.array(piece, { maxLength: 8 }),
+        fc.constantFrom(...Object.keys(styles)),
+        fc.constantFrom('\n', '\r\n'),
+        (key, style, eol) => {
+          const [lines, lineBreak] = styles[style]!;
+          const joined = key.filter((p) => p !== ' ' && p !== '⏎');
+          const expr = `\${{ toJSON(github.event[github.event['${joined.join('')}']][github.event['${key.join('')}']]) }}`;
+          const text = stepWorkflow(lines(expr), eol).replaceAll('⏎', lineBreak(eol));
+          const quote = style === 'single' ? "''" : "'";
+          const written = (k: string[]) =>
+            `github.event[${quote}${k.join('').replaceAll("'", quote).replaceAll('⏎', lineBreak(eol))}${quote}]`;
+          const refs = parse(text).sites.flatMap((s) => s.segments.flatMap((seg) => seg.refs));
+          // When the key has no space, both indexes are the same reference: which takes which copy does not matter.
+          const keys = refs.filter((r) => r.path.length === 2).map((r) => sourceAt(text, r.loc));
+          expect(keys.sort()).toEqual([written(joined), written(key)].sort());
         },
       ),
     );
