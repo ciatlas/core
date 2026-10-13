@@ -1348,3 +1348,122 @@ describe('ProjectIndex: github.event.inputs names a workflow_dispatch input only
     expect(index.readsOf(unit, run, refs[4]!)).toEqual([]);
   });
 });
+
+// In a workflow that can be dispatched, `github.event` holds its `workflow_dispatch` inputs when it is dispatched, so a
+// whole or computed `github`, `github.event` or `github.event.inputs` reads each of them. A workflow that is called gets
+// its caller's `github` context, and an action its job's: there such a read takes none of the unit's inputs.
+describe('ProjectIndex.readsOf: whole and computed github reads (#22)', () => {
+  const DISP = `${WF}/disp.yml`;
+  const BOTH = `${WF}/both.yml`;
+  const CALL = `${WF}/call.yml`;
+  const PUSH_ONLY = `${WF}/push.yml`;
+  const ACT = '.github/actions/act';
+  const every =
+    '${{ toJSON(github) }} ${{ github[matrix.k] }} ${{ toJSON(github.*) }} ${{ toJSON(github.event) }}';
+  const more =
+    "${{ github.event[matrix.k] }} ${{ toJSON(github.event.*) }} ${{ github[matrix.k].inputs.a }} ${{ github.event[matrix.k].B }} ${{ github['event']['inputs']['a'] }}";
+  const none =
+    '${{ github.sha }} ${{ github.event.pull_request }} ${{ github.event_name }} ${{ github[matrix.k].inputs.nope }}';
+  const job = (on: string) => yaml`
+    on:
+      ${on}
+    jobs:
+      j:
+        runs-on: x
+        strategy:
+          matrix:
+            k: [event]
+        steps:
+          - run: echo '${every}' '${more}' '${none}'
+  `;
+  const { index } = load({
+    [DISP]: job(`workflow_dispatch:
+        inputs:
+          a: { type: string }
+          b: { type: string }`),
+    [BOTH]: job(`workflow_call:
+        inputs:
+          c: { type: string }
+          A: { type: string }
+      workflow_dispatch:
+        inputs:
+          a: { type: string }`),
+    [CALL]: job(`workflow_call:
+        inputs:
+          a: { type: string }`),
+    [PUSH_ONLY]: job('push'),
+    [`${ACT}/action.yml`]: yaml`
+      name: act
+      description: d
+      inputs:
+        a: { description: a }
+      runs:
+        using: composite
+        steps:
+          - shell: bash
+            run: echo '${every}'
+    `,
+  });
+  /** What each `github` reference of the unit's run step reads, as `text: symbols`. */
+  const reads = (path: string) => {
+    const unit = index.unit(path)!;
+    return [...refsOf(unit)]
+      .filter(({ ref }) => ref.context === 'github')
+      .map(
+        ({ site, ref }) =>
+          `${[ref.context, ...ref.path].join('.')}: ${index.readsOf(unit, site, ref).join(' ')}`,
+      );
+  };
+  const d = (name: string) => sym.input(DISP, name);
+
+  it('reads every dispatch input, or the one named, in a workflow that can only be dispatched', () => {
+    const all = `${d('a')} ${d('b')}`;
+    expect(reads(DISP)).toEqual([
+      `github: ${all}`,
+      `github.?: ${all}`,
+      `github.*: ${all}`,
+      `github.event: ${all}`,
+      `github.event.?: ${all}`,
+      `github.event.*: ${all}`,
+      `github.?.inputs.a: ${d('a')}`,
+      // GitHub looks properties up ignoring case.
+      `github.event.?.B: ${d('b')}`,
+      `github.event.inputs.a: ${d('a')}`,
+      'github.sha: ',
+      'github.event.pull_request: ',
+      'github.event_name: ',
+      'github.?.inputs.nope: ',
+    ]);
+  });
+
+  it('marks those reads as whole, except one that names the input outright', () => {
+    expect(
+      index
+        .usagesOf(d('a'))
+        .map((u) => `${[u.ref.context, ...u.ref.path].join('.')}${u.whole ? ' (whole)' : ''}`),
+    ).toEqual([
+      'github (whole)',
+      'github.? (whole)',
+      'github.* (whole)',
+      'github.event (whole)',
+      'github.event.? (whole)',
+      'github.event.* (whole)',
+      'github.?.inputs.a (whole)',
+      'github.event.inputs.a',
+    ]);
+  });
+
+  it('reads the dispatch inputs only in a workflow that can also be called, by the workflow_call spelling', () => {
+    // `A` (workflow_call) and `a` (workflow_dispatch) are one input; `c` is never in github.event.inputs.
+    expect(reads(BOTH)[0]).toBe(`github: ${sym.input(BOTH, 'A')}`);
+    expect(index.usagesOf(sym.input(BOTH, 'c'))).toEqual([]);
+  });
+
+  it.each([
+    ['a workflow that can only be called: github is its caller’s', CALL],
+    ['a workflow that cannot be dispatched', PUSH_ONLY],
+    ['an action: github is its job’s', ACT],
+  ])('reads no input in %s', (_, path) => {
+    expect(reads(path).every((r) => r.endsWith(': '))).toBe(true);
+  });
+});

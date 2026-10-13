@@ -262,10 +262,12 @@ describe('trace upstream to runtime contexts', () => {
       `,
     });
     const t = trace(index, sym.input(`${WF}/callee.yml`, 'title'), { direction: 'up' });
-    // `github.event.inputs.x` is the dispatch input itself: a symbol, not a context.
-    expect(t.children.map((c) => c.symbol)).toEqual([
-      sym.input(`${WF}/caller.yml`, 'x'),
-      sym.input(`${WF}/caller.yml`, 'x'),
+    // `github.event.inputs.x` is the dispatch input itself: a symbol, not a context. `toJSON(github)` holds it too
+    // (#22), next to the rest of the context.
+    expect(t.children.map((c) => `${c.symbol} ${c.via?.loc.line}`)).toEqual([
+      `${WF}/caller.yml#inputs.x 14`,
+      `${WF}/caller.yml#inputs.x 19`,
+      `${WF}/caller.yml#inputs.x 27`,
     ]);
     const at = `${WF}/caller.yml › jobs`;
     expect(leavesOf(t)).toEqual([
@@ -2597,5 +2599,100 @@ describe('trace: a whole env and github.event.inputs', () => {
     expect(leavesOf(up.children[0]!)).toEqual([`literal ${TOP} › jobs.t: "from-top"`]);
     expect(leavesOf(up)).toContain(event);
     expect(trace(index, sym.input(UPPER, 'q')).children[0]!.children.map((c) => c.symbol)).toEqual([v]);
+  });
+});
+
+// A whole or computed github read in a workflow that can be dispatched reads every dispatch input (#22): the debug step
+// that prints toJSON(github) uses them, and a value computed from it comes from them and from the rest of the context.
+describe('trace: whole and computed github reads (#22)', () => {
+  const DISP = `${WF}/disp.yml`;
+  const BOTH = `${WF}/both.yml`;
+  const UP = `${WF}/up.yml`;
+  const { index } = load({
+    [DISP]: yaml`
+      on:
+        workflow_dispatch:
+          inputs:
+            a: { type: string }
+            b: { type: string }
+      jobs:
+        j:
+          runs-on: x
+          outputs:
+            all: \${{ toJSON(github) }}
+            ev: \${{ toJSON(github.event.inputs) }}
+          steps:
+            - name: Dump
+              run: echo '\${{ toJSON(github) }}'
+    `,
+    [BOTH]: yaml`
+      on:
+        workflow_call:
+          inputs:
+            c: { type: string }
+            s: { type: string }
+        workflow_dispatch:
+          inputs:
+            s: { type: string }
+            d: { type: string }
+      jobs:
+        j:
+          runs-on: x
+          outputs:
+            all: \${{ toJSON(github) }}
+          steps:
+            - run: echo '\${{ toJSON(github.event) }}'
+    `,
+    [UP]: yaml`
+      on:
+        workflow_call:
+          inputs:
+            q: { type: string }
+      jobs:
+        b:
+          uses: ./.github/workflows/both.yml
+          with:
+            c: \${{ inputs.q }}
+            s: \${{ inputs.q }}
+    `,
+  });
+  const leavesOf = (t: TraceNode) => t.leaves.map((l) => `${l.role}: ${l.text}`);
+  const kids = (t: TraceNode) => t.children.map((c) => `${c.symbol}${c.via?.note ? ` (${c.via.note})` : ''}`);
+
+  it('traces a value computed from toJSON(github) up to every dispatch input and the github context', () => {
+    const t = trace(index, sym.jobOutput(DISP, 'j', 'all'), { direction: 'up' });
+    expect(kids(t)).toEqual([sym.input(DISP, 'a'), sym.input(DISP, 'b')]);
+    expect(leavesOf(t)).toEqual(['context: github']);
+    // github.event.inputs holds the dispatch inputs only.
+    const ev = trace(index, sym.jobOutput(DISP, 'j', 'ev'), { direction: 'up' });
+    expect([kids(ev), leavesOf(ev)]).toEqual([[sym.input(DISP, 'a'), sym.input(DISP, 'b')], []]);
+  });
+
+  it('lists the debug step that prints toJSON(github) among a dispatch input’s uses', () => {
+    const t = trace(index, sym.input(DISP, 'a'));
+    expect(t.children.map((c) => c.via?.text)).toEqual([
+      '${{ toJSON(github) }}',
+      '${{ toJSON(github.event.inputs) }}',
+    ]);
+    expect(t.leaves.map((l) => `${l.role} ${l.where}`)).toEqual(['run script jobs.j › steps[0] › run']);
+  });
+
+  it('reads the dispatch inputs only when dispatched in a workflow that can also be called', () => {
+    const t = trace(index, sym.jobOutput(BOTH, 'j', 'all'), { direction: 'up' });
+    expect(kids(t)).toEqual([
+      `${sym.input(BOTH, 's')} (when dispatched)`,
+      `${sym.input(BOTH, 'd')} (when dispatched)`,
+    ]);
+    expect(t.children.every((c) => c.children.length === 0 && c.leaves.length === 0)).toBe(true);
+    expect(leavesOf(t)).toEqual(['context: github']);
+    // A caller's with: value never flows on through github there: when called, github is the caller's.
+    const called = trace(index, sym.input(UP, 'q')).children;
+    expect(called.map((c) => [c.symbol, c.children.length, c.leaves.length])).toEqual([
+      [sym.input(BOTH, 'c'), 0, 0],
+      [sym.input(BOTH, 's'), 0, 0],
+    ]);
+    // From the input itself (dispatched or called), the reads are listed.
+    expect(trace(index, sym.input(BOTH, 's')).leaves).toHaveLength(1);
+    expect(trace(index, sym.input(BOTH, 'c')).leaves).toHaveLength(0);
   });
 });

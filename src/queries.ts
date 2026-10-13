@@ -10,26 +10,19 @@ export function* refsOf(unit: UnitDecl): Generator<{ site: ExprSite; ref: Locate
 /**
  * True when a unit reads a context as a whole or through a computed key (`toJSON(inputs)`, `inputs[matrix.k]`),
  * which makes "never read" conclusions unsafe.
+ *
+ * A whole or computed `github`, `github.event` or `github.event.inputs` (`toJSON(github)`, `github.event[x]`) does not
+ * read `inputs`. In a workflow that can be dispatched, the graph reads it as a read of each `workflow_dispatch` input
+ * (see `ProjectIndex.readsOf`), which is all that `github.event.inputs` can hold. Anywhere else it holds none of the
+ * unit's inputs: a workflow that is called gets its caller's `github` context, and an action its job's.
  */
 export function readsContextDynamically(unit: UnitDecl, context: string): boolean {
   if (mayReadAnything(unit)) return true;
   for (const { ref } of refsOf(unit)) {
     // `needs.build.outputs[matrix.k]` names its job: the graph counts it as a read of each output of that job.
     if (ref.context === context && ref.dynamic && !namesOwner(ref)) return true;
-    if (context === 'inputs' && readsEveryEventInput(ref)) return true;
   }
   return false;
-}
-
-/**
- * Whether a reference reads every dispatch input of the triggering workflow, which `github.event` holds: the whole
- * `github.event` or `github.event.inputs`, or a computed key of the inputs (`github.event.inputs[matrix.k]`). Property
- * names ignore case, as GitHub looks them up.
- */
-function readsEveryEventInput(ref: LocatedRef): boolean {
-  const [event, inputs, name] = ref.path;
-  if (ref.context !== 'github' || event?.toLowerCase() !== 'event') return false;
-  return inputs === undefined || (inputs.toLowerCase() === 'inputs' && (name === undefined || name === '?'));
 }
 
 /**

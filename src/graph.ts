@@ -106,6 +106,23 @@ function dispatchInputNames(unit: UnitDecl): string[] {
   return unit.kind === 'workflow' ? declaredNames(unit.dispatch?.inputs) : [];
 }
 
+/**
+ * The dispatch inputs a `github` reference reads without naming them, each as a reference naming it
+ * (`github.event.inputs.<name>`). It may read them when each of its first two properties is `event` and `inputs`
+ * (ignoring case), stands for any key (a `*` filter, a computed key) or is missing: a whole or computed `github`,
+ * `github.event` or `github.event.inputs` reads every dispatch input, and `github[x].inputs.<name>` the one it names.
+ * `undefined` for a reference that names its input outright (`resolveRef` reads it) or can read none.
+ */
+function eventMemberRefs(unit: UnitDecl, ref: LocatedRef): LocatedRef[] | undefined {
+  const [event, inputs, name] = ref.path;
+  if (!(computed(event) || isKey(event, 'event')) || !(computed(inputs) || isKey(inputs, 'inputs')))
+    return undefined;
+  if (![event, inputs, name].some(computed)) return undefined;
+  return dispatchInputNames(unit)
+    .filter((n) => computed(name) || isKey(n, name!.toLowerCase()))
+    .map((n) => ({ ...ref, path: ['event', 'inputs', n, ...ref.path.slice(3)] }));
+}
+
 /** The job a site is in. */
 function jobAt(unit: UnitDecl, site: ExprSite): JobDecl | undefined {
   return unit.kind === 'workflow' && site.job ? unit.jobs[site.job] : undefined;
@@ -645,8 +662,12 @@ export class ProjectIndex {
    * - outputs: `toJSON(needs.build.outputs)`, `needs.build`, `steps.meta.outputs`, `needs.build.outputs[matrix.key]`,
    *   `toJSON(needs)` (every job the reading job needs) or `toJSON(steps)` (every step that ran before the reading
    *   step);
-   * - `toJSON(inputs)` or `inputs[inputs.which]`: every input the unit declares (`github.event.inputs`: every
-   *   `workflow_dispatch` input);
+   * - `toJSON(inputs)` or `inputs[inputs.which]`: every input the unit declares;
+   * - in a workflow that can be dispatched, whose `github.event` holds its `workflow_dispatch` inputs when it is
+   *   dispatched: `toJSON(github)`, `github[x]`, `github.*`, `toJSON(github.event)`, `github.event[x]`,
+   *   `github.event.*`, `toJSON(github.event.inputs)` or `github.event.inputs[x]` read every one of them, and
+   *   `github[x].inputs.<name>` the one it names (see `eventMemberRefs`). A workflow that is called gets its caller's
+   *   `github`, and an action its job's, so there they read none of the unit's inputs;
    * - `toJSON(matrix)` or `matrix[inputs.key]`: every key of the job's matrix;
    * - `toJSON(secrets)` or `secrets[inputs.name]`: every secret the workflow declares under `workflow_call`;
    * - `toJSON(env)` or `env[inputs.name]`: every env variable in scope, a step's own read through their values.
@@ -676,18 +697,16 @@ export class ProjectIndex {
   }
 
   /**
-   * A whole object or computed key of `inputs`, `matrix`, `secrets`, `env` or `github.event.inputs` as one reference per
-   * member, each naming it (`toJSON(inputs)` → `inputs.a`, `inputs.b`, …), so each resolves the way the name written
-   * out does. `undefined` for any other reference.
+   * A whole object or computed key of `inputs`, `matrix`, `secrets`, `env` or `github` as one reference per member,
+   * each naming it (`toJSON(inputs)` → `inputs.a`, `inputs.b`, …; see `eventMemberRefs` for `github`), so each
+   * resolves the way the name written out does. `undefined` for any other reference.
    */
   private memberRefs(unit: UnitDecl, site: ExprSite, ref: LocatedRef): LocatedRef[] | undefined {
-    const event = ref.context === 'github' && isKey(ref.path[0], 'event') && isKey(ref.path[1], 'inputs');
-    const at = event ? 2 : 0;
-    if (!computed(ref.path[at])) return undefined;
-    const members = event ? dispatchInputNames(unit) : this.memberNames(unit, site, ref.context);
-    return members?.map((name) => ({
+    if (ref.context === 'github') return eventMemberRefs(unit, ref);
+    if (!computed(ref.path[0])) return undefined;
+    return this.memberNames(unit, site, ref.context)?.map((name) => ({
       ...ref,
-      path: [...ref.path.slice(0, at), name, ...ref.path.slice(at + 1)],
+      path: [name, ...ref.path.slice(1)],
     }));
   }
 
