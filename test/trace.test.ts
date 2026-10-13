@@ -788,6 +788,395 @@ describe('trace: sources upstream', () => {
   });
 });
 
+describe('trace upstream: input defaults', () => {
+  const A = '.github/actions/a';
+  const CALLEE = `${WF}/callee.yml`;
+  const CALLER = `${WF}/caller.yml`;
+  const leavesOf = (t: ReturnType<typeof trace>) =>
+    t.leaves.map((l) => `${l.role} ${l.where} ${l.text} @${l.loc.line}:${l.loc.column}`);
+  const action = (inputs: string) => yaml`
+    name: a
+    description: x
+    inputs:
+      ${inputs}
+    runs:
+      using: composite
+      steps:
+        - run: echo
+          shell: bash
+  `;
+  const steps = (...withs: string[]) =>
+    `on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n${withs.map((w) => `      - uses: ./.github/actions/a${w}\n`).join('')}`;
+
+  it("ends at the contexts an action input's default reads when a step omits the input (#13)", () => {
+    const { index } = load({
+      [`${A}/action.yml`]: action('token: { description: x, default: "${{ github.token }}" }'),
+      [`${WF}/ci.yml`]: steps(''),
+    });
+    expect(leavesOf(trace(index, sym.input(A, 'token'), { direction: 'up' }))).toEqual([
+      `omitted ${WF}/ci.yml › jobs.j › steps[0] (not passed) @6:15`,
+      `context ${A} › inputs.token.default github.token @4:42`,
+    ]);
+  });
+
+  it('ends at a plain default as a literal, after the calls and before the contexts they pass', () => {
+    const { index } = load({
+      [CALLEE]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              env: { type: string, default: staging }
+        jobs:
+          j: { runs-on: x, steps: [{ run: echo }] }
+      `,
+      [CALLER]: yaml`
+        on: push
+        jobs:
+          a: { uses: ./.github/workflows/callee.yml, with: { env: prod } }
+          b: { uses: ./.github/workflows/callee.yml }
+          c: { uses: ./.github/workflows/callee.yml, with: { env: "\${{ github.ref_name }}" } }
+      `,
+    });
+    expect(leavesOf(trace(index, sym.input(CALLEE, 'env'), { direction: 'up' }))).toEqual([
+      `literal ${CALLER} › jobs.a "prod" @3:59`,
+      `omitted ${CALLER} › jobs.b (not passed) @4:14`,
+      `literal ${CALLEE} › on.workflow_call.inputs.env.default "staging" @4:37`,
+      `context ${CALLER} › jobs.c github.ref_name @5:64`,
+    ]);
+  });
+
+  it('shows no default when every call passes the input, or when there is none', () => {
+    const { index } = load({
+      [`${A}/action.yml`]: action(
+        'token: { description: x, default: "${{ github.token }}" }\n      flag: { description: x, default: "false" }\n      bare: { description: x }',
+      ),
+      [`${WF}/ci.yml`]: steps('\n        with: { token: x }', '\n        with: { token: y, flag: true }'),
+    });
+    const roles = (name: string) =>
+      trace(index, sym.input(A, name), { direction: 'up' }).leaves.map((l) => l.role);
+    expect(roles('token')).toEqual(['literal', 'literal']);
+    expect(roles('flag')).toEqual(['omitted', 'literal', 'literal']);
+    expect(trace(index, sym.input(A, 'flag'), { direction: 'up' }).leaves[2]!.text).toBe('"false"');
+    expect(roles('bare')).toEqual(['omitted', 'omitted']);
+  });
+
+  it('follows the inputs and vars a workflow_call default reads, and ends at its contexts', () => {
+    const { index } = load({
+      [CALLEE]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              base: { type: string, default: main }
+              ref: { type: string, default: "\${{ inputs.base }}-\${{ vars.SUFFIX }}-\${{ github.ref_name }}" }
+        jobs:
+          j: { runs-on: x, steps: [{ run: echo }] }
+      `,
+      [CALLER]: yaml`
+        on: push
+        jobs:
+          a: { uses: ./.github/workflows/callee.yml, with: { base: dev } }
+      `,
+    });
+    const t = trace(index, sym.input(CALLEE, 'ref'), { direction: 'up' });
+    expect(t.children.map((c) => [c.symbol, c.via?.loc.column, c.via?.note])).toEqual([
+      [sym.input(CALLEE, 'base'), 42, 'the default of inputs.ref'],
+      [sym.var('SUFFIX'), 61, 'the default of inputs.ref'],
+    ]);
+    expect(t.children[0]!.via?.text).toBe('${{ inputs.base }}-${{ vars.SUFFIX }}-${{ github.ref_name }}');
+    // `base` is passed by its one caller, so its own default is no source of it.
+    expect(leavesOf(t.children[0]!)).toEqual([`literal ${CALLER} › jobs.a "dev" @3:60`]);
+    expect(leavesOf(t)).toEqual([
+      `omitted ${CALLER} › jobs.a (not passed) @3:14`,
+      `context ${CALLEE} › on.workflow_call.inputs.ref.default github.ref_name @5:80`,
+    ]);
+  });
+
+  it('ends at a default that reads nothing, or does not parse, as an expression or invalid', () => {
+    const { index } = load({
+      [`${A}/action.yml`]: action(
+        'key: { description: x, default: "${{ hashFiles(\'**/lock\') }}" }\n      bad: { description: x, default: "${{ github. }}" }\n      os: { description: x, default: "${{ runner.os }}-${{ matrix.os }}" }',
+      ),
+      [`${WF}/ci.yml`]: steps(''),
+    });
+    const leaves = (name: string) =>
+      trace(index, sym.input(A, name), { direction: 'up' }).leaves.map((l) => `${l.role} ${l.text}`);
+    expect(leaves('key')).toEqual(['omitted (not passed)', "expression ${{ hashFiles('**/lock') }}"]);
+    expect(leaves('bad')).toEqual(['omitted (not passed)', 'invalid github.']);
+    // An action's default reads the calling job's matrix, which the trace does not follow into each caller.
+    expect(leaves('os')).toEqual(['omitted (not passed)', 'context runner.os', 'context matrix.os']);
+  });
+
+  it("uses a called workflow's workflow_call default, never its workflow_dispatch one", () => {
+    const callee = (callDefault: string) => yaml`
+      on:
+        workflow_call:
+          inputs:
+            x: { type: string${callDefault} }
+        workflow_dispatch:
+          inputs:
+            x: { type: string, default: manual }
+      jobs:
+        j: { runs-on: x, steps: [{ run: echo }] }
+    `;
+    const caller = 'on: push\njobs:\n  a: { uses: ./.github/workflows/callee.yml }\n';
+    const texts = (callDefault: string) =>
+      trace(load({ [CALLEE]: callee(callDefault), [CALLER]: caller }).index, sym.input(CALLEE, 'x'), {
+        direction: 'up',
+      }).leaves.map((l) => l.text);
+    expect(texts('')).toEqual(['(not passed)']);
+    expect(texts(', default: called')).toEqual(['(not passed)', '"called"']);
+  });
+
+  it('stops at a default that reads its own input, and leaves the downstream trace as it was', () => {
+    const { index } = load({
+      [CALLEE]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              x: { type: string, default: "\${{ inputs.x }}" }
+        jobs:
+          j: { runs-on: x, steps: [{ run: echo }] }
+      `,
+      [CALLER]: 'on: push\njobs:\n  a: { uses: ./.github/workflows/callee.yml }\n',
+    });
+    const t = trace(index, sym.input(CALLEE, 'x'), { direction: 'up' });
+    expect(t.children.map((c) => [c.symbol, c.stop])).toEqual([[sym.input(CALLEE, 'x'), 'cycle']]);
+    const down = trace(index, sym.input(CALLEE, 'x'));
+    expect(down.children).toEqual([]);
+    expect(down.leaves.map((l) => `${l.role} ${l.where}`)).toEqual([
+      'input.default on.workflow_call.inputs.x.default',
+    ]);
+  });
+
+  const caller = 'on: push\njobs:\n  a: { uses: ./.github/workflows/callee.yml }\n';
+
+  it("ends at github.event.inputs in a workflow_call default as a context: the caller's event, not this input", () => {
+    // The default applies only when the workflow is called, and then `github` is the caller's.
+    const { index } = load({
+      [CALLEE]: yaml`
+        on:
+          workflow_dispatch:
+            inputs:
+              x: { type: string, default: d }
+          workflow_call:
+            inputs:
+              x: { type: string, default: "\${{ github.event.inputs.x }}" }
+              y: { type: string, default: "\${{ github.event.inputs.x }}" }
+        jobs:
+          j: { runs-on: x, steps: [{ run: echo }] }
+      `,
+      [CALLER]: caller,
+    });
+    for (const [name, line] of [
+      ['x', 7],
+      ['y', 8],
+    ] as const) {
+      const t = trace(index, sym.input(CALLEE, name), { direction: 'up' });
+      expect(t.children).toEqual([]);
+      expect(leavesOf(t)).toEqual([
+        `omitted ${CALLER} › jobs.a (not passed) @3:14`,
+        `context ${CALLEE} › on.workflow_call.inputs.${name}.default github.event.inputs.x @${line}:40`,
+      ]);
+    }
+  });
+
+  it("shows no default for a required workflow_call input, which GitHub never uses, but does for an action's", () => {
+    // GitHub fails the run when a caller omits a required workflow_call input; an action's `required` is not enforced.
+    const { index } = load({
+      [CALLEE]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              req: { type: string, required: true, default: never-used }
+        jobs:
+          j: { runs-on: x, steps: [{ uses: ./.github/actions/a }] }
+      `,
+      [CALLER]: caller,
+      [`${A}/action.yml`]: action('req: { description: x, required: true, default: used }'),
+    });
+    expect(leavesOf(trace(index, sym.input(CALLEE, 'req'), { direction: 'up' }))).toEqual([
+      `omitted ${CALLER} › jobs.a (not passed) @3:14`,
+    ]);
+    expect(leavesOf(trace(index, sym.input(A, 'req'), { direction: 'up' }))).toEqual([
+      `omitted ${CALLEE} › jobs.j › steps[0] (not passed) @6:36`,
+      `literal ${A} › inputs.req.default "used" @4:51`,
+    ]);
+  });
+
+  it('ends at a context GitHub does not allow in a default as invalid, and follows none of them', () => {
+    // An action input's default may read github, strategy, matrix, job and runner; a workflow_call input's github,
+    // inputs and vars.
+    const { index } = load({
+      [`${A}/action.yml`]: action(
+        [
+          'a: { description: x, default: "${{ inputs.b }} ${{ vars.V }} ${{ steps.s.outputs.v }} ${{ job.status }}" }',
+          'b: { description: x, default: "${{ env.E }} ${{ secrets.S }} ${{ needs.n.outputs.o }} ${{ env.E }}" }',
+        ].join('\n      '),
+      ),
+      [CALLEE]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              w: { type: string, default: "\${{ secrets.S }} \${{ env.E }} \${{ matrix.os }} \${{ inputs.v }}" }
+              v: { type: string }
+            secrets:
+              S: { required: false }
+        env:
+          E: e
+        jobs:
+          j: { runs-on: x, steps: [{ uses: ./.github/actions/a }] }
+      `,
+      [CALLER]: caller,
+    });
+    const shown = (symbol: string) => {
+      const t = trace(index, symbol, { direction: 'up' });
+      return {
+        children: t.children.map((c) => c.symbol),
+        leaves: t.leaves.map((l) => `${l.role} ${l.text}`),
+      };
+    };
+    expect(shown(sym.input(A, 'a'))).toEqual({
+      children: [],
+      leaves: [
+        'omitted (not passed)',
+        'invalid inputs.b',
+        'invalid vars.V',
+        'invalid steps.s.outputs.v',
+        'context job.status',
+      ],
+    });
+    // Each place is a leaf of its own, as for an expression that does not parse.
+    expect(shown(sym.input(A, 'b')).leaves).toEqual([
+      'omitted (not passed)',
+      'invalid env.E',
+      'invalid secrets.S',
+      'invalid needs.n.outputs.o',
+      'invalid env.E',
+    ]);
+    expect(shown(sym.input(CALLEE, 'w'))).toEqual({
+      children: [sym.input(CALLEE, 'v')],
+      leaves: ['omitted (not passed)', 'invalid secrets.S', 'invalid env.E', 'invalid matrix.os'],
+    });
+  });
+
+  it("follows only a workflow's own workflow_call inputs from a workflow_call default", () => {
+    // The default applies when the workflow is called, and then `inputs` holds its workflow_call inputs only: one that
+    // only workflow_dispatch declares, or that no trigger declares, is empty there.
+    const { index } = load({
+      [CALLEE]: yaml`
+        on:
+          workflow_dispatch:
+            inputs:
+              env-name: { type: environment, default: staging }
+              both: { type: string, default: manual }
+          workflow_call:
+            inputs:
+              both: { type: string }
+              target: { type: string, default: "\${{ inputs.env-name }}" }
+              other: { type: string, default: "\${{ inputs.nope }}" }
+              mixed: { type: string, default: "\${{ inputs['Env-Name'] }}-\${{ inputs['BOTH'] }}" }
+        jobs:
+          j: { runs-on: x, environment: "\${{ inputs.env-name }}", steps: [{ run: echo }] }
+      `,
+      [CALLER]: caller,
+    });
+    const shown = (name: string) => {
+      const t = trace(index, sym.input(CALLEE, name), { direction: 'up' });
+      return { children: t.children.map((c) => c.symbol), leaves: leavesOf(t).slice(1) };
+    };
+    const at = (name: string) => `${CALLEE} › on.workflow_call.inputs.${name}.default`;
+    expect(shown('target')).toEqual({
+      children: [],
+      leaves: [`context ${at('target')} inputs.env-name @9:45`],
+    });
+    expect(shown('other')).toEqual({ children: [], leaves: [`context ${at('other')} inputs.nope @10:44`] });
+    expect(shown('mixed')).toEqual({
+      children: [sym.input(CALLEE, 'both')],
+      leaves: [`context ${at('mixed')} inputs['Env-Name'] @11:44`],
+    });
+  });
+
+  it('ends at a function GitHub does not allow in a default as invalid: hashFiles() in a workflow_call one', () => {
+    // A workflow_call input's default may call none of hashFiles() and the status functions; an action input's may
+    // call hashFiles() (see above), but no status function. A step's with: may call hashFiles().
+    const { index } = load({
+      [CALLEE]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              key: { type: string, default: "\${{ hashFiles('**/lock') }}" }
+              ok: { type: string, default: "\${{ success() && inputs.v }}-\${{ toJSON(vars.V) }}" }
+              v: { type: string }
+        jobs:
+          j:
+            runs-on: x
+            steps:
+              - uses: ./.github/actions/a
+              - { uses: ./.github/actions/a, with: { a: "\${{ hashFiles('y') }}" } }
+      `,
+      [CALLER]: caller,
+      [`${A}/action.yml`]: action(
+        'a: { description: x, default: "${{ hashFiles(\'**/lock\') }}-${{ CANCELLED() || job.status }}" }',
+      ),
+    });
+    const shown = (symbol: string) => {
+      const t = trace(index, symbol, { direction: 'up' });
+      return { children: t.children.map((c) => c.symbol), leaves: leavesOf(t).slice(1) };
+    };
+    const at = (name: string) => `${CALLEE} › on.workflow_call.inputs.${name}.default`;
+    expect(shown(sym.input(CALLEE, 'key'))).toEqual({
+      children: [],
+      leaves: [`invalid ${at('key')} hashFiles() @4:42`],
+    });
+    expect(shown(sym.input(CALLEE, 'ok'))).toEqual({
+      children: [sym.input(CALLEE, 'v'), sym.var('V')],
+      leaves: [`invalid ${at('ok')} success() @5:41`],
+    });
+    expect(shown(sym.input(A, 'a'))).toEqual({
+      children: [],
+      leaves: [
+        `invalid ${A} › inputs.a.default CANCELLED() @4:66`,
+        `context ${A} › inputs.a.default job.status @4:81`,
+        `expression ${CALLEE} › jobs.j › steps[1] \${{ hashFiles('y') }} @12:49`,
+      ],
+    });
+  });
+
+  it('finds every call GitHub does not allow in a default, once per function in each expression', () => {
+    // A call may sit under `!`, either side of a comparison, `&&` or `||`, a function's arguments, `( )`, or either
+    // side of an index. Each expression lists each function once, ignoring case, in the order it calls them; the same
+    // function in another expression is another leaf, at that expression.
+    const { index } = load({
+      [CALLEE]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              x:
+                type: string
+                default: >-
+                  \${{ !cancelled() || format('{0}', hashFiles('a')) }}
+                  \${{ fromJSON('{}')[always()] && (success()) }}
+                  \${{ failure() == hashFiles('b')[0] || success() || SUCCESS() }}
+        jobs:
+          j: { runs-on: x, steps: [{ run: echo }] }
+      `,
+      [CALLER]: caller,
+    });
+    const t = trace(index, sym.input(CALLEE, 'x'), { direction: 'up' });
+    const at = `invalid ${CALLEE} › on.workflow_call.inputs.x.default`;
+    expect(t.children).toEqual([]);
+    expect(leavesOf(t).slice(1)).toEqual([
+      `${at} cancelled() @7:15`,
+      `${at} hashFiles() @7:15`,
+      `${at} always() @8:15`,
+      `${at} success() @8:15`,
+      `${at} failure() @9:15`,
+      `${at} hashFiles() @9:15`,
+      `${at} success() @9:15`,
+    ]);
+  });
+});
+
 describe('resolveSymbols: more queries', () => {
   const { index } = load(files);
   const ids = (q: string) => resolveSymbols(index, q).map((m) => m.id);

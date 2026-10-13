@@ -61,6 +61,10 @@ export interface InputDecl {
   required: boolean;
   hasDefault: boolean;
   default?: Json;
+  /** Where the `default:` value is written. */
+  defaultLoc?: Loc;
+  /** The `default:` value's expression, when it has one (`${{ github.token }}`). */
+  defaultSite?: ExprSite;
   description?: string;
   options?: string[];
   loc: Loc;
