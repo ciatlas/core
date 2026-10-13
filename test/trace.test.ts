@@ -893,6 +893,30 @@ describe('trace: a read of every secret behind secrets: inherit (#20)', () => {
     ]);
   });
 
+  it('lists that secret once upstream when the caller spells it in another case', () => {
+    // Secret names ignore case: mid.yml's `DEPLOY` is the `deploy` leaf.yml reads by name.
+    const { index } = load({
+      ...files,
+      [MID]: files[MID]!.replace('deploy:', 'DEPLOY:'),
+      [LEAF]: yaml`
+        on: workflow_call
+        jobs:
+          a:
+            runs-on: x
+            outputs:
+              both: \${{ secrets.deploy }} \${{ toJSON(secrets) }}
+            steps:
+              - run: echo
+      `,
+    });
+    expect(lines(trace(index, sym.jobOutput(LEAF, 'a', 'both'), { direction: 'up' }))).toEqual([
+      sym.jobOutput(LEAF, 'a', 'both'),
+      '  context: secrets',
+      `  ${sym.secret(LEAF, 'deploy')} via \${{ secrets.deploy }} \${{ toJSON(secrets) }}`,
+      `    ${sym.secret(MID, 'DEPLOY')} via secrets: inherit (jobs.call)`,
+    ]);
+  });
+
   it('hands down no secret through secrets:, nor GITHUB_TOKEN, which every workflow gets', () => {
     const { index } = load({
       ...sinks(),

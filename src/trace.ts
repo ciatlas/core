@@ -493,18 +493,28 @@ function inheritedWholeParents(index: ProjectIndex, symbol: string, parent: Pare
     const { unit, site } = def;
     const ref = site.segments.flatMap((seg) => seg.refs).find((r) => readsEverySecret(index, unit, site, r));
     if (!ref) return [];
-    const linked = new Set(
-      index.incoming(symbol, 'flows').flatMap((e) => (e.siteId === site.id ? [e.from] : [])),
-    );
+    const linked = linkedSecrets(index, symbol, site);
     return inheritedNames(index, unit)
-      .map((name) => sym.secret(unit.path, name))
-      .filter((from) => !linked.has(from))
-      .map((from) => {
-        const p = parent(from);
+      .filter((name) => !linked.has(name.toLowerCase()))
+      .map((name) => {
+        const p = parent(sym.secret(unit.path, name));
         p.via = { loc: ref.loc, text: short(site.text) };
         return p;
       });
   });
+}
+
+/**
+ * The secrets the graph links to `symbol` from a site, in lower case: secret names ignore case, so a caller's `DEPLOY`
+ * is the `deploy` the site reads by name.
+ */
+function linkedSecrets(index: ProjectIndex, symbol: string, site: ExprSite): Set<string> {
+  return new Set(
+    index.incoming(symbol, 'flows').flatMap((e) => {
+      const secret = e.siteId === site.id ? secretSymbol(e.from) : undefined;
+      return secret ? [secret.name.toLowerCase()] : [];
+    }),
+  );
 }
 
 /**
