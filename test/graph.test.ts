@@ -1,4 +1,4 @@
-import { type ExprSite, refsOf, type SiteField, sym } from '@ciatlas/core';
+import { type ExprSite, type LocatedRef, refsOf, type SiteField, sym } from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 import { load, WF, yaml } from './helpers';
 
@@ -1245,6 +1245,25 @@ describe('ProjectIndex.readsOf: whole inputs, matrix, secrets and env', () => {
 
   it('lets each input a whole read takes flow into what the site defines', () => {
     expect(index.incoming(sym.jobOutput(WHOLE, 'j', 'all'), 'flows').map((e) => e.from)).toEqual(inputs);
+  });
+
+  it('reads nothing through a step’s own env value that reads an env variable nothing defines', () => {
+    const { index: own } = load({
+      [PUSH]: yaml`
+        on: push
+        jobs:
+          j:
+            runs-on: x
+            steps:
+              - run: echo
+                env:
+                  OWN: \${{ env.NOWHERE }}
+      `,
+    });
+    const unit = own.unit(PUSH)!;
+    const [{ site, ref }] = [...refsOf(unit)] as [{ site: ExprSite; ref: LocatedRef }];
+    expect([site.field, ref.context, ...ref.path]).toEqual(['step.env', 'env', 'NOWHERE']);
+    expect(own.readsOf(unit, site, ref)).toEqual([]);
   });
 });
 
