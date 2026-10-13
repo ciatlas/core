@@ -1349,6 +1349,96 @@ describe('trace: github.event.inputs in a workflow that can be called', () => {
     expect(root.leaves).toHaveLength(2);
   });
 
+  describe('through the step’s own env', () => {
+    const ACTION = '.github/actions/a';
+    const WFP = `${WF}/wf.yml`;
+    const z = sym.input(WFP, 'z');
+    /** wf.yml's step s passes `env.X` to action a, where the step's own `X` is the value given. */
+    const repo = (value: string) =>
+      load({
+        [WFP]: yaml`
+          on:
+            workflow_dispatch:
+              inputs: { z: { type: string } }
+            workflow_call:
+              inputs: { z: { type: string } }
+          jobs:
+            j:
+              runs-on: x
+              outputs:
+                o: \${{ steps.s.outputs.out }}
+              steps:
+                - id: s
+                  uses: ./.github/actions/a
+                  env:
+                    X: ${value}
+                  with:
+                    v: \${{ env.X }}
+        `,
+        [TOP]: yaml`
+          on: workflow_dispatch
+          jobs:
+            t:
+              uses: ./.github/workflows/wf.yml
+              with:
+                z: from-top
+        `,
+        [UPPER]: yaml`
+          on:
+            workflow_call:
+              inputs: { q: { type: string } }
+          jobs:
+            t:
+              uses: ./.github/workflows/wf.yml
+              with:
+                z: \${{ inputs.q }}
+        `,
+        [`${ACTION}/action.yml`]: yaml`
+          name: a
+          description: d
+          inputs: { v: { description: v } }
+          outputs: { out: { description: o, value: "\${{ inputs.v }}" } }
+          runs:
+            using: composite
+            steps: [{ shell: bash, run: echo }]
+        `,
+      }).index;
+    const eventOnly = repo('${{ github.event.inputs.z }}');
+    const v = sym.input(ACTION, 'v');
+
+    it('traces a value read through the step’s own env up to the dispatch input alone, as a direct read', () => {
+      const t = trace(eventOnly, sym.jobOutput(WFP, 'j', 'o'), { direction: 'up' });
+      const input = t.children[0]!.children[0]!.children[0]!;
+      expect(input.symbol).toBe(v);
+      expect(input.children).toMatchObject([
+        { symbol: z, children: [], leaves: [], via: { text: '${{ env.X }}', note: 'when dispatched' } },
+      ]);
+      // The caller's event, at the reference in the step's env; top.yml's value is never a source.
+      expect(leavesOf(input)).toEqual([`context ${WFP} › jobs.j › steps[0]: github.event.inputs.z`]);
+      expect(allLeaves(t)).not.toContainEqual(expect.stringContaining('from-top'));
+    });
+
+    it('does not let a caller’s with: value flow on through the step’s own env', () => {
+      const t = trace(eventOnly, sym.input(UPPER, 'q'));
+      expect(t.children.map((c) => c.symbol)).toEqual([z]);
+      expect(t.children[0]!.children).toEqual([]);
+      expect(t.children[0]!.leaves).toEqual([]);
+      // From the input itself, the step's reads are listed.
+      expect(trace(eventOnly, z).children.map((c) => `${c.symbol} ${c.via?.text}`)).toEqual([
+        `${v} \${{ env.X }}`,
+      ]);
+    });
+
+    it('traces the input on up when the step’s own env also reads it through inputs', () => {
+      const both = repo('${{ inputs.z || github.event.inputs.z }}');
+      const up = trace(both, v, { direction: 'up' });
+      expect(up.children.map((c) => `${c.symbol} ${c.via?.note}`)).toEqual([`${z} undefined`]);
+      expect(leavesOf(up.children[0]!)).toEqual([`literal ${TOP} › jobs.t: "from-top"`]);
+      expect(leavesOf(up)).toEqual([`context ${WFP} › jobs.j › steps[0]: github.event.inputs.z`]);
+      expect(trace(both, sym.input(UPPER, 'q')).children[0]!.children.map((c) => c.symbol)).toEqual([v]);
+    });
+  });
+
   it('leaves a workflow that is only dispatched as it was', () => {
     const { index: dispatched } = load(
       files(

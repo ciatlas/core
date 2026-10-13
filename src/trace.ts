@@ -209,7 +209,7 @@ function down(
  * that is for an input the workflow reads through `github.event.inputs`. Each symbol is expanded at most twice.
  */
 function downKey(index: ProjectIndex, symbol: string, called: boolean): string {
-  const skips = called && index.usagesOf(symbol).some((u) => readsCallerEvent(index, u));
+  const skips = called && index.usagesOf(symbol).some((u) => usageReadsCallerEvent(index, u));
   return skips ? `${symbol}\0called` : symbol;
 }
 
@@ -223,7 +223,7 @@ function addReads(
 ): void {
   const seenSinks = new Set<string>();
   for (const u of index.usagesOf(symbol)) {
-    if (called && readsCallerEvent(index, u)) continue;
+    if (called && usageReadsCallerEvent(index, u)) continue;
     if (!u.sink) {
       node.leaves.push(leafOf(u));
       continue;
@@ -291,6 +291,22 @@ function readsCallerEvent(index: ProjectIndex, u: { site: ExprSite; ref: Located
 const isEventInputs = (ref: LocatedRef) =>
   ref.context === 'github' && ref.path[0] === 'event' && ref.path[1] === 'inputs';
 
+/**
+ * Whether a usage reads its symbol only through `github.event.inputs` in a workflow that can be called (see
+ * `readsCallerEvent`): directly, or through the step's own env value it reads (`env.X`, where the step's `env:` has
+ * `X: ${{ github.event.inputs.z }}`), which the graph resolves to what the value reads.
+ */
+function usageReadsCallerEvent(index: ProjectIndex, u: Usage): boolean {
+  const wf = index.project.workflows.get(u.site.ownerPath);
+  if (!wf?.call) return false;
+  if (isEventInputs(u.ref)) return true;
+  const own = ownEnv(index, wf, u.site, u.ref)?.site;
+  const reads = own
+    ? own.segments.flatMap((seg) => seg.refs.filter((ref) => index.readsOf(wf, own, ref).includes(u.symbol)))
+    : [];
+  return reads.length > 0 && reads.every(isEventInputs);
+}
+
 /** The node of a parent upstream: a symbol traced on up, or the dispatch input alone (see `dispatchedInput`). */
 type Parent = (from: string, dispatched?: boolean) => TraceNode;
 
@@ -346,10 +362,13 @@ function dispatchedInput(index: ProjectIndex, symbol: string, depth: number, pat
   return node;
 }
 
-/** Whether every read of `from` in the site is `github.event.inputs` in a workflow that can be called. */
+/**
+ * Whether every read of `from` in the site is `github.event.inputs` in a workflow that can be called, directly or
+ * through the step's own env (see `usageReadsCallerEvent`).
+ */
 function readsOnlyCallerEvent(index: ProjectIndex, from: string, siteId: number | undefined): boolean {
   const reads = index.usagesOf(from).filter((u) => u.site.id === siteId);
-  return reads.length > 0 && reads.every((u) => readsCallerEvent(index, u));
+  return reads.length > 0 && reads.every((u) => usageReadsCallerEvent(index, u));
 }
 
 /** The symbols the value is computed from, through `flows` edges: one parent per source and expression. */
