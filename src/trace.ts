@@ -62,6 +62,12 @@ export interface TraceLeaf {
 
 export interface TraceNode {
   symbol: string;
+  /**
+   * The graph node's label, such as `inputs.<name>` or `secrets.<name>`. A symbol the graph has no node for is
+   * `unresolved` and named the way the graph names a symbol a unit reads without declaring it: `unit` is the workflow or
+   * action its id names, and the label is the rest of the id (`secrets.<name>` for `<unit>#secrets.<name>`). An id that
+   * names no unit of the project is its own label.
+   */
   label: string;
   kind: GraphNode['kind'];
   unit?: string;
@@ -135,16 +141,35 @@ export function trace(index: ProjectIndex, symbol: string, opts: TraceOptions = 
 }
 
 function base(index: ProjectIndex, symbol: string): TraceNode {
-  const n = index.nodes.get(symbol);
+  const n = index.nodes.get(symbol) ?? unresolvedNode(index, symbol);
   return {
     symbol,
-    label: n?.label ?? symbol,
-    kind: n?.kind ?? 'unresolved',
-    ...(n?.unit ? { unit: n.unit } : {}),
-    ...(n?.loc ? { loc: n.loc } : {}),
+    label: n.label,
+    kind: n.kind,
+    ...(n.unit ? { unit: n.unit } : {}),
+    ...(n.loc ? { loc: n.loc } : {}),
     children: [],
     leaves: [],
   };
+}
+
+/**
+ * The node of a symbol the graph has none for (see `TraceNode.label`): a secret that `secrets: inherit` hands a
+ * workflow that neither declares it nor reads it by name, an input or secret a caller or step passes that the callee
+ * does not declare, or an id asked for that nothing declares or reads.
+ */
+function unresolvedNode(index: ProjectIndex, symbol: string): Omit<GraphNode, 'id'> {
+  const unit = unitOf(index, symbol);
+  if (!unit) return { kind: 'unresolved', label: symbol };
+  return { kind: 'unresolved', label: symbol.slice(unit.length + 1), unit };
+}
+
+/** The unit of the project an id names before `#`: the longest that fits, as unit paths may contain `#`. */
+function unitOf(index: ProjectIndex, symbol: string): string | undefined {
+  let found: string | undefined;
+  for (const { path } of index.units())
+    if (path.length > (found?.length ?? 0) && symbol.startsWith(`${path}#`)) found = path;
+  return found;
 }
 
 /**

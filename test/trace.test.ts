@@ -1108,6 +1108,151 @@ describe('trace: a read of every secret behind secrets: inherit (#20)', () => {
   });
 });
 
+describe('trace: a symbol the graph has no node for (#26)', () => {
+  const TOP = `${WF}/top.yml`;
+  const MID = `${WF}/mid.yml`;
+  const LEAF = `${WF}/leaf.yml`;
+  const A = '.github/actions/print';
+  // top.yml hands every secret to mid.yml, which hands them on to leaf.yml, which reads them all; mid.yml and leaf.yml
+  // neither declare `NPM` nor read it by name. top.yml also passes leaf.yml a secret, and mid.yml and the action an
+  // input, that they do not declare.
+  const { index } = load({
+    [TOP]: yaml`
+      on:
+        workflow_dispatch:
+          inputs:
+            target: { type: string }
+      jobs:
+        call:
+          uses: ./.github/workflows/mid.yml
+          with:
+            target: \${{ inputs.target }}
+          secrets: inherit
+        explicit:
+          uses: ./.github/workflows/leaf.yml
+          secrets:
+            TOKEN: \${{ secrets.NPM }}
+        use:
+          runs-on: x
+          steps:
+            - run: npm publish --token \${{ secrets.NPM }}
+            - uses: ./.github/actions/print
+              with:
+                value: \${{ inputs.target }}
+    `,
+    [MID]: yaml`
+      on: workflow_call
+      jobs:
+        call:
+          uses: ./.github/workflows/leaf.yml
+          secrets: inherit
+    `,
+    [LEAF]: yaml`
+      on: workflow_call
+      jobs:
+        a:
+          runs-on: x
+          outputs:
+            all: \${{ toJSON(secrets) }}
+          steps:
+            - run: echo
+    `,
+    [`${A}/action.yml`]: yaml`
+      name: print
+      description: x
+      runs:
+        using: composite
+        steps:
+          - run: echo
+            shell: bash
+    `,
+  });
+  /** Each node as a tree names it: its unit, its label and its kind, under its parent. */
+  const named = (t: TraceNode, indent = ''): string[] => [
+    `${indent}${t.unit ?? '(no unit)'} ${t.label} (${t.kind})`,
+    ...t.children.flatMap((c) => named(c, `${indent}  `)),
+  ];
+
+  it('names the workflow of a secret that secrets: inherit hands to a workflow not declaring it, both ways', () => {
+    expect(index.nodes.has(sym.secret(MID, 'NPM'))).toBe(false);
+    // As the graph names top.yml's `NPM`, which top.yml reads without declaring it.
+    expect(named(trace(index, sym.secret(TOP, 'NPM')))).toEqual([
+      `${TOP} secrets.NPM (unresolved)`,
+      `  ${LEAF} secrets.TOKEN (unresolved)`,
+      `    ${LEAF} jobs.a.outputs.all (job-output)`,
+      `  ${MID} secrets.NPM (unresolved)`,
+      `    ${LEAF} secrets.NPM (unresolved)`,
+      `      ${LEAF} jobs.a.outputs.all (job-output)`,
+    ]);
+    expect(named(trace(index, sym.jobOutput(LEAF, 'a', 'all'), { direction: 'up' }))).toEqual([
+      `${LEAF} jobs.a.outputs.all (job-output)`,
+      `  ${LEAF} secrets.NPM (unresolved)`,
+      `    ${MID} secrets.NPM (unresolved)`,
+      `      ${TOP} secrets.NPM (unresolved)`,
+    ]);
+  });
+
+  it('names the workflow or action that a caller or step passes an input it does not declare', () => {
+    expect(named(trace(index, sym.input(TOP, 'target')))).toEqual([
+      `${TOP} inputs.target (input)`,
+      `  ${MID} inputs.target (unresolved)`,
+      `  ${A} inputs.value (unresolved)`,
+    ]);
+    expect(trace(index, sym.input(TOP, 'target')).children[0]).toEqual({
+      symbol: sym.input(MID, 'target'),
+      label: 'inputs.target',
+      kind: 'unresolved',
+      unit: MID,
+      via: expect.objectContaining({ text: '${{ inputs.target }}' }),
+      children: [],
+      leaves: [],
+    });
+  });
+
+  it('places a symbol it is asked for in the unit it names, when there is one', () => {
+    expect(named(trace(index, sym.secret(MID, 'GONE'), { direction: 'up' }))).toEqual([
+      `${MID} secrets.GONE (unresolved)`,
+      `  ${TOP} secrets.GONE (unresolved)`,
+    ]);
+    expect(named(trace(index, `${WF}/missing.yml#secrets.TOKEN`))).toEqual([
+      `(no unit) ${WF}/missing.yml#secrets.TOKEN (unresolved)`,
+    ]);
+    // A unit's path is only a prefix up to the `#`: mid.yml-old is no file of mid.yml.
+    expect(named(trace(index, `${MID}-old#secrets.GONE`))).toEqual([
+      `(no unit) ${MID}-old#secrets.GONE (unresolved)`,
+    ]);
+  });
+
+  it('places it in the longest unit its id starts with, as a unit path may hold #', () => {
+    const ODD = `${WF}/a.yml#b.yml`;
+    const { index: odd } = load({
+      [`${WF}/a.yml`]: yaml`
+        on: push
+        jobs:
+          call:
+            uses: ./.github/workflows/a.yml#b.yml
+            secrets: inherit
+          use:
+            runs-on: x
+            steps:
+              - run: echo \${{ secrets.NPM }}
+      `,
+      [ODD]: yaml`
+        on: workflow_call
+        jobs:
+          a:
+            runs-on: x
+            steps:
+              - run: echo "\${{ toJSON(secrets) }}"
+      `,
+    });
+    expect(named(trace(odd, sym.secret(`${WF}/a.yml`, 'NPM')))).toEqual([
+      `${WF}/a.yml secrets.NPM (unresolved)`,
+      `  ${ODD} secrets.NPM (unresolved)`,
+    ]);
+  });
+});
+
 describe('trace: sources upstream', () => {
   const W = `${WF}/matrix.yml`;
   const A = '.github/actions/a';
