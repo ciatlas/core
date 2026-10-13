@@ -761,55 +761,74 @@ function matrixEntries(unit: Unit, node: unknown, base: YPath): MatrixEntry[] {
 function matrix(unit: Unit, strategy: unknown, base: YPath): MatrixDecl | undefined {
   const pair = getPair(strategy, 'matrix');
   if (!pair) return undefined;
-  const node = pair.value;
   const loc = nodeLoc(unit.source, pair.key);
   const mp = [...base, 'matrix'];
-  if (isScalar(node)) {
-    const site = unit.siteByPath.get(pathKey(mp));
-    return {
-      loc,
-      dynamic: true,
-      ...(site ? { dynamicSite: site } : {}),
-      dims: [],
-      include: [],
-      exclude: [],
-      includeDynamic: true,
-      excludeDynamic: true,
-    };
-  }
+  if (isScalar(pair.value)) return dynamicMatrix(unit, loc, mp);
   const dims: MatrixDim[] = [];
-  let include: MatrixEntry[] = [];
-  let exclude: MatrixEntry[] = [];
-  let includeDynamic = false;
-  let excludeDynamic = false;
-  for (const p of pairs(node)) {
+  let include = NO_FILTER;
+  let exclude = NO_FILTER;
+  for (const p of pairs(pair.value)) {
     const k = String(p.key.value);
-    if (k === 'include') {
-      if (isScalar(p.value)) includeDynamic = true;
-      else include = matrixEntries(unit, p.value, [...mp, 'include']);
-      continue;
-    }
-    if (k === 'exclude') {
-      if (isScalar(p.value)) excludeDynamic = true;
-      else exclude = matrixEntries(unit, p.value, [...mp, 'exclude']);
-      continue;
-    }
-    if (isSeq(p.value)) {
-      const unknownIndexes: number[] = [];
-      p.value.items.forEach((_, i) => {
-        if (unit.siteByPath.has(pathKey([...mp, k, i]))) unknownIndexes.push(i);
-      });
-      dims.push({
-        name: k,
-        loc: nodeLoc(unit.source, p.key),
-        values: toJs(p.value) as Json[],
-        unknownIndexes,
-      });
-    } else {
-      dims.push({ name: k, loc: nodeLoc(unit.source, p.key), values: null, unknownIndexes: [] });
-    }
+    if (k === 'include') include = matrixFilter(unit, p.value, [...mp, k]);
+    else if (k === 'exclude') exclude = matrixFilter(unit, p.value, [...mp, k]);
+    else dims.push(matrixDim(unit, p, [...mp, k]));
   }
-  return { loc, dynamic: false, dims, include, exclude, includeDynamic, excludeDynamic };
+  return {
+    loc,
+    dynamic: false,
+    dims,
+    include: include.entries,
+    exclude: exclude.entries,
+    includeDynamic: include.dynamic,
+    excludeDynamic: exclude.dynamic,
+  };
+}
+
+/** A matrix that is one expression as a whole (`matrix: ${{ fromJSON(...) }}`): everything is known only at runtime. */
+function dynamicMatrix(unit: Unit, loc: Loc, path: YPath): MatrixDecl {
+  const site = unit.siteByPath.get(pathKey(path));
+  return {
+    loc,
+    dynamic: true,
+    ...(site ? { dynamicSite: site } : {}),
+    dims: [],
+    include: [],
+    exclude: [],
+    includeDynamic: true,
+    excludeDynamic: true,
+  };
+}
+
+const NO_FILTER = { entries: [] as MatrixEntry[], dynamic: false };
+
+/**
+ * A matrix's `include` or `exclude`: its entries, and `dynamic` when part of it is known only at runtime: the list is
+ * an expression, or one of its items is (`- ${{ fromJSON(inputs.extra) }}`, which evaluates to an entry of any keys).
+ * Such an item is not an entry here: as one with no keys, it would match every combination, and an `exclude` would
+ * remove them all.
+ */
+function matrixFilter(unit: Unit, node: unknown, path: YPath): { entries: MatrixEntry[]; dynamic: boolean } {
+  if (isScalar(node)) return { entries: [], dynamic: true };
+  const items = isSeq(node) ? node.items : [];
+  const expression = (i: number) => unit.siteByPath.has(pathKey([...path, i]));
+  return {
+    entries: matrixEntries(unit, node, path).filter((_, i) => !expression(i)),
+    dynamic: items.some((_, i) => expression(i)),
+  };
+}
+
+/** One dimension of a matrix: its values, with the indexes of those that are expressions, or `null` for one. */
+function matrixDim(unit: Unit, p: Pair<Scalar, Node>, path: YPath): MatrixDim {
+  const name = String(p.key.value);
+  const loc = nodeLoc(unit.source, p.key);
+  if (!isSeq(p.value)) return { name, loc, values: null, unknownIndexes: [] };
+  const expression = (i: number) => unit.siteByPath.has(pathKey([...path, i]));
+  return {
+    name,
+    loc,
+    values: toJs(p.value) as Json[],
+    unknownIndexes: p.value.items.map((_, i) => i).filter(expression),
+  };
 }
 
 function jobs(unit: Unit, node: unknown, ctx: ParseContext): Record<string, JobDecl> {

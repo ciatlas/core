@@ -1,4 +1,4 @@
-import { type SiteField, sym } from '@ciatlas/core';
+import { type ExprSite, refsOf, type SiteField, sym } from '@ciatlas/core';
 import { describe, expect, it } from 'vitest';
 import { load, WF, yaml } from './helpers';
 
@@ -990,5 +990,242 @@ describe('ProjectIndex.resolveRef and readsOf', () => {
     expect(outer.usagesOf(sym.env(E, 'a', 'MODE')).map((u) => `${u.site.field} ${u.site.key}`)).toEqual([
       'step.env MODE',
     ]);
+  });
+});
+
+const WHOLE = `${WF}/whole.yml`;
+const PUSH = `${WF}/push.yml`;
+const ONLY_CALL = `${WF}/only-call.yml`;
+const PRINT = '.github/actions/print';
+
+/** Whole-object and computed reads of the contexts whose members the repository declares. */
+const wholeFiles = {
+  [WHOLE]: yaml`
+    on:
+      workflow_call:
+        inputs:
+          a: { type: string }
+          Shared: { type: string }
+        secrets:
+          TOKEN: {}
+      workflow_dispatch:
+        inputs:
+          shared: { type: string }
+          d: { type: string }
+    env:
+      TOP: workflow
+      SHARED: workflow
+    jobs:
+      j:
+        runs-on: x
+        env:
+          SHARED: job
+        strategy:
+          matrix:
+            os: [linux, mac]
+            include:
+              - os: linux
+                extra: x
+        outputs:
+          all: \${{ toJSON(inputs) }}
+        steps:
+          - run: echo '\${{ toJSON(inputs) }}' \${{ inputs[matrix.os] }} '\${{ toJSON(inputs.*) }}' '\${{ toJSON(matrix) }}' \${{ matrix[inputs.a].name }} '\${{ toJSON(secrets) }}' \${{ secrets[inputs.a] }} '\${{ toJSON(github.event.inputs) }}' \${{ github.event.inputs[inputs.a] }} '\${{ toJSON(vars) }}' \${{ vars[inputs.a] }} \${{ env.OWN }}
+            env:
+              OWN: \${{ inputs.d }}
+          - run: echo '\${{ toJSON(env) }}' \${{ env[inputs.a] }}
+            env:
+              OWN: \${{ inputs.d }}
+              SHARED: step
+              LIT: plain
+              WRAP: \${{ toJSON(env) }}
+      k:
+        needs: j
+        runs-on: x
+        steps:
+          - run: echo '\${{ toJSON(needs.j.outputs) }}' \${{ needs.j.outputs.all }} '\${{ toJSON(matrix) }}' '\${{ toJSON(env) }}'
+  `,
+  [PUSH]: yaml`
+    on: push
+    jobs:
+      j:
+        runs-on: x
+        steps:
+          - run: echo '\${{ toJSON(secrets) }}' '\${{ toJSON(github.event.inputs) }}'
+  `,
+  [ONLY_CALL]: yaml`
+    on:
+      workflow_call:
+        inputs:
+          a: { type: string }
+    jobs:
+      j:
+        runs-on: x
+        steps:
+          - run: echo '\${{ toJSON(github.event.inputs) }}' '\${{ toJSON(inputs) }}'
+  `,
+  [`${PRINT}/action.yml`]: yaml`
+    name: print
+    description: d
+    inputs:
+      x: { description: x }
+      y: { description: y }
+    runs:
+      using: composite
+      steps:
+        - shell: bash
+          run: echo '\${{ toJSON(inputs) }}' '\${{ toJSON(matrix) }}' '\${{ toJSON(secrets) }}' '\${{ toJSON(env) }}'
+          env:
+            Z: \${{ inputs.y }}
+  `,
+};
+
+describe('ProjectIndex.readsOf: whole inputs, matrix, secrets and env', () => {
+  const { index } = load(wholeFiles);
+  /** What the reference spelled `text` (see `refAt` above) reads, at the first site in `where`. */
+  const reads = (file: string, text: string, where: Where = {}) => {
+    const unit = index.unit(file)!;
+    const inWhere = (site: ExprSite) =>
+      (!where.field || site.field === where.field) && (!where.job || site.job === where.job);
+    const found = [...refsOf(unit)].find(
+      ({ site, ref }) => inWhere(site) && [ref.context, ...ref.path].join('.') === text,
+    );
+    if (!found) throw new Error(`${text} is not read in ${file}`);
+    return index.readsOf(unit, found.site, found.ref);
+  };
+  const input = (name: string) => sym.input(WHOLE, name);
+  const matrix = (key: string) => sym.matrix(WHOLE, 'j', key);
+  // `Shared` (workflow_call) and `shared` (workflow_dispatch) are one input, named by the call's spelling.
+  const inputs = [input('a'), input('Shared'), input('d')];
+  const run = { field: 'step.run', job: 'j' } as const;
+
+  it.each([
+    ['toJSON(inputs) reads every declared input', WHOLE, 'inputs', run, inputs],
+    ['a computed input reads every declared input', WHOLE, 'inputs.?', run, inputs],
+    ['a filter over inputs reads every declared input', WHOLE, 'inputs.*', run, inputs],
+    [
+      'toJSON(inputs) in a job output reads every declared input',
+      WHOLE,
+      'inputs',
+      { field: 'job.output' },
+      inputs,
+    ],
+    [
+      'toJSON(matrix) reads every key, include keys too',
+      WHOLE,
+      'matrix',
+      run,
+      [matrix('os'), matrix('extra')],
+    ],
+    ['a computed matrix key reads every key', WHOLE, 'matrix.?.name', run, [matrix('os'), matrix('extra')]],
+    ['toJSON(matrix) in a job without a matrix reads nothing', WHOLE, 'matrix', { job: 'k' }, []],
+    ['toJSON(secrets) reads every declared secret', WHOLE, 'secrets', run, [sym.secret(WHOLE, 'TOKEN')]],
+    ['a computed secret reads every declared secret', WHOLE, 'secrets.?', run, [sym.secret(WHOLE, 'TOKEN')]],
+    ['toJSON(secrets) without workflow_call reads nothing', PUSH, 'secrets', {}, []],
+    [
+      'toJSON(github.event.inputs) reads every dispatch input',
+      WHOLE,
+      'github.event.inputs',
+      run,
+      [input('Shared'), input('d')],
+    ],
+    [
+      'a computed github.event.inputs reads every dispatch input',
+      WHOLE,
+      'github.event.inputs.?',
+      run,
+      [input('Shared'), input('d')],
+    ],
+    [
+      'toJSON(github.event.inputs) without workflow_dispatch reads nothing',
+      ONLY_CALL,
+      'github.event.inputs',
+      {},
+      [],
+    ],
+    ['toJSON(github.event.inputs) without any input reads nothing', PUSH, 'github.event.inputs', {}, []],
+    [
+      'toJSON(inputs) of a workflow_call workflow reads its inputs',
+      ONLY_CALL,
+      'inputs',
+      {},
+      [sym.input(ONLY_CALL, 'a')],
+    ],
+    // Variables are set in the repository's settings: the graph knows only the names it sees read.
+    ['toJSON(vars) reads nothing', WHOLE, 'vars', run, []],
+    ['a computed variable reads nothing', WHOLE, 'vars.?', run, []],
+    // The step's own OWN reads inputs.d, its SHARED and LIT are plain values that shadow the job's and the workflow's
+    // SHARED, and its WRAP reads the job's SHARED and the workflow's TOP: its value is evaluated against the outer env.
+    [
+      'toJSON(env) in a step reads the env in scope, the step’s own through their values',
+      WHOLE,
+      'env',
+      run,
+      [input('d'), sym.env(WHOLE, 'j', 'SHARED'), sym.env(WHOLE, undefined, 'TOP')],
+    ],
+    [
+      'a computed env name reads the env in scope',
+      WHOLE,
+      'env.?',
+      run,
+      [input('d'), sym.env(WHOLE, 'j', 'SHARED'), sym.env(WHOLE, undefined, 'TOP')],
+    ],
+    [
+      'toJSON(env) in a step’s own env reads the job’s and the workflow’s',
+      WHOLE,
+      'env',
+      { field: 'step.env' },
+      [sym.env(WHOLE, 'j', 'SHARED'), sym.env(WHOLE, undefined, 'TOP')],
+    ],
+    [
+      'toJSON(env) in a job without env reads the workflow’s',
+      WHOLE,
+      'env',
+      { job: 'k' },
+      [sym.env(WHOLE, undefined, 'TOP'), sym.env(WHOLE, undefined, 'SHARED')],
+    ],
+    [
+      'toJSON(inputs) in an action reads its inputs',
+      PRINT,
+      'inputs',
+      {},
+      [sym.input(PRINT, 'x'), sym.input(PRINT, 'y')],
+    ],
+    ['toJSON(env) in an action reads the step’s own env values', PRINT, 'env', {}, [sym.input(PRINT, 'y')]],
+    ['toJSON(matrix) in an action reads nothing', PRINT, 'matrix', {}, []],
+    ['toJSON(secrets) in an action reads nothing', PRINT, 'secrets', {}, []],
+  ] as const)('%s', (_, file, text, where, expected) => {
+    expect(reads(file, text, where)).toEqual(expected);
+  });
+
+  it('marks the reads that do not name their symbol as whole', () => {
+    const usages = (symbol: string) =>
+      index
+        .usagesOf(symbol)
+        .map(
+          (u) => `${u.site.field} ${[u.ref.context, ...u.ref.path].join('.')}${u.whole ? ' (whole)' : ''}`,
+        );
+    expect(usages(input('d'))).toEqual([
+      'job.output inputs (whole)',
+      'step.run inputs (whole)',
+      'step.run inputs.? (whole)',
+      'step.run inputs.* (whole)',
+      'step.run github.event.inputs (whole)',
+      'step.run github.event.inputs.? (whole)',
+      // A step's own env value reads what it names: `env.OWN` reads inputs.d by name.
+      'step.run env.OWN',
+      'step.env inputs.d',
+      'step.run env (whole)',
+      'step.run env.? (whole)',
+      'step.env inputs.d',
+    ]);
+    // Whole reads of outputs are marked the same way.
+    expect(usages(sym.jobOutput(WHOLE, 'j', 'all'))).toEqual([
+      'step.run needs.j.outputs (whole)',
+      'step.run needs.j.outputs.all',
+    ]);
+  });
+
+  it('lets each input a whole read takes flow into what the site defines', () => {
+    expect(index.incoming(sym.jobOutput(WHOLE, 'j', 'all'), 'flows').map((e) => e.from)).toEqual(inputs);
   });
 });

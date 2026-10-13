@@ -1734,3 +1734,423 @@ describe('trace: input defaults and github.event.inputs', () => {
     expect(allLeaves(event)).toEqual([`context ${C} › jobs.b: github.event.inputs.z`]);
   });
 });
+
+describe('trace: whole inputs, matrix, secrets and env', () => {
+  const W = `${WF}/print.yml`;
+  const CALLER = `${WF}/caller.yml`;
+  const A = '.github/actions/a';
+  const { index } = load({
+    [W]: yaml`
+      on:
+        workflow_call:
+          inputs:
+            title: { type: string }
+            mode: { type: string }
+            unused: { type: string }
+          outputs:
+            all:
+              value: \${{ jobs.j.outputs.all }}
+      env:
+        TOP: workflow
+      jobs:
+        j:
+          runs-on: x
+          strategy:
+            matrix: \${{ fromJSON(inputs.mode) }}
+          outputs:
+            all: \${{ toJSON(inputs) }}
+          steps:
+            - run: echo '\${{ toJSON(inputs) }}' '\${{ toJSON(vars) }}' '\${{ toJSON(matrix) }}'
+            - uses: ./.github/actions/a
+              env:
+                LIT: plain
+                CTX: \${{ github.sha }}
+              with:
+                v: \${{ toJSON(env) }}
+    `,
+    [CALLER]: yaml`
+      on: pull_request
+      jobs:
+        call:
+          uses: ./.github/workflows/print.yml
+          with:
+            title: \${{ github.event.pull_request.title }}
+            mode: fast
+    `,
+    [`${A}/action.yml`]: yaml`
+      name: a
+      description: d
+      inputs:
+        v: { description: v }
+      runs:
+        using: composite
+        steps:
+          - shell: bash
+            run: echo
+    `,
+  });
+  const leavesOf = (t: ReturnType<typeof trace>) => t.leaves.map((l) => `${l.role} ${l.where}: ${l.text}`);
+
+  it('shows toJSON(inputs) among the uses of each input', () => {
+    const t = trace(index, sym.input(W, 'title'));
+    expect(t.children.map((c) => c.symbol)).toEqual([sym.jobOutput(W, 'j', 'all')]);
+    expect(leavesOf(t)).toEqual([
+      `run script jobs.j › steps[0] › run: echo '\${{ toJSON(inputs) }}' '\${{ toJSON(vars) }}' '\${{ toJSON(matrix) }}'`,
+    ]);
+  });
+
+  it('follows toJSON(inputs) up to what each caller passes, instead of ending at the inputs context', () => {
+    const t = trace(index, sym.output(W, 'all'), { direction: 'up' });
+    const all = t.children[0]!;
+    expect(all.symbol).toBe(sym.jobOutput(W, 'j', 'all'));
+    expect(all.children.map((c) => c.symbol)).toEqual(
+      ['title', 'mode', 'unused'].map((n) => sym.input(W, n)),
+    );
+    expect(leavesOf(all)).toEqual([]);
+    expect(all.children.map((c) => leavesOf(c))).toEqual([
+      [`context ${CALLER} › jobs.call: github.event.pull_request.title`],
+      [`literal ${CALLER} › jobs.call: "fast"`],
+      [`omitted ${CALLER} › jobs.call: (not passed)`],
+    ]);
+  });
+
+  it('follows toJSON(env) to the env in scope and the step’s own values', () => {
+    const t = trace(index, sym.input(A, 'v'), { direction: 'up' });
+    expect(t.children.map((c) => c.symbol)).toEqual([sym.env(W, undefined, 'TOP')]);
+    const at = `${W} › jobs.j › steps[1]`;
+    // Steps, and what the runner runs before the first one, may have written variables to $GITHUB_ENV: env stays a source
+    // too.
+    expect(leavesOf(t)).toEqual([
+      `literal ${at}: "plain"`,
+      `context ${at}: github.sha`,
+      `context ${at}: env`,
+    ]);
+  });
+
+  it('keeps the env context next to the members in a job, before its first step too', () => {
+    const B = '.github/actions/b';
+    const { index: env } = load({
+      [W]: yaml`
+        on: push
+        env:
+          W: workflow
+        jobs:
+          j:
+            runs-on: x
+            outputs:
+              all: \${{ toJSON(env) }}
+            steps:
+              - uses: ./.github/actions/a
+                with:
+                  v: \${{ toJSON(env) }}
+              - uses: step-security/harden-runner@v2
+              - run: ./scripts/set-env.sh
+              - uses: ./.github/actions/a
+                with:
+                  v: \${{ toJSON(env) }}
+          script:
+            runs-on: x
+            outputs:
+              all: \${{ toJSON(env) }}
+            steps:
+              - run: ./scripts/set-env.sh
+      `,
+      [`${A}/action.yml`]: index.project.actions.get(A)!.source.text,
+      [`${B}/action.yml`]: yaml`
+        name: b
+        description: d
+        runs:
+          using: composite
+          steps:
+            - uses: ./.github/actions/a
+              env:
+                OWN: lit
+              with:
+                v: \${{ toJSON(env) }}
+      `,
+    });
+    const ends = (symbol: string) => {
+      const t = trace(env, symbol, { direction: 'up' });
+      return [...t.children.map((c) => `${c.symbol} ${c.via?.loc.line}`), ...leavesOf(t)];
+    };
+    // Any step can write to $GITHUB_ENV, here step 2 through a script file, which the workflow does not show. Before
+    // step 0, the runner runs the pre: steps of the job's actions (the one harden-runner may have) and, on a self-hosted
+    // runner, its job-started hook: they can write to it too. In action b, env also holds its caller's env.
+    expect(ends(sym.input(A, 'v'))).toEqual([
+      `${sym.env(W, undefined, 'W')} 12`,
+      `${sym.env(W, undefined, 'W')} 17`,
+      `context ${W} › jobs.j › steps[0]: env`,
+      `context ${W} › jobs.j › steps[3]: env`,
+      `literal ${B} › steps[0]: "lit"`,
+      `context ${B} › steps[0]: env`,
+    ]);
+    // A job output is evaluated after every step.
+    for (const job of ['j', 'script'])
+      expect(ends(sym.jobOutput(W, job, 'all')).slice(1)).toEqual([`context ${W} › jobs.${job}: env`]);
+  });
+
+  it('keeps the matrix and secrets contexts next to the members when they may hold more', () => {
+    const D = `${WF}/dispatch.yml`;
+    const { index: open } = load({
+      [W]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              only: { type: string }
+            secrets:
+              DECL: {}
+        jobs:
+          fixed:
+            runs-on: x
+            strategy:
+              matrix:
+                os: [linux]
+                include:
+                  - arch: arm
+            outputs:
+              m: \${{ toJSON(matrix) }}
+              s: \${{ toJSON(secrets) }}
+              i: \${{ toJSON(inputs) }}
+            steps:
+              - run: echo
+          computed:
+            runs-on: x
+            strategy:
+              matrix:
+                os: [linux]
+                include: \${{ fromJSON(vars.EXTRA) }}
+            outputs:
+              m: \${{ toJSON(matrix) }}
+            steps:
+              - run: echo
+          item:
+            runs-on: x
+            strategy:
+              matrix:
+                os: [linux]
+                include:
+                  - \${{ fromJSON(inputs.only) }}
+            outputs:
+              m: \${{ toJSON(matrix) }}
+              k: \${{ matrix[inputs.only] }}
+            steps:
+              - run: echo
+      `,
+      [D]: yaml`
+        on:
+          workflow_dispatch:
+            inputs:
+              only: { type: string }
+        jobs:
+          j:
+            runs-on: x
+            outputs:
+              e: \${{ toJSON(github.event.inputs) }}
+            steps:
+              - run: echo
+      `,
+    });
+    const ends = (job: string, out: string, unit = W) => {
+      const t = trace(open, sym.jobOutput(unit, job, out), { direction: 'up' });
+      return [...t.children.map((c) => c.symbol), ...t.leaves.map((l) => `${l.role}: ${l.text}`)];
+    };
+    expect(ends('fixed', 'm')).toEqual([sym.matrix(W, 'fixed', 'os'), sym.matrix(W, 'fixed', 'arch')]);
+    expect(ends('computed', 'm')).toEqual([sym.matrix(W, 'computed', 'os'), 'context: matrix']);
+    // An include item that is an expression adds an entry of keys known only at runtime.
+    expect(ends('item', 'm')).toEqual([sym.matrix(W, 'item', 'os'), 'context: matrix']);
+    expect(ends('item', 'k')).toEqual([
+      sym.matrix(W, 'item', 'os'),
+      sym.input(W, 'only'),
+      'context: matrix[…]',
+    ]);
+    // GITHUB_TOKEN is always among the secrets; a caller's `secrets: inherit` passes others.
+    expect(ends('fixed', 's')).toEqual([sym.secret(W, 'DECL'), 'context: secrets']);
+    // Inputs hold only those declared, and so does the event of a workflow that is only dispatched.
+    expect(ends('fixed', 'i')).toEqual([sym.input(W, 'only')]);
+    expect(ends('j', 'e', D)).toEqual([sym.input(D, 'only')]);
+  });
+
+  it('keeps the inputs context of an action next to its inputs: a step may pass it undeclared ones', () => {
+    const B = '.github/actions/b';
+    const { index: inputs } = load({
+      [W]: yaml`
+        on: push
+        jobs:
+          j:
+            runs-on: x
+            steps:
+              - uses: ./.github/actions/b
+                with:
+                  known: k
+                  extra: \${{ github.event.head_commit.message }}
+      `,
+      [`${A}/action.yml`]: index.project.actions.get(A)!.source.text,
+      [`${B}/action.yml`]: yaml`
+        name: b
+        description: d
+        inputs:
+          known: { description: k }
+        runs:
+          using: composite
+          steps:
+            - uses: ./.github/actions/a
+              with:
+                v: \${{ toJSON(inputs) }}
+      `,
+    });
+    // The runner puts every with: key in an action's inputs, declared or not (it warns about `extra`).
+    const t = trace(inputs, sym.input(A, 'v'), { direction: 'up' });
+    expect(t.children.map((c) => c.symbol)).toEqual([sym.input(B, 'known')]);
+    expect(leavesOf(t)).toEqual([`context ${B} › steps[0]: inputs`]);
+  });
+
+  it('keeps the context of a whole object the repository declares no member of', () => {
+    const { index: other } = load({
+      [W]: yaml`
+        on: push
+        jobs:
+          j:
+            runs-on: x
+            strategy:
+              matrix: \${{ fromJSON(vars.MATRIX) }}
+            steps:
+              - uses: ./.github/actions/a
+                with:
+                  v: \${{ toJSON(vars) }} \${{ toJSON(matrix) }} \${{ toJSON(secrets) }} \${{ toJSON(env) }}
+      `,
+      [`${A}/action.yml`]: index.project.actions.get(A)!.source.text,
+    });
+    const t = trace(other, sym.input(A, 'v'), { direction: 'up' });
+    expect(t.children).toEqual([]);
+    expect(t.leaves.map((l) => `${l.role}: ${l.text}`)).toEqual([
+      'context: vars',
+      'context: matrix',
+      'context: secrets',
+      'context: env',
+    ]);
+  });
+
+  it('reads only the workflow_call inputs from a whole inputs in a workflow_call default', () => {
+    // A default applies when the workflow is called, and then `inputs` holds its workflow_call inputs only. A whole or
+    // computed read of it there reads each of them, `all` itself included (a cycle), and not `manual`, which only
+    // workflow_dispatch declares; they are all declared, so no `inputs` context either.
+    const CALLEE = `${WF}/callee.yml`;
+    const { index: defaults } = load({
+      [CALLEE]: yaml`
+        on:
+          workflow_dispatch:
+            inputs:
+              manual: { type: string }
+          workflow_call:
+            inputs:
+              all: { type: string, default: "\${{ toJSON(inputs) }}" }
+              pick: { type: string, default: "\${{ inputs[inputs.key] }}" }
+              key: { type: string }
+        jobs:
+          j: { runs-on: x, steps: [{ run: "echo \${{ inputs.manual }}" }] }
+      `,
+      [CALLER]: yaml`
+        on: push
+        jobs:
+          c: { uses: ./.github/workflows/callee.yml, with: { key: k } }
+      `,
+    });
+    const shown = (name: string) => {
+      const t = trace(defaults, sym.input(CALLEE, name), { direction: 'up' });
+      return {
+        children: t.children.map((c) => `${c.symbol.slice(CALLEE.length)}${c.stop ? ` (${c.stop})` : ''}`),
+        leaves: leavesOf(t),
+      };
+    };
+    const omitted = `omitted ${CALLER} › jobs.c: (not passed)`;
+    expect(shown('all')).toEqual({
+      children: ['#inputs.all (cycle)', '#inputs.pick', '#inputs.key (seen)'],
+      leaves: [omitted],
+    });
+    expect(shown('pick')).toEqual({
+      children: ['#inputs.all', '#inputs.pick (cycle)', '#inputs.key (seen)'],
+      leaves: [omitted],
+    });
+  });
+});
+
+// A whole env (#12) over a step's own env values that read github.event.inputs (#10).
+describe('trace: a whole env and github.event.inputs', () => {
+  const ACTION = '.github/actions/a';
+  const WFP = `${WF}/wf.yml`;
+  const TOP = `${WF}/top.yml`;
+  const UPPER = `${WF}/upper.yml`;
+  const z = sym.input(WFP, 'z');
+  const v = sym.input(ACTION, 'v');
+  const leavesOf = (t: TraceNode) => t.leaves.map((l) => `${l.role} ${l.where}: ${l.text}`);
+  const allLeaves = (t: TraceNode): string[] => [...leavesOf(t), ...t.children.flatMap(allLeaves)];
+  /** wf.yml's step passes `toJSON(env)` to action a, with the step's own env entries given. */
+  const repo = (env: string) =>
+    load({
+      [WFP]: yaml`
+        on:
+          workflow_dispatch:
+            inputs: { z: { type: string } }
+          workflow_call:
+            inputs: { z: { type: string } }
+        jobs:
+          j:
+            runs-on: x
+            steps:
+              - uses: ./.github/actions/a
+                env: ${env}
+                with:
+                  v: \${{ toJSON(env) }}
+      `,
+      [TOP]: yaml`
+        on: workflow_dispatch
+        jobs:
+          t:
+            uses: ./.github/workflows/wf.yml
+            with:
+              z: from-top
+      `,
+      [UPPER]: yaml`
+        on:
+          workflow_call:
+            inputs: { q: { type: string } }
+        jobs:
+          t:
+            uses: ./.github/workflows/wf.yml
+            with:
+              z: \${{ inputs.q }}
+      `,
+      [`${ACTION}/action.yml`]: yaml`
+        name: a
+        description: d
+        inputs: { v: { description: v } }
+        runs:
+          using: composite
+          steps: [{ shell: bash, run: echo }]
+      `,
+    }).index;
+  const event = `context ${WFP} › jobs.j › steps[0]: github.event.inputs.z`;
+
+  it('reads the own env values of a whole env that read the input only through github.event.inputs as the caller’s event', () => {
+    // Its only own value that reads z is github.event.inputs.z, after one that reads nothing.
+    const index = repo('{ P: plain, X: "${{ github.event.inputs.z }}" }');
+    const up = trace(index, v, { direction: 'up' });
+    expect(up.children).toMatchObject([
+      { symbol: z, children: [], leaves: [], via: { text: '${{ toJSON(env) }}', note: 'when dispatched' } },
+    ]);
+    expect(leavesOf(up)).toContain(event);
+    expect(allLeaves(up)).not.toContainEqual(expect.stringContaining('from-top'));
+    // Down, upper.yml's value does not flow on into the action.
+    const down = trace(index, sym.input(UPPER, 'q'));
+    expect(down.children).toMatchObject([{ symbol: z, children: [], leaves: [] }]);
+  });
+
+  it('traces the input on up when another own value of the whole env reads it through inputs', () => {
+    const index = repo('{ X: "${{ github.event.inputs.z }}", Y: "${{ inputs.z }}" }');
+    const up = trace(index, v, { direction: 'up' });
+    expect(up.children.map((c) => `${c.symbol} ${c.via?.note}`)).toEqual([`${z} undefined`]);
+    expect(leavesOf(up.children[0]!)).toEqual([`literal ${TOP} › jobs.t: "from-top"`]);
+    expect(leavesOf(up)).toContain(event);
+    expect(trace(index, sym.input(UPPER, 'q')).children[0]!.children.map((c) => c.symbol)).toEqual([v]);
+  });
+});
