@@ -712,6 +712,43 @@ describe('reference locations', () => {
     },
   );
 
+  it('skips only the escapes that stand for a space, and only in a double-quoted scalar', () => {
+    // `\_ \L \P` are U+00A0, U+2028 and U+2029, `\v \f` and `\ ` a vertical tab, form feed and space, and a `\` before a
+    // raw tab is a tab: the decoded value trims them all, as it does a hex escape of a space. U+10020 (whose low 16 bits
+    // are a space), `\N` (U+0085, which trim() keeps) and `\0` are not spaces, and a plain or single-quoted scalar has no
+    // escapes: those expressions do not parse, and start at their `\`, where FP502 reports them.
+    const text = stepWorkflow([
+      '      - if: "\\_\\L\\Pinputs.a == \'x\'"',
+      '        run: x',
+      '      - if: "\\v\\f\\ \\\tinputs.a == \'x\'"',
+      '        run: x',
+      '      - if: "\\x0B\\u2028\\U00003000inputs.a == \'x\'"',
+      '        run: x',
+      '      - if: "\\U00010020inputs.a == \'x\'"',
+      '        run: x',
+      '      - if: "\\Ninputs.a == \'x\'"',
+      '        run: x',
+      '      - if: "\\0inputs.a == \'x\'"',
+      '        run: x',
+      "      - if: \\tinputs.a == 'x'",
+      '        run: x',
+      "      - run: '${{\\x20inputs.a }}'",
+    ]);
+    const segments = parse(text).sites.flatMap((site) =>
+      site.segments.map((seg) => `${seg.loc.line}:${seg.loc.column}${seg.expr.error ? ' invalid' : ''}`),
+    );
+    expect(segments).toEqual([
+      '6:20',
+      '8:22',
+      '10:34',
+      '12:14 invalid',
+      '14:14 invalid',
+      '16:14 invalid',
+      '18:13 invalid',
+      '20:18 invalid',
+    ]);
+  });
+
   it('skips a copy of a reference that continues a name or a property chain', () => {
     // `.inputs.a` is a property of fromJSON's result, and `my-inputs.a` and `myinputs.a` are longer names.
     const text = stepWorkflow([
