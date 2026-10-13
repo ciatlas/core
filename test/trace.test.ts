@@ -970,6 +970,46 @@ describe('trace: a read of every secret behind secrets: inherit (#20)', () => {
     ]);
   });
 
+  it('follows the secret into a callee that may read every secret: one that does not parse, or hands them on to a remote workflow', () => {
+    const { index } = load({
+      [TOP]: yaml`
+        on: push
+        jobs:
+          call:
+            uses: ./.github/workflows/mid.yml
+            secrets: inherit
+          broken:
+            uses: ./.github/workflows/leaf.yml
+            secrets: inherit
+          use:
+            runs-on: x
+            steps:
+              - run: echo \${{ secrets.NPM }}
+      `,
+      [MID]: yaml`
+        on: workflow_call
+        jobs:
+          remote:
+            uses: acme/infra/.github/workflows/deploy.yml@v1
+            secrets: inherit
+      `,
+      [LEAF]: yaml`
+        on: workflow_call
+        jobs:
+          a:
+            runs-on: x
+            steps:
+              - run: echo "\${{ fromJSON(secrets[ }}"
+      `,
+    });
+    expect(lines(trace(index, sym.secret(TOP, 'NPM')))).toEqual([
+      sym.secret(TOP, 'NPM'),
+      '  run script: echo ${{ secrets.NPM }}',
+      `  ${sym.secret(MID, 'NPM')} via secrets: inherit (jobs.call)`,
+      `  ${sym.secret(LEAF, 'NPM')} via secrets: inherit (jobs.broken)`,
+    ]);
+  });
+
   it('follows a callee that declares the secret and reads every secret, once', () => {
     const { index } = load(sinks(true));
     const t = trace(index, sym.secret(MID, 'deploy'));

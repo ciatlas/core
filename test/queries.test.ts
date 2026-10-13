@@ -244,3 +244,57 @@ describe('secretsNeededBy: a read of every secret (#20)', () => {
     expect(['one', 'ONE', 'TWO'].map((n) => needsSecret(named, n))).toEqual([true, true, false]);
   });
 });
+
+describe('secretsNeededBy: a callee whose reads are unknown', () => {
+  const reads = (expr: string) => `  read:\n    runs-on: x\n    steps:\n      - run: echo "\${{ ${expr} }}"`;
+  const remote = (pass: string) => `  r:\n    uses: acme/infra/.github/workflows/deploy.yml@v1\n    ${pass}`;
+  const { project, index } = load({
+    // A remote workflow, or a local one that is not there: what it reads is unknown.
+    [`${WF}/remote.yml`]: callerOf('workflow_call', remote('secrets: inherit')),
+    [`${WF}/missing.yml`]: callerOf('workflow_call', call('c', 'nowhere.yml', 'secrets: inherit')),
+    // An expression, or the file, that does not parse may read any secret.
+    [`${WF}/broken.yml`]: callerOf('workflow_call', reads('fromJSON(secrets[')),
+    [`${WF}/broken-yaml.yml`]: callerOf(
+      'workflow_call',
+      '  read:\n    runs-on: x\n    runs-on: y\n    steps:\n      - run: echo',
+    ),
+    [`${WF}/via-remote.yml`]: callerOf('push', call('c', 'remote.yml', 'secrets: inherit')),
+    [`${WF}/via-broken.yml`]: callerOf('workflow_call', call('c', 'broken.yml', 'secrets: inherit')),
+    [`${WF}/via-broken-yaml.yml`]: callerOf(
+      'workflow_call',
+      call('c', 'broken-yaml.yml', 'secrets: inherit'),
+    ),
+    // Through `secrets:`, the callee gets the named secrets only; a job without `uses:` calls nothing.
+    [`${WF}/explicit.yml`]: callerOf(
+      'push',
+      remote('secrets:\n      X: ${{ secrets.X }}'),
+      call('c', 'broken.yml', 'secrets:', '  Y: ${{ secrets.Y }}'),
+      '  plain:\n    runs-on: x\n    secrets: inherit\n    steps:\n      - run: echo',
+    ),
+  });
+  const of = (file: string) => {
+    const n = secretsNeededBy(index, project.workflows.get(`${WF}/${file}`)!);
+    return { names: [...n.names].sort(), all: n.all };
+  };
+
+  it('needs every secret when it hands them to a callee it cannot read', () => {
+    expect(project.workflows.has(`${WF}/nowhere.yml`)).toBe(false);
+    for (const file of ['remote.yml', 'missing.yml', 'via-remote.yml'])
+      expect(of(file), file).toEqual({ names: [], all: true });
+  });
+
+  it('needs every secret when it, or a callee it hands them to, does not parse', () => {
+    expect(project.workflows.get(`${WF}/broken-yaml.yml`)!.parseErrors).not.toEqual([]);
+    for (const file of ['broken.yml', 'broken-yaml.yml', 'via-broken.yml', 'via-broken-yaml.yml'])
+      expect(of(file), file).toEqual({ names: [], all: true });
+  });
+
+  it('needs the named ones only through secrets:, and nothing from a job that calls nothing', () => {
+    expect(of('explicit.yml')).toEqual({ names: ['X', 'Y'], all: false });
+  });
+
+  it('then needs any secret but the automatic token', () => {
+    const needed = secretsNeededBy(index, project.workflows.get(`${WF}/remote.yml`)!);
+    expect(['deploy', 'GITHUB_TOKEN'].map((n) => needsSecret(needed, n))).toEqual([true, false]);
+  });
+});

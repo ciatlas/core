@@ -272,7 +272,7 @@ function inheritChildren(index: ProjectIndex, symbol: string, child: (to: string
 
 /**
  * The callee's secret a job's `secrets: inherit` hands the secret `name` to, when the callee needs it: it, or a callee
- * it hands every secret to, reads it by name or reads every secret (see `secretsNeededBy`).
+ * it hands every secret to, reads it by name or reads, or may read, every secret (see `NeededSecrets.all`).
  */
 function inheritedSecret(index: ProjectIndex, job: JobDecl, name: string): string | undefined {
   const callee = job.secretsInherit ? index.calleeOf(job) : undefined;

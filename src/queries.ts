@@ -1,5 +1,5 @@
 import type { CallSite, ProjectIndex } from './graph';
-import type { ExprSite, LocatedRef, UnitDecl, WorkflowDecl } from './ir';
+import type { ExprSite, JobDecl, LocatedRef, UnitDecl, WorkflowDecl } from './ir';
 
 /** Every reference in a unit's expressions, with the site it is in. */
 export function* refsOf(unit: UnitDecl): Generator<{ site: ExprSite; ref: LocatedRef }> {
@@ -12,9 +12,7 @@ export function* refsOf(unit: UnitDecl): Generator<{ site: ExprSite; ref: Locate
  * which makes "never read" conclusions unsafe.
  */
 export function readsContextDynamically(unit: UnitDecl, context: string): boolean {
-  // An expression we could not parse may read anything, so "never read" cannot be concluded.
-  if (unit.parseErrors.length > 0 || unit.sites.some((s) => s.segments.some((seg) => seg.expr.error)))
-    return true;
+  if (mayReadAnything(unit)) return true;
   for (const { ref } of refsOf(unit)) {
     // `needs.build.outputs[matrix.k]` names its job: the graph counts it as a read of each output of that job.
     if (ref.context === context && ref.dynamic && !namesOwner(ref)) return true;
@@ -27,6 +25,13 @@ export function readsContextDynamically(unit: UnitDecl, context: string): boolea
     }
   }
   return false;
+}
+
+/**
+ * Whether a unit may read anything: an expression, or the file, does not parse, so "never read" cannot be concluded.
+ */
+function mayReadAnything(unit: UnitDecl): boolean {
+  return unit.parseErrors.length > 0 || unit.sites.some((s) => s.segments.some((seg) => seg.expr.error));
 }
 
 /** A computed read of outputs whose job or step is named statically (see `ProjectIndex.readsOf`). */
@@ -76,9 +81,12 @@ export interface NeededSecrets {
   /** The secrets read by name, as written, without the automatic `GITHUB_TOKEN`. */
   names: Set<string>;
   /**
-   * Set when one of them reads the whole `secrets` context or a computed key of it (`toJSON(secrets)`, `secrets.*`,
-   * `secrets[inputs.name]`): the workflow then needs every secret it gets, named or not. Through `secrets: inherit`,
-   * that is every secret its caller has, so no list of names stands for it.
+   * Set when one of them reads, or may read, every secret: it reads the whole `secrets` context or a computed key of it
+   * (`toJSON(secrets)`, `secrets.*`, `secrets[inputs.name]`), has an expression or a file that does not parse (see
+   * `readsContextDynamically`), or hands every secret through `secrets: inherit` to a workflow whose reads are unknown:
+   * a remote one, or a local one that is not loaded as a reusable workflow. The workflow then needs every secret it
+   * gets, named or not. Through `secrets: inherit`, that is every secret its caller has, so no list of names stands
+   * for it.
    */
   all: boolean;
 }
@@ -93,15 +101,11 @@ export function secretsNeededBy(
   wf: WorkflowDecl,
   seen = new Set<string>(),
 ): NeededSecrets {
-  const out: NeededSecrets = { names: new Set(), all: false };
-  if (seen.has(wf.path)) return out;
+  if (seen.has(wf.path)) return { names: new Set(), all: false };
   seen.add(wf.path);
+  const out: NeededSecrets = { names: new Set(), all: mayReadAnything(wf) };
   for (const { ref } of refsOf(wf)) addSecretRead(out, ref);
-  for (const callee of inheritCallees(index, wf)) {
-    const inner = secretsNeededBy(index, callee, seen);
-    for (const name of inner.names) out.names.add(name);
-    if (inner.all) out.all = true;
-  }
+  for (const job of Object.values(wf.jobs)) addInherited(index, out, job, seen);
   return out;
 }
 
@@ -113,12 +117,16 @@ function addSecretRead(out: NeededSecrets, ref: LocatedRef): void {
   else if (!BUILTIN_SECRETS.has(name.toLowerCase())) out.names.add(name);
 }
 
-/** The workflows a workflow's jobs call with `secrets: inherit`. */
-function inheritCallees(index: ProjectIndex, wf: WorkflowDecl): WorkflowDecl[] {
-  return Object.values(wf.jobs).flatMap((job) => {
-    const callee = job.secretsInherit ? index.calleeOf(job) : undefined;
-    return callee ? [callee] : [];
-  });
+/**
+ * Adds the secrets a job hands on through `secrets: inherit`: those its callee needs, or every secret when the callee's
+ * reads are unknown, as a remote workflow's are, or a local one's that is not loaded as a reusable workflow.
+ */
+function addInherited(index: ProjectIndex, out: NeededSecrets, job: JobDecl, seen: Set<string>): void {
+  if (!job.secretsInherit || !job.uses) return;
+  const callee = index.calleeOf(job);
+  const inner = callee ? secretsNeededBy(index, callee, seen) : { names: [], all: true };
+  for (const name of inner.names) out.names.add(name);
+  if (inner.all) out.all = true;
 }
 
 /**
