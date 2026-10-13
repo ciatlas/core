@@ -170,14 +170,24 @@ export function parseExpression(source: string): ParsedExpression {
   return result;
 }
 
+/**
+ * The offset of a position the lexer of `@actions/expressions` gives a token. Its `line` counts every newline before the
+ * token's end, those inside string literals included, but its `column` counts from the last newline outside a string:
+ * a newline inside `'…'` moves the line and not the start of the column. So the column is added to the offset after the
+ * last newline outside a string among the first `line`. A quote toggles the string: a `''` escape toggles it twice.
+ */
 function offsetOf(source: string, line: number, column: number): number {
-  let offset = 0;
-  for (let l = 0; l < line; l++) {
-    const nl = source.indexOf('\n', offset);
-    if (nl < 0) break;
-    offset = nl + 1;
+  let lineStart = 0;
+  let newlines = 0;
+  let inString = false;
+  for (let i = 0; i < source.length && newlines < line; i++) {
+    if (source[i] === "'") inString = !inString;
+    else if (source[i] === '\n') {
+      newlines++;
+      if (!inString) lineStart = i + 1;
+    }
   }
-  return offset + column;
+  return lineStart + column;
 }
 
 type Tok = { range: { start: { line: number; column: number }; end: { line: number; column: number } } };
