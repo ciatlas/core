@@ -40,6 +40,11 @@ describe('logger', () => {
     expect(() => silentLogger.error('x')).not.toThrow();
   });
 
+  it('writes nowhere without a sink', () => {
+    const log = createLogger({ level: 'trace' });
+    expect(() => log.info('dropped', { n: 1 })).not.toThrow();
+  });
+
   it.each([
     [{}, {}, 'info'],
     [{ debug: true }, {}, 'debug'],
