@@ -304,6 +304,48 @@ describe('SymbolLocator: whole outputs objects', () => {
   });
 });
 
+describe('SymbolLocator: whole inputs and matrix', () => {
+  const W = `${WF}/whole.yml`;
+  const text = yaml`
+    on:
+      workflow_dispatch:
+        inputs:
+          a: { type: string }
+          b: { type: string }
+    jobs:
+      j:
+        runs-on: x
+        strategy:
+          matrix:
+            os: [linux]
+        steps:
+          - run: echo '\${{ toJSON(inputs) }}' '\${{ matrix[inputs.a] }}'
+  `;
+  const whole = new SymbolLocator(load({ [W]: text }).index);
+  const line = (needle: string) => text.slice(0, text.indexOf(needle)).split('\n').length;
+
+  it('lists a whole read among the references of each member, but finds nothing at its position', () => {
+    const run = line('toJSON(inputs)');
+    expect(
+      whole.occurrences(sym.input(W, 'a')).map((o) => `${o.role} ${o.loc.line}:${o.loc.column}`),
+    ).toEqual([
+      `declaration ${line('a: {')}:7`,
+      `read ${run}:${text.split('\n')[run - 1]!.indexOf('inputs') + 1}`,
+      `read ${run}:${text.split('\n')[run - 1]!.indexOf('inputs.a') + 1}`,
+    ]);
+    expect(whole.occurrences(sym.input(W, 'b')).map((o) => `${o.role} ${o.loc.line}`)).toEqual([
+      `declaration ${line('b: {')}`,
+      `read ${run}`,
+    ]);
+    expect(whole.occurrences(sym.matrix(W, 'j', 'os')).map((o) => `${o.role} ${o.loc.line}`)).toEqual([
+      `declaration ${line('os:')}`,
+      `read ${run}`,
+    ]);
+    const at = text.split('\n')[run - 1]!.indexOf('inputs') + 2;
+    expect(whole.at(W, run, at)).toBeUndefined();
+  });
+});
+
 describe('SymbolLocator: env, aliases, script outputs and bindings', () => {
   const E = `${WF}/env.yml`;
   const LIB = `${WF}/lib.yml`;

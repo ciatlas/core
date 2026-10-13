@@ -1734,3 +1734,116 @@ describe('trace: input defaults and github.event.inputs', () => {
     expect(allLeaves(event)).toEqual([`context ${C} › jobs.b: github.event.inputs.z`]);
   });
 });
+
+describe('trace: whole inputs, matrix, secrets and env', () => {
+  const W = `${WF}/print.yml`;
+  const CALLER = `${WF}/caller.yml`;
+  const A = '.github/actions/a';
+  const { index } = load({
+    [W]: yaml`
+      on:
+        workflow_call:
+          inputs:
+            title: { type: string }
+            mode: { type: string }
+            unused: { type: string }
+          outputs:
+            all:
+              value: \${{ jobs.j.outputs.all }}
+      env:
+        TOP: workflow
+      jobs:
+        j:
+          runs-on: x
+          strategy:
+            matrix: \${{ fromJSON(inputs.mode) }}
+          outputs:
+            all: \${{ toJSON(inputs) }}
+          steps:
+            - run: echo '\${{ toJSON(inputs) }}' '\${{ toJSON(vars) }}' '\${{ toJSON(matrix) }}'
+            - uses: ./.github/actions/a
+              env:
+                LIT: plain
+                CTX: \${{ github.sha }}
+              with:
+                v: \${{ toJSON(env) }}
+    `,
+    [CALLER]: yaml`
+      on: pull_request
+      jobs:
+        call:
+          uses: ./.github/workflows/print.yml
+          with:
+            title: \${{ github.event.pull_request.title }}
+            mode: fast
+    `,
+    [`${A}/action.yml`]: yaml`
+      name: a
+      description: d
+      inputs:
+        v: { description: v }
+      runs:
+        using: composite
+        steps:
+          - shell: bash
+            run: echo
+    `,
+  });
+  const leavesOf = (t: ReturnType<typeof trace>) => t.leaves.map((l) => `${l.role} ${l.where}: ${l.text}`);
+
+  it('shows toJSON(inputs) among the uses of each input', () => {
+    const t = trace(index, sym.input(W, 'title'));
+    expect(t.children.map((c) => c.symbol)).toEqual([sym.jobOutput(W, 'j', 'all')]);
+    expect(leavesOf(t)).toEqual([
+      `run script jobs.j › steps[0] › run: echo '\${{ toJSON(inputs) }}' '\${{ toJSON(vars) }}' '\${{ toJSON(matrix) }}'`,
+    ]);
+  });
+
+  it('follows toJSON(inputs) up to what each caller passes, instead of ending at the inputs context', () => {
+    const t = trace(index, sym.output(W, 'all'), { direction: 'up' });
+    const all = t.children[0]!;
+    expect(all.symbol).toBe(sym.jobOutput(W, 'j', 'all'));
+    expect(all.children.map((c) => c.symbol)).toEqual(
+      ['title', 'mode', 'unused'].map((n) => sym.input(W, n)),
+    );
+    expect(leavesOf(all)).toEqual([]);
+    expect(all.children.map((c) => leavesOf(c))).toEqual([
+      [`context ${CALLER} › jobs.call: github.event.pull_request.title`],
+      [`literal ${CALLER} › jobs.call: "fast"`],
+      [`omitted ${CALLER} › jobs.call: (not passed)`],
+    ]);
+  });
+
+  it('follows toJSON(env) to the env in scope and the step’s own values', () => {
+    const t = trace(index, sym.input(A, 'v'), { direction: 'up' });
+    expect(t.children.map((c) => c.symbol)).toEqual([sym.env(W, undefined, 'TOP')]);
+    const at = `${W} › jobs.j › steps[1]`;
+    expect(leavesOf(t)).toEqual([`literal ${at}: "plain"`, `context ${at}: github.sha`]);
+  });
+
+  it('keeps the context of a whole object the repository declares no member of', () => {
+    const { index: other } = load({
+      [W]: yaml`
+        on: push
+        jobs:
+          j:
+            runs-on: x
+            strategy:
+              matrix: \${{ fromJSON(vars.MATRIX) }}
+            steps:
+              - uses: ./.github/actions/a
+                with:
+                  v: \${{ toJSON(vars) }} \${{ toJSON(matrix) }} \${{ toJSON(secrets) }} \${{ toJSON(env) }}
+      `,
+      [`${A}/action.yml`]: index.project.actions.get(A)!.source.text,
+    });
+    const t = trace(other, sym.input(A, 'v'), { direction: 'up' });
+    expect(t.children).toEqual([]);
+    expect(t.leaves.map((l) => `${l.role}: ${l.text}`)).toEqual([
+      'context: vars',
+      'context: matrix',
+      'context: secrets',
+      'context: env',
+    ]);
+  });
+});

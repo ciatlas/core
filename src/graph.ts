@@ -65,6 +65,64 @@ export interface Usage {
   ref: LocatedRef;
   /** The symbol the site defines (e.g. a callee input), when the value flows on. */
   sink?: string;
+  /**
+   * Set when the reference does not name the symbol: it reads a whole object (`toJSON(inputs)`, `needs.build.outputs`)
+   * or indexes one with a computed key (`matrix[inputs.key]`), so it reads each member, this one among them (see
+   * `ProjectIndex.readsOf`). Rules about one particular member, such as how a condition treats an empty input, skip
+   * these.
+   */
+  whole?: true;
+}
+
+/** One symbol a reference reads; `whole` when the reference does not name it (see `Usage.whole`). */
+interface Read {
+  symbol: string;
+  whole: boolean;
+}
+
+/** A path segment that names no key: the end of the path, a `*` filter or a `?` computed index. */
+const computed = (s: string | undefined) => s === undefined || s === '*' || s === '?';
+
+/** The reads of each member of a whole object, once per symbol, as reads the reference does not name. */
+function wholeReads(reads: Read[]): Read[] {
+  return [...new Set(reads.map((r) => r.symbol))].map((symbol) => ({ symbol, whole: true }));
+}
+
+/** The names of declared inputs, secrets or env variables, as declared. */
+const declaredNames = (decls: Record<string, { name: string }> | undefined) =>
+  Object.values(decls ?? {}).map((d) => d.name);
+
+/** The inputs a unit declares (a workflow's `workflow_call` and `workflow_dispatch` inputs of one name are one). */
+function inputNames(unit: UnitDecl): string[] {
+  if (unit.kind === 'action') return declaredNames(unit.inputs);
+  return [...declaredNames(unit.call?.inputs), ...dispatchInputNames(unit)];
+}
+
+/** The inputs `github.event.inputs` holds: a workflow's `workflow_dispatch` inputs. */
+function dispatchInputNames(unit: UnitDecl): string[] {
+  return unit.kind === 'workflow' ? declaredNames(unit.dispatch?.inputs) : [];
+}
+
+/** The job a site is in. */
+function jobAt(unit: UnitDecl, site: ExprSite): JobDecl | undefined {
+  return unit.kind === 'workflow' && site.job ? unit.jobs[site.job] : undefined;
+}
+
+/**
+ * The outputs among `names` that `<job or step>.<b>.<c>` reads: all of them, one by name, or none
+ * (`needs.build.result`).
+ */
+function pickOutputs(names: string[], [, b, c]: string[]): string[] {
+  if (computed(b)) return names;
+  if (b!.toLowerCase() !== 'outputs') return [];
+  if (computed(c)) return names;
+  return names.filter((n) => n.toLowerCase() === c!.toLowerCase());
+}
+
+/** The keys of a job's matrix: its dimensions and the keys its `include` entries add. */
+function matrixKeys(job: JobDecl | undefined): string[] {
+  const m = job?.matrix;
+  return m ? [...m.dims.map((d) => d.name), ...m.include.flatMap((inc) => Object.keys(inc.keyLocs))] : [];
 }
 
 export interface Project {
@@ -564,65 +622,133 @@ export class ProjectIndex {
 
   /**
    * Every symbol a reference reads. Besides the single symbol of `resolveRef`, a reference that stops at a whole object
-   * of outputs reads each of them: `toJSON(needs.build.outputs)`, `needs.build`, `steps.meta.outputs`,
-   * `needs.build.outputs[matrix.key]`, `toJSON(needs)` (every job the reading job needs), or `toJSON(steps)` (every
-   * step that ran before the reading step).
+   * or indexes it with a computed key reads each member it may stand for:
+   * - outputs: `toJSON(needs.build.outputs)`, `needs.build`, `steps.meta.outputs`, `needs.build.outputs[matrix.key]`,
+   *   `toJSON(needs)` (every job the reading job needs) or `toJSON(steps)` (every step that ran before the reading
+   *   step);
+   * - `toJSON(inputs)` or `inputs[inputs.which]`: every input the unit declares (`github.event.inputs`: every
+   *   `workflow_dispatch` input);
+   * - `toJSON(matrix)` or `matrix[inputs.key]`: every key of the job's matrix;
+   * - `toJSON(secrets)` or `secrets[inputs.name]`: every secret the workflow declares under `workflow_call`;
+   * - `toJSON(env)` or `env[inputs.name]`: every env variable in scope, a step's own read through their values.
+   *
+   * Variables are set in the repository's settings, not in its files, so a whole `vars` reads nothing. See
+   * `Usage.whole`.
    */
   readsOf(unit: UnitDecl, site: ExprSite, ref: LocatedRef): string[] {
+    return this.reads(unit, site, ref).map((r) => r.symbol);
+  }
+
+  private reads(unit: UnitDecl, site: ExprSite, ref: LocatedRef): Read[] {
     const one = this.resolveRef(unit, site, ref);
-    if (one) return [one];
-    const [a, b, c] = ref.path;
-    const computed = (s: string | undefined) => s === undefined || s === '*' || s === '?';
-    // A step's own env value is not a symbol: a read of it reads what the value reads (from the outer env).
-    if (ref.context === 'env' && !computed(a) && site.field !== 'step.env') {
-      const own = lookup(this.stepOf(unit, site)?.env ?? {}, a!)?.site;
-      return own ? own.segments.flatMap((s) => s.refs.flatMap((r) => this.readsOf(unit, own, r))) : [];
+    if (one) return [{ symbol: one, whole: false }];
+    const members = this.memberRefs(unit, site, ref);
+    if (members) return wholeReads(members.flatMap((m) => this.reads(unit, site, m)));
+    if (ref.context === 'env') return this.ownEnvReads(unit, site, ref);
+    return this.outputReads(unit, site, ref).map((symbol) => ({ symbol, whole: true }));
+  }
+
+  /** A step's own env value is not a symbol: a read of it reads what the value reads (from the outer env). */
+  private ownEnvReads(unit: UnitDecl, site: ExprSite, ref: LocatedRef): Read[] {
+    const [a] = ref.path;
+    if (computed(a) || site.field === 'step.env') return [];
+    const own = lookup(this.stepOf(unit, site)?.env ?? {}, a!)?.site;
+    return own ? own.segments.flatMap((s) => s.refs.flatMap((r) => this.reads(unit, own, r))) : [];
+  }
+
+  /**
+   * A whole object or computed key of `inputs`, `matrix`, `secrets`, `env` or `github.event.inputs` as one reference per
+   * member, each naming it (`toJSON(inputs)` → `inputs.a`, `inputs.b`, …), so each resolves the way the name written
+   * out does. `undefined` for any other reference.
+   */
+  private memberRefs(unit: UnitDecl, site: ExprSite, ref: LocatedRef): LocatedRef[] | undefined {
+    const event = ref.context === 'github' && ref.path[0] === 'event' && ref.path[1] === 'inputs';
+    const at = event ? 2 : 0;
+    if (!computed(ref.path[at])) return undefined;
+    const members = event ? dispatchInputNames(unit) : this.memberNames(unit, site, ref.context);
+    return members?.map((name) => ({
+      ...ref,
+      path: [...ref.path.slice(0, at), name, ...ref.path.slice(at + 1)],
+    }));
+  }
+
+  /** The names a whole `inputs`, `matrix`, `secrets` or `env` holds at `site`; `undefined` for other contexts. */
+  private memberNames(unit: UnitDecl, site: ExprSite, context: string): string[] | undefined {
+    switch (context) {
+      case 'inputs':
+        return inputNames(unit);
+      case 'matrix':
+        return matrixKeys(jobAt(unit, site));
+      case 'secrets':
+        return unit.kind === 'workflow' ? declaredNames(unit.call?.secrets) : [];
+      case 'env':
+        return this.envNames(unit, site);
+      default:
+        return undefined;
     }
-    /** The outputs `<job or step>.<b>.<c>` reads: all of them, one by name, or none (`needs.build.result`). */
-    const pick = (names: string[]): string[] => {
-      if (computed(b)) return names;
-      if (b!.toLowerCase() !== 'outputs') return [];
-      if (computed(c)) return names;
-      return names.filter((n) => n.toLowerCase() === c!.toLowerCase());
-    };
+  }
+
+  /** The env variables in scope at a site: the step's own, the job's and the workflow's. */
+  private envNames(unit: UnitDecl, site: ExprSite): string[] {
+    // A step's own env applies to the rest of the step, not to its own values (see `resolveRef`).
+    const step = site.field === 'step.env' ? undefined : this.stepOf(unit, site);
+    const workflow = unit.kind === 'workflow' ? unit.env : undefined;
+    return [
+      ...declaredNames(step?.env),
+      ...declaredNames(jobAt(unit, site)?.env),
+      ...declaredNames(workflow),
+    ];
+  }
+
+  /**
+   * The job and step outputs a `needs`, `jobs` or `steps` reference reads when it names no single output: every output
+   * of a whole object or computed key, or the one named output of every job or step a computed key may stand for.
+   */
+  private outputReads(unit: UnitDecl, site: ExprSite, ref: LocatedRef): string[] {
     switch (ref.context) {
       case 'needs':
       case 'jobs': {
         if (unit.kind !== 'workflow') return [];
         if (ref.context === 'jobs' && site.field !== 'workflow.output') return [];
-        let jobs: JobDecl[];
-        if (!computed(a)) {
-          const job = lookup(unit.jobs, a!);
-          jobs = job ? [job] : [];
-        } else if (ref.context === 'jobs') {
-          jobs = Object.values(unit.jobs);
-        } else {
-          // The `needs` context holds the jobs the reading job depends on directly.
-          const reader = site.job ? unit.jobs[site.job] : undefined;
-          jobs = (reader?.needs ?? []).flatMap((n) => lookup(unit.jobs, n.id) ?? []);
-        }
-        return jobs.flatMap((job) =>
-          pick(this.jobOutputNames(job)).map((n) => sym.jobOutput(unit.path, job.id, n)),
+        return this.jobsRead(unit, site, ref).flatMap((job) =>
+          pickOutputs(this.jobOutputNames(job), ref.path).map((n) => sym.jobOutput(unit.path, job.id, n)),
         );
       }
-      case 'steps': {
-        const steps =
-          unit.kind === 'action' ? unit.steps : site.job ? (unit.jobs[site.job]?.steps ?? []) : [];
-        // In a step, the `steps` context holds only the steps that ran before it; job and action outputs see them all.
-        const named = computed(a)
-          ? steps.filter((s) => site.step === undefined || s.index < site.step)
-          : steps.filter((s) => s.id?.toLowerCase() === a!.toLowerCase());
-        return named.flatMap((step) => {
-          const action = this.actionOf(step);
-          if (!step.id || !action) return [];
-          return pick(Object.keys(action.outputs)).map((n) =>
-            sym.stepOutput(unit.path, unit.kind === 'workflow' ? site.job : undefined, step.id!, n),
-          );
-        });
-      }
+      case 'steps':
+        return this.stepOutputReads(unit, site, ref);
       default:
         return [];
     }
+  }
+
+  /** The jobs a `needs` or `jobs` reference reads: the one it names, or each one a computed key may stand for. */
+  private jobsRead(wf: WorkflowDecl, site: ExprSite, ref: LocatedRef): JobDecl[] {
+    const [a] = ref.path;
+    if (!computed(a)) {
+      const job = lookup(wf.jobs, a!);
+      return job ? [job] : [];
+    }
+    if (ref.context === 'jobs') return Object.values(wf.jobs);
+    // The `needs` context holds the jobs the reading job depends on directly.
+    const reader = site.job ? wf.jobs[site.job] : undefined;
+    return (reader?.needs ?? []).flatMap((n) => lookup(wf.jobs, n.id) ?? []);
+  }
+
+  private stepOutputReads(unit: UnitDecl, site: ExprSite, ref: LocatedRef): string[] {
+    const [a] = ref.path;
+    const steps = unit.kind === 'action' ? unit.steps : (jobAt(unit, site)?.steps ?? []);
+    // In a step, the `steps` context holds only the steps that ran before it; job and action outputs see them all.
+    const named = computed(a)
+      ? steps.filter((s) => site.step === undefined || s.index < site.step)
+      : steps.filter((s) => s.id?.toLowerCase() === a!.toLowerCase());
+    const job = unit.kind === 'workflow' ? site.job : undefined;
+    return named.flatMap((step) => {
+      const action = this.actionOf(step);
+      if (!step.id || !action) return [];
+      return pickOutputs(Object.keys(action.outputs), ref.path).map((n) =>
+        sym.stepOutput(unit.path, job, step.id!, n),
+      );
+    });
   }
 
   /** Output names of a job: its own `outputs:`, or the callee's workflow outputs for a reusable call. */
@@ -691,18 +817,13 @@ export class ProjectIndex {
     if (sink) this.define(sink, { unit, site });
     for (const seg of site.segments) {
       for (const ref of seg.refs) {
-        for (const symbol of this.readsOf(unit, site, ref)) this.addUsage(unit, site, ref, symbol, sink);
+        for (const read of this.reads(unit, site, ref)) this.addUsage(unit, site, ref, read, sink);
       }
     }
   }
 
-  private addUsage(
-    unit: UnitDecl,
-    site: ExprSite,
-    ref: LocatedRef,
-    symbol: string,
-    sink: string | undefined,
-  ) {
+  private addUsage(unit: UnitDecl, site: ExprSite, ref: LocatedRef, read: Read, sink: string | undefined) {
+    const { symbol } = read;
     if (!this.nodes.has(symbol)) {
       this.node({
         id: symbol,
@@ -711,7 +832,13 @@ export class ProjectIndex {
         unit: unit.path,
       });
     }
-    const usage: Usage = { symbol, site, ref, ...(sink ? { sink } : {}) };
+    const usage: Usage = {
+      symbol,
+      site,
+      ref,
+      ...(sink ? { sink } : {}),
+      ...(read.whole ? { whole: true } : {}),
+    };
     const list = this.usages.get(symbol);
     if (list) list.push(usage);
     else this.usages.set(symbol, [usage]);

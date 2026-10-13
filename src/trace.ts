@@ -293,18 +293,25 @@ const isEventInputs = (ref: LocatedRef) =>
 
 /**
  * Whether a usage reads its symbol only through `github.event.inputs` in a workflow that can be called (see
- * `readsCallerEvent`): directly, or through the step's own env value it reads (`env.X`, where the step's `env:` has
- * `X: ${{ github.event.inputs.z }}`), which the graph resolves to what the value reads.
+ * `readsCallerEvent`): directly, or through the step's own env values it reads (`env.X`, where the step's `env:` has
+ * `X: ${{ github.event.inputs.z }}`, or a whole `env`, which reads every own value), which the graph resolves to what
+ * the values read.
  */
 function usageReadsCallerEvent(index: ProjectIndex, u: Usage): boolean {
   const wf = index.project.workflows.get(u.site.ownerPath);
   if (!wf?.call) return false;
   if (isEventInputs(u.ref)) return true;
-  const own = ownEnv(index, wf, u.site, u.ref)?.site;
-  const reads = own
-    ? own.segments.flatMap((seg) => seg.refs.filter((ref) => index.readsOf(wf, own, ref).includes(u.symbol)))
-    : [];
+  const reads = ownEnv(index, wf, u.site, u.ref).flatMap((own) =>
+    own.site ? refsReading(index, wf, own.site, u.symbol) : [],
+  );
   return reads.length > 0 && reads.every(isEventInputs);
+}
+
+/** The references of a site that read `symbol`. */
+function refsReading(index: ProjectIndex, unit: UnitDecl, site: ExprSite, symbol: string): LocatedRef[] {
+  return site.segments.flatMap((seg) =>
+    seg.refs.filter((ref) => index.readsOf(unit, site, ref).includes(symbol)),
+  );
 }
 
 /** The node of a parent upstream: a symbol traced on up, or the dispatch input alone (see `dispatchedInput`). */
@@ -696,12 +703,7 @@ function collectSources(
       });
     }
     addCalls(found, at, seg);
-    for (const ref of seg.refs) {
-      const own = ownEnv(index, unit, site, ref);
-      if (own?.site) collectSources(index, unit, { ...at, site: own.site }, found);
-      else if (own) add(found, `literal@${own.valueLoc.line}:${own.valueLoc.column}`, ownLiteral(own, where));
-      else addRead(found, where, seg, ref, at.reads(site, ref));
-    }
+    for (const ref of seg.refs) refSources(index, { unit, at, seg, ref }, found);
   }
 }
 
@@ -747,14 +749,34 @@ function definitionReads(index: ProjectIndex, unit: UnitDecl): Reader {
 }
 
 /**
- * The step's own `env:` entry a reference reads: it shadows the job's and the workflow's for the rest of the step, and
- * its value (evaluated against the outer env) is where the reference's value comes from.
+ * Adds the leaves for one reference: the sources of the step's own env values it reads, or else the context itself when
+ * it reads no symbol, or `invalid` where GitHub does not allow it (see `addRead`).
  */
-function ownEnv(index: ProjectIndex, unit: UnitDecl, site: ExprSite, ref: LocatedRef): Binding | undefined {
+function refSources(
+  index: ProjectIndex,
+  { unit, at, seg, ref }: { unit: UnitDecl; at: SourceSite; seg: ExprSegment; ref: LocatedRef },
+  found: Map<string, TraceLeaf>,
+): void {
+  const owns = ownEnv(index, unit, at.site, ref);
+  for (const own of owns) {
+    if (own.site) collectSources(index, unit, { ...at, site: own.site }, found);
+    else add(found, `literal@${own.valueLoc.line}:${own.valueLoc.column}`, ownLiteral(own, at.where));
+  }
+  if (owns.length === 0) addRead(found, at.where, seg, ref, at.reads(at.site, ref));
+}
+
+/**
+ * The step's own `env:` entries a reference reads: they shadow the job's and the workflow's for the rest of the step,
+ * and their values (evaluated against the outer env) are where the reference's value comes from. `env.NAME` reads the
+ * one entry of that name; a whole `env` or a computed key reads them all.
+ */
+function ownEnv(index: ProjectIndex, unit: UnitDecl, site: ExprSite, ref: LocatedRef): Binding[] {
+  if (ref.context !== 'env' || site.field === 'step.env') return [];
+  const env = index.stepOf(unit, site)?.env ?? {};
   const name = ref.path[0];
-  if (ref.context !== 'env' || site.field === 'step.env' || !name || name === '*' || name === '?')
-    return undefined;
-  return lookup(index.stepOf(unit, site)?.env ?? {}, name);
+  if (!name || name === '*' || name === '?') return Object.values(env);
+  const own = lookup(env, name);
+  return own ? [own] : [];
 }
 
 /** Keeps the first leaf of each key: the place where the source is first written. */
