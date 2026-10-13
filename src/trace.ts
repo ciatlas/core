@@ -68,9 +68,13 @@ export interface TraceNode {
   /**
    * How the value got here from the parent node: the expression it passes through, `secrets: inherit`, or `workflow
    * output` or `action output` for the output of a reusable workflow or an action that becomes the output of the job or
-   * step using it (with the note `exposed to the caller` downstream). `note` qualifies it: `when dispatched` for a
-   * workflow input read through `github.event.inputs`, which holds the input only when the workflow is dispatched (see
-   * `readsCallerEvent`).
+   * step using it. `note` qualifies it, and is one of:
+   * - `exposed to the caller`: a `workflow output` or `action output`, downstream;
+   * - `jobs.<id>`: `secrets: inherit`, naming the calling job that passes the secret on, in both directions;
+   * - `the default of inputs.<name>`: upstream, the expression of an input's default, which reads the parent (another
+   *   input or a `vars` value) where a caller or step omits the input;
+   * - `when dispatched`: upstream, for a workflow input read through `github.event.inputs`, which holds the input only
+   *   when the workflow is dispatched (see `readsCallerEvent`).
    */
   via?: { loc: Loc; text: string; note?: string };
   children: TraceNode[];
