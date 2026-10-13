@@ -580,12 +580,15 @@ export class ProjectIndex {
     }
   }
 
-  /** `github.event.inputs.<name>`: this workflow's own input only when it is dispatched directly. */
+  /**
+   * `github.event.inputs.<name>`: this workflow's own input only when it is dispatched directly, so only an input it
+   * declares under `workflow_dispatch`. GitHub accepts no other input in a dispatch, and a workflow that is called gets
+   * its caller's event, so a name only `workflow_call` declares, or none does, reads no input: it is the context.
+   */
   private resolveEventInput(unit: UnitDecl, [a, b, c]: string[]): string | undefined {
     if (!isKey(a, 'event') || !isKey(b, 'inputs') || computed(c)) return undefined;
-    return unit.kind === 'workflow' && unit.dispatch
-      ? sym.input(unit.path, this.canonicalInput(unit, c!))
-      : undefined;
+    const input = unit.kind === 'workflow' && unit.dispatch ? lookup(unit.dispatch.inputs, c!) : undefined;
+    return input && sym.input(unit.path, this.canonicalInput(unit, input.name));
   }
 
   /**

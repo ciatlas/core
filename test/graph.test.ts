@@ -1297,3 +1297,54 @@ describe('ProjectIndex: property names ignore case (#28)', () => {
     ]);
   });
 });
+
+// GitHub accepts only declared inputs in a dispatch, and gives a workflow that is called its caller's event, so
+// `github.event.inputs.<name>` is this workflow's input only for a name it declares under `workflow_dispatch`.
+describe('ProjectIndex: github.event.inputs names a workflow_dispatch input only (#23)', () => {
+  const BOTH = `${WF}/both.yml`;
+  const { index } = load(
+    {
+      [BOTH]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              only: { type: string, required: false }
+              Shared: { type: string, required: false }
+          workflow_dispatch:
+            inputs:
+              d: { type: string, required: false }
+              shared: { type: string, required: false }
+        jobs:
+          j:
+            runs-on: x
+            steps:
+              - run: echo \${{ github.event.inputs.only }} \${{ github.event.inputs.ghost }} \${{ github.event.inputs.D }} \${{ github.event.inputs.SHARED }} \${{ env.X }}
+                env:
+                  X: \${{ github.event.inputs.only }}
+      `,
+    },
+    { validateSchema: false },
+  );
+  const unit = index.unit(BOTH)!;
+  const run = unit.sites.find((s) => s.field === 'step.run')!;
+  const refs = run.segments.flatMap((seg) => seg.refs);
+  const text = (ref: (typeof refs)[number]) => [ref.context, ...ref.path].join('.');
+
+  it('resolves a dispatch input, by the spelling that names the input', () => {
+    expect(refs.map((ref) => [text(ref), index.resolveRef(unit, run, ref)])).toEqual([
+      ['github.event.inputs.only', undefined],
+      ['github.event.inputs.ghost', undefined],
+      ['github.event.inputs.D', sym.input(BOTH, 'd')],
+      // `Shared` (workflow_call) and `shared` (workflow_dispatch) are one input, named by the call's spelling.
+      ['github.event.inputs.SHARED', sym.input(BOTH, 'Shared')],
+      ['env.X', undefined],
+    ]);
+  });
+
+  it('records no read of an input only workflow_call declares, nor a node for a name none declares', () => {
+    expect(index.usagesOf(sym.input(BOTH, 'only'))).toEqual([]);
+    expect(index.nodes.has(sym.input(BOTH, 'ghost'))).toBe(false);
+    // The step's own X reads github.event.inputs.only: env.X reads nothing either.
+    expect(index.readsOf(unit, run, refs[4]!)).toEqual([]);
+  });
+});

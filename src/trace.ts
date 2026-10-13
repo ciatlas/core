@@ -457,33 +457,23 @@ function flowParents(index: ProjectIndex, symbol: string, parent: Parent): Trace
         : `${e.from}@${e.loc ? `${e.loc.file}:${e.loc.line}:${e.loc.column}` : ''}`;
     if (seenEdges.has(key)) continue;
     seenEdges.add(key);
-    const p = flowParent(index, e, parent);
-    if (p) parents.push(p);
+    parents.push(flowParent(index, e, parent));
   }
   return parents;
 }
 
 /**
- * The parent a `flows` edge comes from, with how the value got here: `when dispatched` for a dispatch input alone.
- * None when the value reads only `github.event.inputs.<name>` and the workflow does not declare `<name>` under
- * `workflow_dispatch`: no dispatch sets it, so only the caller's event (the `context` leaf) is left.
+ * The parent a `flows` edge comes from, with how the value got here: `when dispatched` for a dispatch input alone. The
+ * graph resolves `github.event.inputs.<name>` only to a `workflow_dispatch` input, so such an edge never comes from an
+ * input that no dispatch sets.
  */
-function flowParent(index: ProjectIndex, e: GraphEdge, parent: Parent): TraceNode | undefined {
+function flowParent(index: ProjectIndex, e: GraphEdge, parent: Parent): TraceNode {
   const dispatched = readsOnlyCallerEvent(index, e.from, e.siteId);
-  if (dispatched && !isDispatchInput(index, e.from)) return undefined;
   const p = parent(e.from, dispatched);
   const site = e.siteId !== undefined ? index.site(e.siteId) : undefined;
   const note = dispatched ? { note: 'when dispatched' } : {};
   if (e.loc) p.via = { loc: e.loc, text: site ? short(site.text) : outputEdge(index, e), ...note };
   return p;
-}
-
-/** Whether `symbol` is an input its workflow declares under `workflow_dispatch`: the only ones a dispatch sets. */
-function isDispatchInput(index: ProjectIndex, symbol: string): boolean {
-  const unit = index.nodes.get(symbol)?.unit;
-  const wf = unit ? index.project.workflows.get(unit) : undefined;
-  const name = symbol.slice(symbol.indexOf('#inputs.') + '#inputs.'.length);
-  return !!wf?.dispatch && lookup(wf.dispatch.inputs, name) !== undefined;
 }
 
 /** A secret received through `secrets: inherit` comes from the caller's secret of the same name. */

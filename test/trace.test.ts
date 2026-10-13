@@ -1881,6 +1881,31 @@ describe('trace: github.event.inputs in a workflow that can be called', () => {
     const g = trace(ghost, title, { direction: 'up' });
     expect(g.children.map((c) => c.via?.text)).toEqual(['${{ inputs.x || github.event.inputs.x }}']);
     expect(leavesOf(g)[0]).toBe(`context ${MID} › jobs.a: github.event.inputs.ghost`);
+    // Downstream, x is read through inputs.x only (#23): its github.event.inputs reads are not its own.
+    const down = trace(callName, x);
+    expect(down.children.map((c) => c.via?.text)).toEqual(['${{ inputs.x || github.event.inputs.x }}']);
+    expect(leavesOf(down)).toEqual([
+      `run script jobs.c › steps[0] › run: echo \${{ github.event.inputs.x }} \${{ inputs.x }}`,
+    ]);
+  });
+
+  it('ends at the context for a name no dispatch input declares in a workflow that is only dispatched', () => {
+    const ghostly = mid(`workflow_dispatch:
+        inputs:
+          d: { type: string }`).replace(
+      'title: ${{ github.event.inputs.x }}',
+      'title: ${{ github.event.inputs.ghost }}',
+    );
+    const { index: ghost } = load(files(ghostly), { validateSchema: false });
+    const t = trace(ghost, title, { direction: 'up' });
+    expect(t.children.map((c) => `${c.symbol} ${c.via?.text}`)).toEqual([
+      `${x} \${{ inputs.x || github.event.inputs.x }}`,
+    ]);
+    expect(leavesOf(t)).toEqual([
+      `context ${MID} › jobs.a: github.event.inputs.ghost`,
+      `context ${MID} › jobs.b: github.event.inputs.x`,
+    ]);
+    expect(ghost.nodes.has(sym.input(MID, 'ghost'))).toBe(false);
   });
 
   // GitHub looks properties up ignoring case (#28): `github.Event.INPUTS.x` is `github.event.inputs.x`.
