@@ -351,8 +351,11 @@ function readsCallerEvent(index: ProjectIndex, u: { site: ExprSite; ref: Located
   return !!unit?.call && isEventInputs(u.ref);
 }
 
+/** Whether a reference is `github.event.inputs…`, whatever the case of `event` and `inputs` (GitHub ignores it). */
 const isEventInputs = (ref: LocatedRef) =>
-  ref.context === 'github' && ref.path[0] === 'event' && ref.path[1] === 'inputs';
+  ref.context === 'github' &&
+  ref.path[0]?.toLowerCase() === 'event' &&
+  ref.path[1]?.toLowerCase() === 'inputs';
 
 /**
  * Whether a usage reads its symbol only through `github.event.inputs` in a workflow that can be called (see

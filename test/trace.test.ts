@@ -1883,6 +1883,26 @@ describe('trace: github.event.inputs in a workflow that can be called', () => {
     expect(leavesOf(g)[0]).toBe(`context ${MID} › jobs.a: github.event.inputs.ghost`);
   });
 
+  // GitHub looks properties up ignoring case (#28): `github.Event.INPUTS.x` is `github.event.inputs.x`.
+  it('reads github.event.inputs written in another case the same way', () => {
+    const { index: cased } = load(files(both.replaceAll('github.event.inputs.x', 'github.Event.INPUTS.x')));
+    const t = trace(cased, title, { direction: 'up' });
+    expect(t.children.map((c) => `${c.symbol} ${c.via?.note}`)).toEqual([
+      `${x} when dispatched`,
+      `${x} undefined`,
+    ]);
+    expect(leavesOf(t)).toEqual([
+      `context ${MID} › jobs.a: github.Event.INPUTS.x`,
+      `context ${MID} › jobs.b: github.Event.INPUTS.x`,
+    ]);
+    const called = trace(cased, sym.input(UPPER, 'foo')).children[0]!;
+    expect(called.children.map((c) => c.via?.text)).toEqual(['${{ inputs.x || github.Event.INPUTS.x }}']);
+    expect(trace(cased, x).children.map((c) => c.via?.text)).toEqual([
+      '${{ github.Event.INPUTS.x }}',
+      '${{ inputs.x || github.Event.INPUTS.x }}',
+    ]);
+  });
+
   it('ends at the caller’s event in a workflow that is only called, as it did', () => {
     const { index: called } = load(
       files(

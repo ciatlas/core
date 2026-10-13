@@ -23,13 +23,13 @@ export function readsContextDynamically(unit: UnitDecl, context: string): boolea
 
 /**
  * Whether a reference reads every dispatch input of the triggering workflow, which `github.event` holds: the whole
- * `github.event` or `github.event.inputs`, or a computed key of the inputs (`github.event.inputs[matrix.k]`).
+ * `github.event` or `github.event.inputs`, or a computed key of the inputs (`github.event.inputs[matrix.k]`). Property
+ * names ignore case, as GitHub looks them up.
  */
 function readsEveryEventInput(ref: LocatedRef): boolean {
-  if (ref.context !== 'github' || ref.path[0] !== 'event') return false;
-  return (
-    ref.path.length === 1 || (ref.path[1] === 'inputs' && (ref.path.length === 2 || ref.path[2] === '?'))
-  );
+  const [event, inputs, name] = ref.path;
+  if (ref.context !== 'github' || event?.toLowerCase() !== 'event') return false;
+  return inputs === undefined || (inputs.toLowerCase() === 'inputs' && (name === undefined || name === '?'));
 }
 
 /**

@@ -1229,3 +1229,71 @@ describe('ProjectIndex.readsOf: whole inputs, matrix, secrets and env', () => {
     expect(index.incoming(sym.jobOutput(WHOLE, 'j', 'all'), 'flows').map((e) => e.from)).toEqual(inputs);
   });
 });
+
+// GitHub looks context properties up ignoring case: `@actions/expressions`' Dictionary lower-cases its keys and the
+// runner's DictionaryContextData compares them OrdinalIgnoreCase. `github.Event.Inputs.x` is `github.event.inputs.x`,
+// and `needs.build.Outputs.y` names the output `y` as `needs.build.outputs.y` does.
+describe('ProjectIndex: property names ignore case (#28)', () => {
+  const CASE = `${WF}/case.yml`;
+  const META = '.github/actions/meta';
+  const { index } = load({
+    [CASE]: yaml`
+      on:
+        workflow_dispatch:
+          inputs:
+            target: { type: string, required: false }
+            other: { type: string, required: false }
+        workflow_call:
+          outputs:
+            o:
+              value: \${{ jobs.build.Outputs.digest }}
+      jobs:
+        build:
+          runs-on: x
+          outputs:
+            digest: \${{ steps.meta.OUTPUTS.artifact }}
+          steps:
+            - id: meta
+              uses: ./.github/actions/meta
+        use:
+          needs: build
+          runs-on: x
+          steps:
+            - run: echo "\${{ github.Event.Inputs.target }}" '\${{ toJSON(github.EVENT.inputs) }}' \${{ needs.build.Outputs.digest }}
+    `,
+    [`${META}/action.yml`]: yaml`
+      name: meta
+      description: d
+      outputs:
+        artifact: { description: a, value: x }
+      runs:
+        using: composite
+        steps: [{ shell: bash, run: echo }]
+    `,
+  });
+  const usages = (symbol: string) =>
+    index
+      .usagesOf(symbol)
+      .map((u) => `${u.site.field} ${[u.ref.context, ...u.ref.path].join('.')}${u.whole ? ' (whole)' : ''}`);
+
+  it('reads a dispatch input through github.event.inputs in any case', () => {
+    expect(usages(sym.input(CASE, 'target'))).toEqual([
+      'step.run github.Event.Inputs.target',
+      'step.run github.EVENT.inputs (whole)',
+    ]);
+    expect(usages(sym.input(CASE, 'other'))).toEqual(['step.run github.EVENT.inputs (whole)']);
+  });
+
+  it('resolves the output a needs, jobs or steps reference names, whatever the case of outputs', () => {
+    expect(usages(sym.jobOutput(CASE, 'build', 'digest'))).toEqual([
+      'workflow.output jobs.build.Outputs.digest',
+      'step.run needs.build.Outputs.digest',
+    ]);
+    expect(usages(sym.stepOutput(CASE, 'build', 'meta', 'artifact'))).toEqual([
+      'job.output steps.meta.OUTPUTS.artifact',
+    ]);
+    expect(index.outgoing(sym.jobOutput(CASE, 'build', 'digest'), 'flows').map((e) => e.to)).toEqual([
+      sym.output(CASE, 'o'),
+    ]);
+  });
+});

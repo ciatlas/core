@@ -60,6 +60,10 @@ describe('readsContextDynamically', () => {
     ['github.event.inputs.name', 'inputs', false],
     ['github.event.pull_request.title', 'inputs', false],
     ['toJSON(github.event)', 'secrets', false],
+    // GitHub looks properties up ignoring case.
+    ['toJSON(github.Event)', 'inputs', true],
+    ['github.EVENT.Inputs[matrix.k]', 'inputs', true],
+    ['github.Event.Inputs.name', 'inputs', false],
     ['secrets[matrix.k]', 'secrets', true],
     ['toJSON(secrets)', 'secrets', true],
     // A computed read of outputs that names its job or step reads each output of that job or step.

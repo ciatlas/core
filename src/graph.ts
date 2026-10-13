@@ -83,6 +83,9 @@ interface Read {
 /** A path segment that names no key: the end of the path, a `*` filter or a `?` computed index. */
 const computed = (s: string | undefined) => s === undefined || s === '*' || s === '?';
 
+/** Whether a path segment names the property `key` (lowercase): GitHub looks properties up ignoring case. */
+const isKey = (s: string | undefined, key: string) => s?.toLowerCase() === key;
+
 /** The reads of each member of a whole object, once per symbol, as reads the reference does not name. */
 function wholeReads(reads: Read[]): Read[] {
   return [...new Set(reads.map((r) => r.symbol))].map((symbol) => ({ symbol, whole: true }));
@@ -108,13 +111,21 @@ function jobAt(unit: UnitDecl, site: ExprSite): JobDecl | undefined {
   return unit.kind === 'workflow' && site.job ? unit.jobs[site.job] : undefined;
 }
 
+/** The steps a site's `steps` context names: an action's, or those of the site's job. */
+function stepsAt(unit: UnitDecl, site: ExprSite): StepDecl[] {
+  return unit.kind === 'action' ? unit.steps : (jobAt(unit, site)?.steps ?? []);
+}
+
+/** The job in the symbol of a step output read at a site: the site's job in a workflow, none in an action. */
+const stepJob = (unit: UnitDecl, site: ExprSite) => (unit.kind === 'workflow' ? site.job : undefined);
+
 /**
  * The outputs among `names` that `<job or step>.<b>.<c>` reads: all of them, one by name, or none
  * (`needs.build.result`).
  */
 function pickOutputs(names: string[], [, b, c]: string[]): string[] {
   if (computed(b)) return names;
-  if (b!.toLowerCase() !== 'outputs') return [];
+  if (!isKey(b, 'outputs')) return [];
   if (computed(c)) return names;
   return names.filter((n) => n.toLowerCase() === c!.toLowerCase());
 }
@@ -234,6 +245,13 @@ export const sym = {
   var: (name: string) => `vars.${name}`,
   remote: (raw: string) => `remote:${raw}`,
 };
+
+/** A declared secret of a workflow, by its declared case, or the name as written: secrets need no declaration. */
+function resolveSecret(unit: UnitDecl, name: string): string | undefined {
+  if (unit.kind !== 'workflow') return undefined;
+  const decl = unit.call ? lookup(unit.call.secrets, name) : undefined;
+  return sym.secret(unit.path, decl?.name ?? name);
+}
 
 /**
  * What sets a symbol's value, in the workflow or action `unit`: an expression `site`, or a plain YAML `value` (no
@@ -538,86 +556,84 @@ export class ProjectIndex {
     return site.job ? unit.jobs[site.job]?.steps[site.step] : undefined;
   }
 
-  /** Resolves a reference inside `site` to the symbol it reads, or `undefined` for runtime-only contexts. */
+  /**
+   * Resolves a reference inside `site` to the symbol it reads, or `undefined` for runtime-only contexts. Property names
+   * are compared ignoring case, as GitHub looks them up (`github.Event.Inputs.x`, `needs.build.Outputs.y`).
+   */
   resolveRef(unit: UnitDecl, site: ExprSite, ref: LocatedRef): string | undefined {
-    const [a, b, c] = ref.path;
+    if (ref.context === 'github') return this.resolveEventInput(unit, ref.path);
+    const [a] = ref.path;
+    if (computed(a)) return undefined;
     switch (ref.context) {
-      case 'inputs': {
-        if (!a || a === '*' || a === '?') return undefined;
-        return sym.input(unit.path, this.canonicalInput(unit, a));
-      }
-      case 'github':
-        // `github.event.inputs` is this workflow's own input only when it is dispatched directly.
-        if (
-          a === 'event' &&
-          b === 'inputs' &&
-          c &&
-          c !== '*' &&
-          c !== '?' &&
-          unit.kind === 'workflow' &&
-          unit.dispatch
-        ) {
-          return sym.input(unit.path, this.canonicalInput(unit, c));
-        }
-        return undefined;
-      case 'secrets': {
-        if (!a || a === '*' || a === '?' || unit.kind !== 'workflow') return undefined;
-        const decl = unit.call ? lookup(unit.call.secrets, a) : undefined;
-        return sym.secret(unit.path, decl?.name ?? a);
-      }
+      case 'inputs':
+        return sym.input(unit.path, this.canonicalInput(unit, a!));
+      case 'secrets':
+        return resolveSecret(unit, a!);
       case 'vars':
-        return a && a !== '?' && a !== '*' ? sym.var(a) : undefined;
+        return sym.var(a!);
       case 'matrix':
-        return a && site.job && a !== '?' && a !== '*' ? sym.matrix(unit.path, site.job, a) : undefined;
-      case 'needs': {
-        if (unit.kind !== 'workflow' || !a || b !== 'outputs' || !c || c === '*' || c === '?')
-          return undefined;
-        const job = lookup(unit.jobs, a);
-        if (!job) return undefined;
-        return sym.jobOutput(unit.path, job.id, this.canonicalJobOutput(job, c));
-      }
-      case 'jobs': {
-        if (
-          unit.kind !== 'workflow' ||
-          site.field !== 'workflow.output' ||
-          !a ||
-          b !== 'outputs' ||
-          !c ||
-          c === '*' ||
-          c === '?'
-        )
-          return undefined;
-        const job = lookup(unit.jobs, a);
-        if (!job) return undefined;
-        return sym.jobOutput(unit.path, job.id, this.canonicalJobOutput(job, c));
-      }
-      case 'steps': {
-        if (!a || b !== 'outputs' || !c || c === '*' || c === '?') return undefined;
-        const steps =
-          unit.kind === 'action' ? unit.steps : site.job ? (unit.jobs[site.job]?.steps ?? []) : [];
-        const step = steps.find((s) => s.id?.toLowerCase() === a.toLowerCase());
-        if (!step?.id) return undefined;
-        const action = this.actionOf(step);
-        const name = (action && lookup(action.outputs, c)?.name) ?? c;
-        return sym.stepOutput(unit.path, unit.kind === 'workflow' ? site.job : undefined, step.id, name);
-      }
-      case 'env': {
-        if (!a || a === '*' || a === '?') return undefined;
-        // A step's own `env:` shadows the job's and the workflow's in the rest of the step (it is not a symbol); its
-        // values are evaluated before it applies, so they read the outer env.
-        const step = site.field === 'step.env' ? undefined : this.stepOf(unit, site);
-        if (step && lookup(step.env, a)) return undefined;
-        if (unit.kind === 'workflow' && site.job) {
-          const job = unit.jobs[site.job];
-          if (job && lookup(job.env, a)) return sym.env(unit.path, job.id, lookup(job.env, a)!.name);
-        }
-        if (unit.kind === 'workflow' && lookup(unit.env, a))
-          return sym.env(unit.path, undefined, lookup(unit.env, a)!.name);
-        return undefined;
-      }
+        return site.job ? sym.matrix(unit.path, site.job, a!) : undefined;
+      case 'env':
+        return this.resolveEnv(unit, site, a!);
+      default:
+        return this.resolveOutput(unit, site, ref);
+    }
+  }
+
+  /** `github.event.inputs.<name>`: this workflow's own input only when it is dispatched directly. */
+  private resolveEventInput(unit: UnitDecl, [a, b, c]: string[]): string | undefined {
+    if (!isKey(a, 'event') || !isKey(b, 'inputs') || computed(c)) return undefined;
+    return unit.kind === 'workflow' && unit.dispatch
+      ? sym.input(unit.path, this.canonicalInput(unit, c!))
+      : undefined;
+  }
+
+  /**
+   * An env variable of the job or the workflow. A step's own `env:` shadows the job's and the workflow's in the rest of
+   * the step (it is not a symbol); its values are evaluated before it applies, so they read the outer env.
+   */
+  private resolveEnv(unit: UnitDecl, site: ExprSite, name: string): string | undefined {
+    const step = site.field === 'step.env' ? undefined : this.stepOf(unit, site);
+    if (step && lookup(step.env, name)) return undefined;
+    const job = jobAt(unit, site);
+    const own = job && lookup(job.env, name);
+    if (own) return sym.env(unit.path, job.id, own.name);
+    const top = unit.kind === 'workflow' ? lookup(unit.env, name) : undefined;
+    return top && sym.env(unit.path, undefined, top.name);
+  }
+
+  /**
+   * `needs.<job>.outputs.<name>`, `jobs.<job>.outputs.<name>` (in a workflow output only) and
+   * `steps.<id>.outputs.<name>`: the one output they name.
+   */
+  private resolveOutput(unit: UnitDecl, site: ExprSite, ref: LocatedRef): string | undefined {
+    const [a, b, c] = ref.path;
+    if (!isKey(b, 'outputs') || computed(c)) return undefined;
+    switch (ref.context) {
+      case 'steps':
+        return this.resolveStepOutput(unit, site, a!, c!);
+      case 'needs':
+        return this.resolveJobOutput(unit, a!, c!);
+      case 'jobs':
+        return site.field === 'workflow.output' ? this.resolveJobOutput(unit, a!, c!) : undefined;
       default:
         return undefined;
     }
+  }
+
+  /** The output `name` of the job `id` of a workflow. */
+  private resolveJobOutput(unit: UnitDecl, id: string, name: string): string | undefined {
+    const job = unit.kind === 'workflow' ? lookup(unit.jobs, id) : undefined;
+    return job && sym.jobOutput(unit.path, job.id, this.canonicalJobOutput(job, name));
+  }
+
+  /** The output `name` of the step `id` of the site's job, or of an action. */
+  private resolveStepOutput(unit: UnitDecl, site: ExprSite, id: string, name: string): string | undefined {
+    const step = stepsAt(unit, site).find((s) => s.id?.toLowerCase() === id.toLowerCase());
+    if (!step?.id) return undefined;
+    const action = this.actionOf(step);
+    const output = (action && lookup(action.outputs, name)?.name) ?? name;
+    return sym.stepOutput(unit.path, stepJob(unit, site), step.id, output);
   }
 
   /**
@@ -662,7 +678,7 @@ export class ProjectIndex {
    * out does. `undefined` for any other reference.
    */
   private memberRefs(unit: UnitDecl, site: ExprSite, ref: LocatedRef): LocatedRef[] | undefined {
-    const event = ref.context === 'github' && ref.path[0] === 'event' && ref.path[1] === 'inputs';
+    const event = ref.context === 'github' && isKey(ref.path[0], 'event') && isKey(ref.path[1], 'inputs');
     const at = event ? 2 : 0;
     if (!computed(ref.path[at])) return undefined;
     const members = event ? dispatchInputNames(unit) : this.memberNames(unit, site, ref.context);
@@ -740,12 +756,12 @@ export class ProjectIndex {
    */
   private stepOutputReads(unit: UnitDecl, site: ExprSite, ref: LocatedRef): string[] {
     const [a] = ref.path;
-    const steps = unit.kind === 'action' ? unit.steps : (jobAt(unit, site)?.steps ?? []);
+    const steps = stepsAt(unit, site);
     // In a step, the `steps` context holds only the steps that ran before it; job and action outputs see them all.
     const named = computed(a)
       ? steps.filter((s) => site.step === undefined || s.index < site.step)
       : steps.filter((s) => s.id?.toLowerCase() === a!.toLowerCase());
-    const job = unit.kind === 'workflow' ? site.job : undefined;
+    const job = stepJob(unit, site);
     return named.flatMap((step) => {
       const action = this.actionOf(step);
       if (!step.id || !action) return [];
