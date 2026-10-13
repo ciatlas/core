@@ -826,6 +826,23 @@ describe('reference locations', () => {
     ]);
   });
 
+  it('finds a computed index inside a reference that goes on past it', () => {
+    // The search went on from the end of `github.event[inputs.x].y`, past its own index `inputs.x`, which then took the
+    // place of the later `inputs.x`.
+    const text = stepWorkflow([
+      '      - run: echo ${{ github.event[inputs.x].y == inputs.x }}',
+      '      - run: |',
+      '          echo ${{ needs[inputs.job].outputs.v }}',
+    ]);
+    expect(locatedRefs(text)).toEqual([
+      'github.event[inputs.x].y@6:23',
+      'inputs.x@6:36',
+      'inputs.x@6:51',
+      'needs[inputs.job].outputs.v@8:20',
+      'inputs.job@8:26',
+    ]);
+  });
+
   it('places a key that spans lines past an index that writes it without the spaces, in every style (#14)', () => {
     fc.assert(
       fc.property(

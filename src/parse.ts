@@ -344,7 +344,8 @@ function locateExpression(
     // In a single-quoted scalar, a reference's own quotes (`github.event['action']`) are doubled too.
     const written = expr.source.slice(r.start, r.end).replaceAll("'", s.quote);
     const span = written ? spanOf(s, written, cursor, scan) : undefined;
-    if (span) cursor = span[1];
+    // A computed index can sit inside the reference before it (`github.event[inputs.x].y`): search on from its start.
+    if (span) cursor = span[0] + 1;
     const [start, end] = span ? [s.start + span[0], s.start + span[1]] : [at + r.start, at + r.end];
     locs.set(r, s.source.loc(start, end));
   }
