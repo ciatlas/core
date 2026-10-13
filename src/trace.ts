@@ -18,7 +18,6 @@ import {
   lookup,
   type MatrixDecl,
   type SiteField,
-  type StepDecl,
   type UnitDecl,
 } from './ir';
 import { type Cell, comboLabel, expandMatrix } from './matrix';
@@ -782,22 +781,35 @@ function namesMember(ref: LocatedRef): boolean {
 }
 
 /**
- * Whether a whole object or computed key of `secrets`, `matrix` or `env` may hold members the files do not declare.
- * The graph reads it as the declared members (see `ProjectIndex.readsOf`); the context stays a source next to them:
+ * Whether a whole object or computed key of `secrets`, `matrix`, `env` or `inputs` may hold members the files do not
+ * declare. The graph reads it as the declared members (see `ProjectIndex.readsOf`); the context stays a source next to
+ * them:
  * - `secrets`, always: `GITHUB_TOKEN` is always there, and `secrets: inherit` passes the caller's other secrets;
- * - `matrix`, when the matrix or its `include` is computed at runtime;
- * - `env`, in an action, which also has its caller's env, and in a job once a step that may write `$GITHUB_ENV` has
- *   run.
- * `inputs` and `github.event.inputs` hold the declared inputs only.
+ * - `matrix`, when the matrix or part of its `include` is computed at runtime (see `MatrixDecl.includeDynamic`);
+ * - `env`, in an action, which also has its caller's env, and in a job once a step has run: any step can write
+ *   `$GITHUB_ENV` (a `run:` script, also through a script file it runs, or an action, through
+ *   `core.exportVariable`), and what it writes is in the env of the steps after it;
+ * - `inputs`, in an action: the runner puts every `with:` key of the step in it, declared or not, and only warns about
+ *   the others.
+ * A workflow's `inputs` and `github.event.inputs` hold the declared inputs only: GitHub rejects any other.
  */
 function holdsUndeclared(unit: UnitDecl, site: ExprSite, ref: LocatedRef): boolean {
   if (namesMember(ref)) return false;
-  if (ref.context === 'secrets') return true;
-  if (ref.context === 'matrix') return keysAtRuntime(jobOf(unit, site)?.matrix);
-  return ref.context === 'env' && (unit.kind === 'action' || stepsRunBefore(unit, site).some(mayWriteEnv));
+  switch (ref.context) {
+    case 'secrets':
+      return true;
+    case 'matrix':
+      return keysAtRuntime(jobOf(unit, site)?.matrix);
+    case 'env':
+      return unit.kind === 'action' || stepRanBefore(unit, site);
+    case 'inputs':
+      return unit.kind === 'action';
+    default:
+      return false;
+  }
 }
 
-/** Whether a matrix has keys only known at runtime: the matrix, or its `include`, is an expression. */
+/** Whether a matrix has keys only known at runtime: the matrix, or part of its `include`, is an expression. */
 function keysAtRuntime(matrix: MatrixDecl | undefined): boolean {
   return !!matrix && (matrix.dynamic || matrix.includeDynamic);
 }
@@ -808,21 +820,13 @@ function jobOf(unit: UnitDecl, site: ExprSite): JobDecl | undefined {
 }
 
 /**
- * The steps of the site's job that have run when the site is evaluated: those before its step, all of them for a job
- * output, none for the job's other settings.
+ * Whether a step of the site's job has run when the site is evaluated: one before its step, or any for a job output,
+ * which is evaluated once the steps are done. The job's other settings are evaluated before its first step.
  */
-function stepsRunBefore(unit: UnitDecl, site: ExprSite): StepDecl[] {
+function stepRanBefore(unit: UnitDecl, site: ExprSite): boolean {
   const steps = jobOf(unit, site)?.steps ?? [];
-  if (site.step !== undefined) return steps.filter((s) => s.index < site.step!);
-  return site.field === 'job.output' ? steps : [];
-}
-
-/**
- * Whether a step may write `$GITHUB_ENV`: its script does (see `StepDecl.writesEnv`), or it runs an action, which can
- * export variables (`core.exportVariable`) its YAML does not show.
- */
-function mayWriteEnv(step: StepDecl): boolean {
-  return step.writesEnv.names.length > 0 || step.writesEnv.dynamic || step.uses !== undefined;
+  if (site.step !== undefined) return steps.some((s) => s.index < site.step!);
+  return site.field === 'job.output' && steps.length > 0;
 }
 
 /** Keeps the first leaf of each key: the place where the source is first written. */

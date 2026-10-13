@@ -1818,10 +1818,15 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
     const t = trace(index, sym.input(A, 'v'), { direction: 'up' });
     expect(t.children.map((c) => c.symbol)).toEqual([sym.env(W, undefined, 'TOP')]);
     const at = `${W} › jobs.j › steps[1]`;
-    expect(leavesOf(t)).toEqual([`literal ${at}: "plain"`, `context ${at}: github.sha`]);
+    // The step runs after another, which may have written variables to $GITHUB_ENV: env stays a source too.
+    expect(leavesOf(t)).toEqual([
+      `literal ${at}: "plain"`,
+      `context ${at}: github.sha`,
+      `context ${at}: env`,
+    ]);
   });
 
-  it('keeps the env context next to the members once a step that may write $GITHUB_ENV has run', () => {
+  it('keeps the env context next to the members once any step has run', () => {
     const B = '.github/actions/b';
     const { index: env } = load({
       [W]: yaml`
@@ -1837,22 +1842,16 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
               - uses: ./.github/actions/a
                 with:
                   v: \${{ toJSON(env) }}
-              - run: echo "TAG=from-script" >> "$GITHUB_ENV"
+              - run: ./scripts/set-env.sh
               - uses: ./.github/actions/a
                 with:
                   v: \${{ toJSON(env) }}
-          plain:
+          script:
             runs-on: x
             outputs:
               all: \${{ toJSON(env) }}
             steps:
-              - run: echo
-          action:
-            runs-on: x
-            outputs:
-              all: \${{ toJSON(env) }}
-            steps:
-              - uses: actions/setup-python@v5
+              - run: ./scripts/set-env.sh
       `,
       [`${A}/action.yml`]: index.project.actions.get(A)!.source.text,
       [`${B}/action.yml`]: yaml`
@@ -1872,8 +1871,9 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
       const t = trace(env, symbol, { direction: 'up' });
       return [...t.children.map((c) => `${c.symbol} ${c.via?.loc.line}`), ...leavesOf(t)];
     };
-    // Step 0 runs first: env holds what the files declare. Step 2 runs after a script wrote TAG to $GITHUB_ENV.
-    // In action b, env also holds its caller's env.
+    // Step 0 runs first: env holds what the files declare. Step 2 runs after a script, which may write to $GITHUB_ENV
+    // (here through a script file, which the workflow does not show), as may any step. In action b, env also holds
+    // its caller's env.
     expect(ends(sym.input(A, 'v'))).toEqual([
       `${sym.env(W, undefined, 'W')} 12`,
       `${sym.env(W, undefined, 'W')} 16`,
@@ -1881,16 +1881,9 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
       `literal ${B} › steps[0]: "lit"`,
       `context ${B} › steps[0]: env`,
     ]);
-    // A job output is evaluated after every step: after the script, or after an action, which may export variables.
-    expect(ends(sym.jobOutput(W, 'j', 'all'))).toEqual([
-      `${sym.env(W, undefined, 'W')} 8`,
-      `context ${W} › jobs.j: env`,
-    ]);
-    expect(ends(sym.jobOutput(W, 'plain', 'all'))).toEqual([`${sym.env(W, undefined, 'W')} 20`]);
-    expect(ends(sym.jobOutput(W, 'action', 'all'))).toEqual([
-      `${sym.env(W, undefined, 'W')} 26`,
-      `context ${W} › jobs.action: env`,
-    ]);
+    // A job output is evaluated after every step.
+    for (const job of ['j', 'script'])
+      expect(ends(sym.jobOutput(W, job, 'all')).slice(1)).toEqual([`context ${W} › jobs.${job}: env`]);
   });
 
   it('keeps the matrix and secrets contexts next to the members when they may hold more', () => {
@@ -1927,6 +1920,18 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
               m: \${{ toJSON(matrix) }}
             steps:
               - run: echo
+          item:
+            runs-on: x
+            strategy:
+              matrix:
+                os: [linux]
+                include:
+                  - \${{ fromJSON(inputs.only) }}
+            outputs:
+              m: \${{ toJSON(matrix) }}
+              k: \${{ matrix[inputs.only] }}
+            steps:
+              - run: echo
       `,
       [D]: yaml`
         on:
@@ -1948,11 +1953,52 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
     };
     expect(ends('fixed', 'm')).toEqual([sym.matrix(W, 'fixed', 'os'), sym.matrix(W, 'fixed', 'arch')]);
     expect(ends('computed', 'm')).toEqual([sym.matrix(W, 'computed', 'os'), 'context: matrix']);
+    // An include item that is an expression adds an entry of keys known only at runtime.
+    expect(ends('item', 'm')).toEqual([sym.matrix(W, 'item', 'os'), 'context: matrix']);
+    expect(ends('item', 'k')).toEqual([
+      sym.matrix(W, 'item', 'os'),
+      sym.input(W, 'only'),
+      'context: matrix[…]',
+    ]);
     // GITHUB_TOKEN is always among the secrets; a caller's `secrets: inherit` passes others.
     expect(ends('fixed', 's')).toEqual([sym.secret(W, 'DECL'), 'context: secrets']);
     // Inputs hold only those declared, and so does the event of a workflow that is only dispatched.
     expect(ends('fixed', 'i')).toEqual([sym.input(W, 'only')]);
     expect(ends('j', 'e', D)).toEqual([sym.input(D, 'only')]);
+  });
+
+  it('keeps the inputs context of an action next to its inputs: a step may pass it undeclared ones', () => {
+    const B = '.github/actions/b';
+    const { index: inputs } = load({
+      [W]: yaml`
+        on: push
+        jobs:
+          j:
+            runs-on: x
+            steps:
+              - uses: ./.github/actions/b
+                with:
+                  known: k
+                  extra: \${{ github.event.head_commit.message }}
+      `,
+      [`${A}/action.yml`]: index.project.actions.get(A)!.source.text,
+      [`${B}/action.yml`]: yaml`
+        name: b
+        description: d
+        inputs:
+          known: { description: k }
+        runs:
+          using: composite
+          steps:
+            - uses: ./.github/actions/a
+              with:
+                v: \${{ toJSON(inputs) }}
+      `,
+    });
+    // The runner puts every with: key in an action's inputs, declared or not (it warns about `extra`).
+    const t = trace(inputs, sym.input(A, 'v'), { direction: 'up' });
+    expect(t.children.map((c) => c.symbol)).toEqual([sym.input(B, 'known')]);
+    expect(leavesOf(t)).toEqual([`context ${B} › steps[0]: inputs`]);
   });
 
   it('keeps the context of a whole object the repository declares no member of', () => {
