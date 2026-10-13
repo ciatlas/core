@@ -260,6 +260,27 @@ function refEndFromSource(source: string, ref: ExprRef): number {
   return m ? ref.start + m[0].length : ref.end;
 }
 
+/** The functions an expression calls, by name as written (`hashFiles`, `toJSON`), each call's before its arguments'. */
+export function calledFunctions(expr: ParsedExpression): string[] {
+  const names: string[] = [];
+  const visit = (e: Expr): void => {
+    if (e instanceof FunctionCall) names.push(e.functionName.lexeme);
+    for (const inner of operandsOf(e)) visit(inner);
+  };
+  if (expr.ast) visit(expr.ast);
+  return names;
+}
+
+/** The expressions directly inside `e`: its operands, arguments or index. */
+function operandsOf(e: Expr): Expr[] {
+  if (e instanceof Unary) return [e.expr];
+  if (e instanceof Binary) return [e.left, e.right];
+  if (e instanceof Logical || e instanceof FunctionCall) return e.args;
+  if (e instanceof Grouping) return [e.group];
+  if (e instanceof IndexAccess) return [e.expr, e.index];
+  return [];
+}
+
 // ---------------------------------------------------------------------------
 // Partial evaluation
 // ---------------------------------------------------------------------------

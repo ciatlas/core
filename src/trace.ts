@@ -1,3 +1,4 @@
+import { CONTEXT_FUNCTIONS, calledFunctions } from './expressions';
 import { type ActionUse, type Definition, type GraphNode, type ProjectIndex, sym, type Usage } from './graph';
 import {
   type Binding,
@@ -20,18 +21,25 @@ export interface TraceLeaf {
    * output's own value, or an input's default), `omitted` (a caller or step does not pass the input), `value`,
    * `missing` and `dynamic` (a matrix key's combinations), `context` (read from a context the graph does not follow,
    * such as `github.event.pull_request.title` or `runner.os`; `text` is the reference), `invalid` (an expression that
-   * does not parse, or a reference in an input's default to a context GitHub does not allow there; `text` is then the
-   * reference) and `expression` (an expression that reads no context, e.g. a `format()` of literals).
+   * does not parse, or, in an input's default, a reference to a context or a call to a function GitHub does not allow
+   * there; `text` is then the reference, or the function's name and `()` at the expression's place) and `expression`
+   * (an expression that reads no context, e.g. a `format()` of literals).
    *
    * When a caller or step omits an input, its `default:` is the value there, so the input's trace also ends at the
    * default, after the calls: a `literal`, or the `context`, `invalid` or `expression` leaves of an expression, with
    * `where` naming it (`<unit> › on.workflow_call.inputs.<name>.default`, `<unit> › inputs.<name>.default` in an
-   * action). A `workflow_call` input's default may read `github`, `inputs` and `vars`: the inputs and variables it
-   * reads are the node's children, and `github` is the caller's (`github.event.inputs.<name>` is the caller's event,
-   * not this workflow's input), a `context`. An action input's default may read the calling job's `github`,
-   * `strategy`, `matrix`, `job` and `runner`, each a `context`. A reference to any other context there (`env`,
-   * `secrets`, `steps`, `needs`, an action's `inputs` or `vars`) is `invalid`. A default no call falls back to is not
-   * shown, nor is a required `workflow_call` input's: GitHub fails the run when a caller omits that input.
+   * action). GitHub evaluates a default when the input is omitted, with a few contexts only:
+   * - a `workflow_call` input's default may read `github`, `inputs` and `vars`. The workflow's own `workflow_call`
+   *   inputs and the variables it reads are the node's children. An input only `workflow_dispatch` declares, or none
+   *   does, is empty when the workflow is called, and `github` is the caller's (`github.event.inputs.<name>` is the
+   *   caller's event, not this workflow's input): each a `context`;
+   * - an action input's default may read the calling job's `github`, `strategy`, `matrix`, `job` and `runner`, each a
+   *   `context`, and call `hashFiles()`.
+   *
+   * A reference to any other context there (`env`, `secrets`, `steps`, `needs`, an action's `inputs` or `vars`) is
+   * `invalid`, as is a call to a status function (`success()`, …) or, in a `workflow_call` default, `hashFiles()`. A
+   * default no call falls back to is not shown, nor is a required `workflow_call` input's: GitHub fails the run when a
+   * caller omits that input.
    */
   role: string;
   where: string;
@@ -394,9 +402,10 @@ const defaultApplies = (unit: UnitDecl, input: InputDecl) =>
 function defaultSources(index: ProjectIndex, d: InputDefault): TraceLeaf[] {
   const { input, where } = d;
   if (input.defaultSite) {
-    return siteSources(index, d.unit, input.defaultSite, where, (site, ref) =>
-      defaultReads(index, d, site, ref),
-    );
+    return siteSources(index, d.unit, input.defaultSite, where, {
+      reads: (site, ref) => defaultReads(index, d, site, ref),
+      functions: DEFAULT_FUNCTIONS[d.unit.kind],
+    });
   }
   return [
     { role: 'literal', where, loc: input.defaultLoc ?? input.loc, text: JSON.stringify(input.default) },
@@ -406,7 +415,7 @@ function defaultSources(index: ProjectIndex, d: InputDefault): TraceLeaf[] {
 /**
  * The contexts GitHub evaluates an input's default with (its schemas' `workflow-call-input-default` and
  * `input-default-context`): a `workflow_call` input's, the caller's `github`, and `inputs` and `vars`; an action
- * input's, the calling job's `github`, `strategy`, `matrix`, `job` and `runner` (and `hashFiles()`, a function).
+ * input's, the calling job's `github`, `strategy`, `matrix`, `job` and `runner`.
  */
 const DEFAULT_CONTEXTS: Record<UnitDecl['kind'], ReadonlySet<string>> = {
   workflow: new Set(['github', 'inputs', 'vars']),
@@ -414,13 +423,27 @@ const DEFAULT_CONTEXTS: Record<UnitDecl['kind'], ReadonlySet<string>> = {
 };
 
 /**
- * What a reference in an input's default reads: the inputs and variables a `workflow_call` default names, no symbol
- * for the other contexts it may read (`github` is the caller's, so `github.event.inputs.<name>` there is not this
- * workflow's input), and `invalid` for a context GitHub does not allow in that default.
+ * The functions of `CONTEXT_FUNCTIONS` those schemas allow in a default, lowercase: none in a `workflow_call` input's,
+ * `hashFiles` in an action input's. GitHub's parser rejects the others there ("Unrecognized function").
+ */
+const DEFAULT_FUNCTIONS: Record<UnitDecl['kind'], ReadonlySet<string>> = {
+  workflow: new Set(),
+  action: new Set(['hashfiles']),
+};
+
+/**
+ * What a reference in an input's default reads: the workflow's own `workflow_call` inputs and the variables a
+ * `workflow_call` default names, no symbol for the other contexts it may read, and `invalid` for a context GitHub
+ * does not allow in that default. The default applies when the workflow is called, and then `inputs` holds its
+ * `workflow_call` inputs only (an input only `workflow_dispatch` declares, or none does, is empty) and `github` is the
+ * caller's (`github.event.inputs.<name>` there is not this workflow's input).
  */
 function defaultReads(index: ProjectIndex, d: InputDefault, site: ExprSite, ref: LocatedRef): Reads {
   if (!DEFAULT_CONTEXTS[d.unit.kind].has(ref.context)) return 'invalid';
-  return ref.context === 'inputs' || ref.context === 'vars' ? index.readsOf(d.unit, site, ref) : [];
+  if (ref.context === 'vars') return index.readsOf(d.unit, site, ref);
+  if (ref.context !== 'inputs') return [];
+  const called = callInputs(d.unit);
+  return index.readsOf(d.unit, site, ref).filter((symbol) => lookup(called, inputName(symbol)));
 }
 
 /** The symbols an expression default reads (another input, `vars`): one parent each. */
@@ -482,21 +505,30 @@ type Reader = (site: ExprSite, ref: LocatedRef) => Reads;
 
 const symbolsOf = (reads: Reads): string[] => (reads === 'invalid' ? [] : reads);
 
+/** How an expression's references and calls are read where it is written. */
+interface Reading {
+  /** What each reference reads. */
+  reads: Reader;
+  /** The functions of `CONTEXT_FUNCTIONS` GitHub allows there, lowercase; any of them when absent. */
+  functions?: ReadonlySet<string>;
+}
+
 /**
- * What an expression site reads that is not a symbol, or the expression itself when it reads nothing. `reads` says
- * what each of its references reads (the graph's `readsOf` by default).
+ * What an expression site reads that is not a symbol, or the expression itself when it reads nothing. `reading` says
+ * what each of its references reads (the graph's `readsOf` by default) and which functions it may call.
  */
 function siteSources(
   index: ProjectIndex,
   unit: UnitDecl,
   site: ExprSite,
   where: string,
-  reads: Reader = (s, ref) => index.readsOf(unit, s, ref),
+  reading: Reading = { reads: (s, ref) => index.readsOf(unit, s, ref) },
 ): TraceLeaf[] {
   const found = new Map<string, TraceLeaf>();
-  collectSources(index, unit, { site, where, reads }, found);
+  collectSources(index, unit, { ...reading, site, where }, found);
   const readsNothing = site.segments.every((seg) => seg.refs.length === 0 && !seg.expr.error);
-  if (readsNothing) return [{ role: 'expression', where, loc: site.loc, text: short(site.text) }];
+  if (readsNothing && found.size === 0)
+    return [{ role: 'expression', where, loc: site.loc, text: short(site.text) }];
   return [...found.values()];
 }
 
@@ -507,11 +539,10 @@ function placeOf(unit: UnitDecl, job?: string, step?: number): string {
     .join(' › ');
 }
 
-/** The site whose sources are collected, the place its leaves name, and what each of its references reads. */
-interface SourceSite {
+/** The site whose sources are collected, the place its leaves name, and how it is read. */
+interface SourceSite extends Reading {
   site: ExprSite;
   where: string;
-  reads: Reader;
 }
 
 /** Adds the leaves for what `site` reads that is not a symbol, once per context (contexts ignore case). */
@@ -531,12 +562,30 @@ function collectSources(
         text: short(seg.expr.source),
       });
     }
+    addCalls(found, at, seg);
     for (const ref of seg.refs) {
       const own = ownEnv(index, unit, site, ref);
       if (own?.site) collectSources(index, unit, { ...at, site: own.site }, found);
       else if (own) add(found, `literal@${own.valueLoc.line}:${own.valueLoc.column}`, ownLiteral(own, where));
       else addRead(found, where, seg, ref, at.reads(site, ref));
     }
+  }
+}
+
+const CONTEXT_FUNCTION_NAMES = new Set(CONTEXT_FUNCTIONS.map((f) => f.name.toLowerCase()));
+
+/**
+ * A call to a function of `CONTEXT_FUNCTIONS` that GitHub does not allow where the site is (`hashFiles()` in a
+ * `workflow_call` default) ends the trace as `invalid`, at the expression, once per function.
+ */
+function addCalls(found: Map<string, TraceLeaf>, at: SourceSite, seg: ExprSegment): void {
+  const allowed = at.functions;
+  if (!allowed) return;
+  for (const name of calledFunctions(seg.expr)) {
+    const fn = name.toLowerCase();
+    if (!CONTEXT_FUNCTION_NAMES.has(fn) || allowed.has(fn)) continue;
+    const leaf = { role: 'invalid', where: at.where, loc: seg.loc, text: `${name}()` };
+    add(found, `invalid:${fn}()@${seg.loc.line}:${seg.loc.column}`, leaf);
   }
 }
 

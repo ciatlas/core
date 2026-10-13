@@ -1058,6 +1058,89 @@ describe('trace upstream: input defaults', () => {
       leaves: ['omitted (not passed)', 'invalid secrets.S', 'invalid env.E', 'invalid matrix.os'],
     });
   });
+
+  it("follows only a workflow's own workflow_call inputs from a workflow_call default", () => {
+    // The default applies when the workflow is called, and then `inputs` holds its workflow_call inputs only: one that
+    // only workflow_dispatch declares, or that no trigger declares, is empty there.
+    const { index } = load({
+      [CALLEE]: yaml`
+        on:
+          workflow_dispatch:
+            inputs:
+              env-name: { type: environment, default: staging }
+              both: { type: string, default: manual }
+          workflow_call:
+            inputs:
+              both: { type: string }
+              target: { type: string, default: "\${{ inputs.env-name }}" }
+              other: { type: string, default: "\${{ inputs.nope }}" }
+              mixed: { type: string, default: "\${{ inputs['Env-Name'] }}-\${{ inputs['BOTH'] }}" }
+        jobs:
+          j: { runs-on: x, environment: "\${{ inputs.env-name }}", steps: [{ run: echo }] }
+      `,
+      [CALLER]: caller,
+    });
+    const shown = (name: string) => {
+      const t = trace(index, sym.input(CALLEE, name), { direction: 'up' });
+      return { children: t.children.map((c) => c.symbol), leaves: leavesOf(t).slice(1) };
+    };
+    const at = (name: string) => `${CALLEE} › on.workflow_call.inputs.${name}.default`;
+    expect(shown('target')).toEqual({
+      children: [],
+      leaves: [`context ${at('target')} inputs.env-name @9:45`],
+    });
+    expect(shown('other')).toEqual({ children: [], leaves: [`context ${at('other')} inputs.nope @10:44`] });
+    expect(shown('mixed')).toEqual({
+      children: [sym.input(CALLEE, 'both')],
+      leaves: [`context ${at('mixed')} inputs['Env-Name'] @11:44`],
+    });
+  });
+
+  it('ends at a function GitHub does not allow in a default as invalid: hashFiles() in a workflow_call one', () => {
+    // A workflow_call input's default may call none of hashFiles() and the status functions; an action input's may
+    // call hashFiles() (see above), but no status function. A step's with: may call hashFiles().
+    const { index } = load({
+      [CALLEE]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              key: { type: string, default: "\${{ hashFiles('**/lock') }}" }
+              ok: { type: string, default: "\${{ success() && inputs.v }}-\${{ toJSON(vars.V) }}" }
+              v: { type: string }
+        jobs:
+          j:
+            runs-on: x
+            steps:
+              - uses: ./.github/actions/a
+              - { uses: ./.github/actions/a, with: { a: "\${{ hashFiles('y') }}" } }
+      `,
+      [CALLER]: caller,
+      [`${A}/action.yml`]: action(
+        'a: { description: x, default: "${{ hashFiles(\'**/lock\') }}-${{ CANCELLED() || job.status }}" }',
+      ),
+    });
+    const shown = (symbol: string) => {
+      const t = trace(index, symbol, { direction: 'up' });
+      return { children: t.children.map((c) => c.symbol), leaves: leavesOf(t).slice(1) };
+    };
+    const at = (name: string) => `${CALLEE} › on.workflow_call.inputs.${name}.default`;
+    expect(shown(sym.input(CALLEE, 'key'))).toEqual({
+      children: [],
+      leaves: [`invalid ${at('key')} hashFiles() @4:42`],
+    });
+    expect(shown(sym.input(CALLEE, 'ok'))).toEqual({
+      children: [sym.input(CALLEE, 'v'), sym.var('V')],
+      leaves: [`invalid ${at('ok')} success() @5:41`],
+    });
+    expect(shown(sym.input(A, 'a'))).toEqual({
+      children: [],
+      leaves: [
+        `invalid ${A} › inputs.a.default CANCELLED() @4:66`,
+        `context ${A} › inputs.a.default job.status @4:81`,
+        `expression ${CALLEE} › jobs.j › steps[1] \${{ hashFiles('y') }} @12:49`,
+      ],
+    });
+  });
 });
 
 describe('resolveSymbols: more queries', () => {
