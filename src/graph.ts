@@ -108,14 +108,17 @@ function dispatchInputNames(unit: UnitDecl): string[] {
 
 /**
  * The inputs of its own that `github.event.inputs` may hold at a site: a workflow's `workflow_dispatch` inputs, which
- * it holds when the workflow is dispatched. None in an action, whose `github` is its job's, nor in an input's default:
- * GitHub evaluates a `workflow_call` input's default only when the workflow is called, with the caller's `github`
- * context, and allows no context in a `workflow_dispatch` input's.
+ * it holds when the workflow is dispatched. None in an action, whose `github` is its job's, nor at a site GitHub
+ * evaluates only when the workflow is called, with the caller's `github` context: a `workflow_call` output's value, or
+ * an input's default (a `workflow_dispatch` input's default allows no context).
  */
 function eventInputsAt(unit: UnitDecl, site: ExprSite): Record<string, { name: string }> {
-  if (unit.kind !== 'workflow' || site.field === 'input.default') return {};
+  if (unit.kind !== 'workflow' || onlyWhenCalled(site)) return {};
   return unit.dispatch?.inputs ?? {};
 }
+
+/** Whether GitHub evaluates a workflow's site only when the workflow is called (see `eventInputsAt`). */
+const onlyWhenCalled = (site: ExprSite) => site.field === 'input.default' || site.field === 'workflow.output';
 
 /**
  * The dispatch inputs a `github` reference reads without naming them, each as a reference naming it
@@ -613,7 +616,8 @@ export class ProjectIndex {
    * `github.event.inputs.<name>`: this workflow's own input only when it is dispatched directly, so only an input it
    * declares under `workflow_dispatch`. GitHub accepts no other input in a dispatch, and a workflow that is called gets
    * its caller's event, so a name only `workflow_call` declares, or none does, reads no input: it is the context. So
-   * does any name in an input's default, which applies only when the workflow is called (see `eventInputsAt`).
+   * does any name in an input's default or a `workflow_call` output's value, which GitHub evaluates only when the
+   * workflow is called (see `eventInputsAt`).
    */
   private resolveEventInput(unit: UnitDecl, site: ExprSite, [a, b, c]: string[]): string | undefined {
     if (!isKey(a, 'event') || !isKey(b, 'inputs') || computed(c)) return undefined;
@@ -680,8 +684,8 @@ export class ProjectIndex {
    *   dispatched: `toJSON(github)`, `github[x]`, `github.*`, `toJSON(github.event)`, `github.event[x]`,
    *   `github.event.*`, `toJSON(github.event.inputs)` or `github.event.inputs[x]` read every one of them, and
    *   `github[x].inputs.<name>` the one it names (see `eventMemberRefs`). A workflow that is called gets its caller's
-   *   `github`, and an action its job's, so there they read none of the unit's inputs, nor in an input's default, which
-   *   applies only when the workflow is called;
+   *   `github`, and an action its job's, so there they read none of the unit's inputs, nor in an input's default or a
+   *   `workflow_call` output's value, which GitHub evaluates only when the workflow is called;
    * - `toJSON(matrix)` or `matrix[inputs.key]`: every key of the job's matrix;
    * - `toJSON(secrets)` or `secrets[inputs.name]`: every secret the workflow declares under `workflow_call`;
    * - `toJSON(env)` or `env[inputs.name]`: every env variable in scope, a step's own read through their values.

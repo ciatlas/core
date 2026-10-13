@@ -74,8 +74,8 @@ export interface TraceNode {
    * - `jobs.<id>`: `secrets: inherit`, naming the calling job that passes the secret on, in both directions;
    * - `the default of inputs.<name>`: upstream, the expression of an input's default, which reads the parent (another
    *   input or a `vars` value) where a caller or step omits the input;
-   * - `when dispatched`: upstream, for a workflow input read through `github.event` (`github.event.inputs.<name>`,
-   *   `toJSON(github)`), which holds the input only when the workflow is dispatched (see `readsCallerEvent`).
+   * - `when dispatched`: upstream, for a workflow input read through `github` (`github.event.inputs.<name>`,
+   *   `toJSON(github)`), whose event holds the input only when the workflow is dispatched (see `readsCallerEvent`).
    */
   via?: { loc: Loc; text: string; note?: string };
   children: TraceNode[];

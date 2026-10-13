@@ -14,7 +14,8 @@ export function* refsOf(unit: UnitDecl): Generator<{ site: ExprSite; ref: Locate
  * A whole or computed `github`, `github.event` or `github.event.inputs` (`toJSON(github)`, `github.event[x]`) does not
  * read `inputs`. In a workflow that can be dispatched, the graph reads it as a read of each `workflow_dispatch` input
  * (see `ProjectIndex.readsOf`), which is all that `github.event.inputs` can hold. Anywhere else it holds none of the
- * unit's inputs: a workflow that is called gets its caller's `github` context, and an action its job's.
+ * unit's inputs: a workflow that is called gets its caller's `github` context, and an action its job's. Nor does it in
+ * an input's default or a `workflow_call` output's value, which GitHub evaluates only when the workflow is called.
  */
 export function readsContextDynamically(unit: UnitDecl, context: string): boolean {
   if (mayReadAnything(unit)) return true;

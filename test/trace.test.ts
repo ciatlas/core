@@ -2183,6 +2183,38 @@ describe('trace: input defaults and github.event.inputs', () => {
     ]);
     expect(allLeaves(event)).toEqual([`context ${C} › jobs.b: github.event.inputs.z`]);
   });
+
+  it('ends a workflow_call output that reads github at the context: it is evaluated only when the workflow is called', () => {
+    const { index } = load({
+      [TOP]: yaml`
+        on: pull_request
+        jobs:
+          t:
+            uses: ./.github/workflows/c.yml
+            with:
+              z: passed
+      `,
+      [C]: yaml`
+        on:
+          workflow_call:
+            inputs:
+              z: { type: string }
+            outputs:
+              o: { value: '\${{ github.event.inputs.z }}' }
+          workflow_dispatch:
+            inputs:
+              z: { type: string }
+        jobs:
+          b:
+            runs-on: x
+            steps:
+              - run: echo
+      `,
+    });
+    const up = trace(index, sym.jobOutput(TOP, 't', 'o'), { direction: 'up' });
+    expect(JSON.stringify(up)).not.toContain('when dispatched');
+    expect(allLeaves(up)).toEqual([`context ${C}: github.event.inputs.z`]);
+  });
 });
 
 describe('trace: whole inputs, matrix, secrets and env', () => {

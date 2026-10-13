@@ -1519,3 +1519,52 @@ describe('ProjectIndex.readsOf: github in an input default', () => {
     expect(uses('d')).toEqual([]);
   });
 });
+
+// A `workflow_call` output's value is evaluated only when the workflow is called, with the caller's `github` context, so
+// `github` there holds none of the workflow's own inputs either.
+describe('ProjectIndex.readsOf: github in a workflow_call output', () => {
+  const W = `${WF}/w.yml`;
+  const { index } = load({
+    [W]: yaml`
+      on:
+        workflow_call:
+          outputs:
+            o: { value: '\${{ github.event.inputs.target }}' }
+            p: { value: '\${{ toJSON(github) }}' }
+            q: { value: '\${{ github.event.INPUTS[matrix.k] }}' }
+            r: { value: '\${{ jobs.j.outputs.t }}' }
+        workflow_dispatch:
+          inputs:
+            target: { type: string, required: false }
+      jobs:
+        j:
+          runs-on: x
+          outputs:
+            t: \${{ github.event.inputs.target }}
+          steps:
+            - run: echo hi
+    `,
+  });
+  const unit = index.unit(W)!;
+  const outputs = [...refsOf(unit)].filter(
+    ({ site, ref }) => site.field === 'workflow.output' && ref.context === 'github',
+  );
+
+  it('reads no dispatch input through github in a workflow_call output’s value', () => {
+    expect(outputs.map(({ ref }) => [ref.context, ...ref.path].join('.'))).toEqual([
+      'github.event.inputs.target',
+      'github',
+      'github.event.INPUTS.?',
+    ]);
+    expect(outputs.map(({ site, ref }) => index.readsOf(unit, site, ref))).toEqual([[], [], []]);
+    expect(outputs.map(({ site, ref }) => index.resolveRef(unit, site, ref))).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it('still reads it in the job whose output the workflow output reads', () => {
+    expect(index.usagesOf(sym.input(W, 'target')).map((u) => u.site.field)).toEqual(['job.output']);
+  });
+});
