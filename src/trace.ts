@@ -19,9 +19,10 @@ import {
   type MatrixDecl,
   type SiteField,
   type UnitDecl,
+  type WorkflowDecl,
 } from './ir';
 import { type Cell, comboLabel, expandMatrix } from './matrix';
-import { secretsNeededBy } from './queries';
+import { BUILTIN_SECRETS, needsSecret, refsOf, secretsNeededBy } from './queries';
 import type { Loc } from './source';
 
 export interface TraceLeaf {
@@ -231,7 +232,7 @@ function addReads(
   node: TraceNode,
 ): void {
   const seenSinks = new Set<string>();
-  for (const u of index.usagesOf(symbol)) {
+  for (const u of [...index.usagesOf(symbol), ...inheritedWholeReads(index, symbol)]) {
     if (called && usageReadsCallerEvent(index, u)) continue;
     if (!u.sink) {
       node.leaves.push(leafOf(u));
@@ -288,13 +289,54 @@ function inheritChildren(index: ProjectIndex, symbol: string, child: (to: string
   });
 }
 
-/** The callee's secret a job's `secrets: inherit` hands the secret `name` to, when the callee needs it. */
+/**
+ * The callee's secret a job's `secrets: inherit` hands the secret `name` to, when the callee needs it: it, or a callee
+ * it hands every secret to, reads it by name or reads, or may read, every secret (see `NeededSecrets.all`).
+ */
 function inheritedSecret(index: ProjectIndex, job: JobDecl, name: string): string | undefined {
   const callee = job.secretsInherit ? index.calleeOf(job) : undefined;
-  if (!callee) return undefined;
-  const needed = [...secretsNeededBy(index, callee)].some((s) => s.toLowerCase() === name.toLowerCase());
-  if (!needed) return undefined;
+  if (!callee || !needsSecret(secretsNeededBy(index, callee), name)) return undefined;
   return sym.secret(callee.path, (callee.call && lookup(callee.call.secrets, name)?.name) ?? name);
+}
+
+/**
+ * A workflow's reads of every secret, as reads of `symbol`: a secret the workflow does not declare, which a caller's
+ * `secrets: inherit` hands it with every other secret the caller has (see `inheritsUndeclared`). The graph reads them
+ * as reads of the declared secrets only (see `ProjectIndex.readsOf`).
+ */
+function inheritedWholeReads(index: ProjectIndex, symbol: string): Usage[] {
+  const secret = secretSymbol(symbol);
+  const wf = secret && index.project.workflows.get(secret.unit);
+  if (!secret || !wf || !inheritsUndeclared(index, wf, secret.name)) return [];
+  return [...refsOf(wf)]
+    .filter(({ site, ref }) => readsEverySecret(index, wf, site, ref))
+    .map(({ site, ref }) => {
+      const sink = index.sinkOf(wf, site);
+      return { symbol, site, ref, ...(sink ? { sink } : {}), whole: true };
+    });
+}
+
+/**
+ * Whether the secret `name` reaches a workflow that does not declare it: a caller hands it every secret through
+ * `secrets: inherit`. Not the automatic `GITHUB_TOKEN`, which every workflow gets without it.
+ */
+function inheritsUndeclared(index: ProjectIndex, wf: WorkflowDecl, name: string): boolean {
+  if (BUILTIN_SECRETS.has(name.toLowerCase()) || (wf.call && lookup(wf.call.secrets, name))) return false;
+  return index.callersOf(wf.path).some((c) => c.job.secretsInherit);
+}
+
+/** Whether a reference reads the whole `secrets` context or a computed key of it: `toJSON(secrets)`, `secrets.*`. */
+const isWholeSecrets = (ref: LocatedRef) => ref.context === 'secrets' && !namesMember(ref);
+
+/**
+ * Whether a reference reads every secret: the whole `secrets` context or a computed key of it (`toJSON(secrets)`,
+ * `secrets.*`, `secrets[inputs.name]`), or a value of the step's own env that does, which the graph reads through.
+ */
+function readsEverySecret(index: ProjectIndex, unit: UnitDecl, site: ExprSite, ref: LocatedRef): boolean {
+  if (isWholeSecrets(ref)) return true;
+  return ownEnv(index, unit, site, ref).some((own) =>
+    own.site?.segments.some((seg) => seg.refs.some(isWholeSecrets)),
+  );
 }
 
 /**
@@ -353,6 +395,7 @@ function up(
 
   node.children = [
     ...flowParents(index, symbol, parent),
+    ...inheritedWholeParents(index, symbol, parent),
     ...inheritParents(index, symbol, parent),
     ...(fallback ? defaultParents(index, fallback, parent) : []),
   ];
@@ -454,6 +497,85 @@ function inheritParents(index: ProjectIndex, symbol: string, parent: Parent): Tr
     parents.push(p);
   }
   return parents;
+}
+
+/**
+ * The secrets a definition's read of every secret takes from the callers that hand its workflow every secret through
+ * `secrets: inherit` (see `inheritedNames`): one parent per secret and expression, each the workflow's secret, which
+ * `inheritParents` follows on up. The graph links the secrets the workflow declares (see `ProjectIndex.readsOf`), and
+ * those the expression also reads by name, which `flowParents` lists already; downstream, `inheritedWholeReads` goes
+ * the other way. The read's `secrets` context leaf stands for the secrets it gets that no parent lists.
+ */
+function inheritedWholeParents(index: ProjectIndex, symbol: string, parent: Parent): TraceNode[] {
+  return index.definitionsOf(symbol).flatMap((def) => {
+    if (!('site' in def) || def.unit.kind !== 'workflow') return [];
+    const { unit, site } = def;
+    const ref = site.segments.flatMap((seg) => seg.refs).find((r) => readsEverySecret(index, unit, site, r));
+    if (!ref) return [];
+    const linked = linkedSecrets(index, symbol, site);
+    return inheritedNames(index, unit)
+      .filter((name) => !linked.has(name.toLowerCase()))
+      .map((name) => {
+        const p = parent(sym.secret(unit.path, name));
+        p.via = { loc: ref.loc, text: short(site.text) };
+        return p;
+      });
+  });
+}
+
+/**
+ * The secrets the graph links to `symbol` from a site, in lower case: secret names ignore case, so a caller's `DEPLOY`
+ * is the `deploy` the site reads by name.
+ */
+function linkedSecrets(index: ProjectIndex, symbol: string, site: ExprSite): Set<string> {
+  return new Set(
+    index.incoming(symbol, 'flows').flatMap((e) => {
+      const secret = e.siteId === site.id ? secretSymbol(e.from) : undefined;
+      return secret ? [secret.name.toLowerCase()] : [];
+    }),
+  );
+}
+
+/**
+ * The secrets a workflow gets through `secrets: inherit` that the callers handing them on name themselves, once each
+ * ignoring case: those each workflow that hands it every secret, directly or through others that do, declares or reads
+ * by name, without the automatic `GITHUB_TOKEN` or the secrets the workflow declares.
+ *
+ * Next to these and the secrets the graph links, the read's `secrets` context leaf (see `holdsUndeclared`) stands for
+ * every other secret the workflow gets: the automatic `GITHUB_TOKEN`, and each secret those callers have without
+ * declaring or reading it by name themselves. That is a secret only another of their callees reads by name (when
+ * top.yml hands every secret to named.yml, which reads `Z`, and to this workflow, `Z` is not listed here, though the
+ * trace down from top.yml's `Z` reaches this read), or one no file names, such as a repository secret of a workflow
+ * run by an event.
+ */
+function inheritedNames(index: ProjectIndex, wf: WorkflowDecl): string[] {
+  const names = new Map<string, string>();
+  for (const caller of inheritingCallers(index, wf)) {
+    for (const name of namedSecrets(caller))
+      if (!names.has(name.toLowerCase())) names.set(name.toLowerCase(), name);
+  }
+  return [...names.values()].filter((n) => inheritsUndeclared(index, wf, n));
+}
+
+/** The workflows that hand `wf` every secret through `secrets: inherit`, and those that hand them every secret, … */
+function inheritingCallers(index: ProjectIndex, wf: WorkflowDecl): WorkflowDecl[] {
+  const found = new Map<string, WorkflowDecl>([[wf.path, wf]]);
+  // A Map's iteration visits the entries added while it runs: each caller found is searched in turn.
+  for (const unit of found.values()) {
+    for (const c of index.callersOf(unit.path))
+      if (c.job.secretsInherit && !found.has(c.caller.path)) found.set(c.caller.path, c.caller);
+  }
+  found.delete(wf.path);
+  return [...found.values()];
+}
+
+/** The secrets a workflow declares under `workflow_call` or reads by name, as written. */
+function namedSecrets(wf: WorkflowDecl): string[] {
+  const declared = Object.values(wf.call?.secrets ?? {}).map((s) => s.name);
+  const read = [...refsOf(wf)].flatMap(({ ref }) =>
+    ref.context === 'secrets' && namesMember(ref) ? [ref.path[0]!] : [],
+  );
+  return [...declared, ...read];
 }
 
 /** A matrix key's sources are the combinations themselves: each value, and where it is missing. */
