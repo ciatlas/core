@@ -1454,6 +1454,35 @@ describe('trace: github.event.inputs in a workflow that can be called', () => {
     expect(trace(dispatched, x).children).toHaveLength(2);
   });
 
+  it('lists no dispatch input for a name that only workflow_call declares, or that none does', () => {
+    const triggers = `workflow_call:
+        inputs:
+          x: { type: string }
+      workflow_dispatch:
+        inputs:
+          d: { type: string }`;
+    // x is not a dispatch input: github.event.inputs.x is empty when mid.yml is dispatched and the caller's event when
+    // it is called, so job a ends at the context alone. Job b's inputs.x still holds the callers' values.
+    const { index: callName } = load(files(mid(triggers)));
+    const t = trace(callName, title, { direction: 'up' });
+    expect(t.children.map((c) => `${c.symbol} ${c.via?.text} ${c.via?.note}`)).toEqual([
+      `${x} \${{ inputs.x || github.event.inputs.x }} undefined`,
+    ]);
+    expect(leavesOf(t)).toEqual([
+      `context ${MID} › jobs.a: github.event.inputs.x`,
+      `context ${MID} › jobs.b: github.event.inputs.x`,
+    ]);
+    // A name no trigger declares: the context alone too.
+    const ghostly = mid(triggers).replace(
+      'title: ${{ github.event.inputs.x }}',
+      'title: ${{ github.event.inputs.ghost }}',
+    );
+    const { index: ghost } = load(files(ghostly), { validateSchema: false });
+    const g = trace(ghost, title, { direction: 'up' });
+    expect(g.children.map((c) => c.via?.text)).toEqual(['${{ inputs.x || github.event.inputs.x }}']);
+    expect(leavesOf(g)[0]).toBe(`context ${MID} › jobs.a: github.event.inputs.ghost`);
+  });
+
   it('ends at the caller’s event in a workflow that is only called, as it did', () => {
     const { index: called } = load(
       files(
