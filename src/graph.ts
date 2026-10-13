@@ -174,6 +174,12 @@ export const sym = {
   remote: (raw: string) => `remote:${raw}`,
 };
 
+/** An expression that sets a symbol's value, and the workflow or action it is in. */
+export interface Definition {
+  unit: UnitDecl;
+  site: ExprSite;
+}
+
 export interface CallSite {
   caller: WorkflowDecl;
   job: JobDecl;
@@ -198,6 +204,7 @@ export class ProjectIndex {
   readonly callSites: CallSite[] = [];
   readonly actionUses: ActionUse[] = [];
   private readonly sitesById = new Map<number, ExprSite>();
+  private readonly definitions = new Map<string, Definition[]>();
 
   constructor(readonly project: Project) {
     for (const wf of project.workflows.values()) this.indexWorkflow(wf);
@@ -248,6 +255,15 @@ export class ProjectIndex {
 
   usagesOf(symbol: string): Usage[] {
     return this.usages.get(symbol) ?? [];
+  }
+
+  /**
+   * The expressions that set a symbol's value (see `sinkOf`): each caller's `with:` for a reusable workflow's input,
+   * each `with:` of a step using an action for the action's input, a job's `outputs:` entry for its output, and so on.
+   * Literal values and omissions are not expressions; `trace` reads those from the calls.
+   */
+  definitionsOf(symbol: string): Definition[] {
+    return this.definitions.get(symbol) ?? [];
   }
 
   outgoing(symbol: string, kind?: EdgeKind): GraphEdge[] {
@@ -626,6 +642,11 @@ export class ProjectIndex {
   private indexSite(unit: UnitDecl, site: ExprSite) {
     this.sitesById.set(site.id, site);
     const sink = this.sinkOf(unit, site);
+    if (sink) {
+      const list = this.definitions.get(sink);
+      if (list) list.push({ unit, site });
+      else this.definitions.set(sink, [{ unit, site }]);
+    }
     for (const seg of site.segments) {
       for (const ref of seg.refs) {
         for (const symbol of this.readsOf(unit, site, ref)) this.addUsage(unit, site, ref, symbol, sink);
