@@ -67,6 +67,39 @@ describe('parseWorkflowFile — triggers and interface', () => {
     expect(lineCol(wf.call!.inputs.a!.loc)).toBe('4:7-4:8');
   });
 
+  it("locates an input's default, and keeps its expression", () => {
+    const wf = parse(yaml`
+      on:
+        workflow_call:
+          inputs:
+            plain: { type: string, default: main }
+            expr: { type: string, default: "\${{ github.ref_name }}" }
+            none: { type: string }
+        workflow_dispatch:
+          inputs:
+            expr: { type: string, default: "\${{ github.sha }}" }
+      jobs: {}
+    `);
+    const { plain, expr, none } = wf.call!.inputs;
+    expect(lineCol(plain!.defaultLoc!)).toBe('4:39-4:43');
+    expect(plain!.defaultSite).toBeUndefined();
+    expect(lineCol(expr!.defaultLoc!)).toBe('5:38-5:62');
+    expect(expr!.defaultSite).toMatchObject({
+      field: 'input.default',
+      key: 'expr',
+      text: '${{ github.ref_name }}',
+    });
+    expect(none!.defaultLoc).toBeUndefined();
+    expect(wf.dispatch!.inputs.expr!.defaultSite?.text).toBe('${{ github.sha }}');
+    const action = parseActionFile(
+      '.github/actions/a',
+      '.github/actions/a/action.yml',
+      'inputs:\n  token: { default: "${{ github.token }}" }\nruns: { using: composite, steps: [] }\n',
+      createParseContext(),
+    );
+    expect(action.inputs.token!.defaultSite?.yamlPath).toEqual(['inputs', 'token', 'default']);
+  });
+
   it('reads workflow_dispatch inputs including choice options', () => {
     const wf = parse(yaml`
       on:

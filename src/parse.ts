@@ -280,12 +280,11 @@ function bindings(unit: Unit, node: unknown, base: YPath): Record<string, Bindin
   return out;
 }
 
-function inputDecls(unit: Unit, node: unknown): Record<string, InputDecl> {
+function inputDecls(unit: Unit, node: unknown, base: YPath): Record<string, InputDecl> {
   const out: Record<string, InputDecl> = {};
   for (const pair of pairs(node)) {
     const name = String(pair.key.value);
     const def = pair.value;
-    const defaultPair = getPair(def, 'default');
     const type = str(get(def, 'type'));
     const description = str(get(def, 'description'));
     const opts = get(def, 'options');
@@ -293,14 +292,29 @@ function inputDecls(unit: Unit, node: unknown): Record<string, InputDecl> {
       name,
       ...(type ? { type } : {}),
       required: toJs(get(def, 'required')) === true,
-      hasDefault: defaultPair !== undefined && toJs(defaultPair.value) !== null,
-      ...(defaultPair ? { default: toJs(defaultPair.value) } : {}),
+      ...defaultOf(unit, getPair(def, 'default'), [...base, name, 'default']),
       ...(description ? { description } : {}),
       ...(isSeq(opts) ? { options: (toJs(opts) as Json[]).map(String) } : {}),
       loc: nodeLoc(unit.source, pair.key),
     };
   }
   return out;
+}
+
+/** An input's `default:` (at `path`): its value, where it is written, and its expression when it is one. */
+function defaultOf(
+  unit: Unit,
+  pair: Pair<Scalar, Node> | undefined,
+  path: YPath,
+): Pick<InputDecl, 'hasDefault' | 'default' | 'defaultLoc' | 'defaultSite'> {
+  if (!pair) return { hasDefault: false };
+  const site = unit.siteByPath.get(pathKey(path));
+  return {
+    hasDefault: toJs(pair.value) !== null,
+    default: toJs(pair.value),
+    defaultLoc: nodeLoc(unit.source, pair.value ?? pair.key),
+    ...(site ? { defaultSite: site } : {}),
+  };
 }
 
 function secretDecls(unit: Unit, node: unknown): Record<string, SecretDecl> {
@@ -830,7 +844,7 @@ export function parseWorkflowFile(path: string, text: string, ctx: ParseContext)
   const call = triggers.includes('workflow_call')
     ? {
         loc: nodeLoc(unit.source, callPair?.key ?? (on as Node)),
-        inputs: inputDecls(unit, get(callPair?.value, 'inputs')),
+        inputs: inputDecls(unit, get(callPair?.value, 'inputs'), ['on', 'workflow_call', 'inputs']),
         secrets: secretDecls(unit, get(callPair?.value, 'secrets')),
         outputs: outputDecls(unit, get(callPair?.value, 'outputs'), ['on', 'workflow_call', 'outputs'], true),
       }
@@ -838,7 +852,7 @@ export function parseWorkflowFile(path: string, text: string, ctx: ParseContext)
   const dispatch = triggers.includes('workflow_dispatch')
     ? {
         loc: nodeLoc(unit.source, dispatchPair?.key ?? (on as Node)),
-        inputs: inputDecls(unit, get(dispatchPair?.value, 'inputs')),
+        inputs: inputDecls(unit, get(dispatchPair?.value, 'inputs'), ['on', 'workflow_dispatch', 'inputs']),
       }
     : undefined;
   const name = str(get(root, 'name'));
@@ -881,7 +895,7 @@ export function parseActionFile(dir: string, file: string, text: string, ctx: Pa
     schemaErrors: [],
     ...(generated ? { generated } : {}),
     ...(using ? { using } : {}),
-    inputs: inputDecls(unit, get(root, 'inputs')),
+    inputs: inputDecls(unit, get(root, 'inputs'), ['inputs']),
     outputs: outputDecls(unit, get(root, 'outputs'), ['outputs'], true),
     steps: steps(unit, get(runs, 'steps'), ['runs', 'steps'], 'action', ctx),
   };

@@ -1,5 +1,13 @@
 import { type ActionUse, type Definition, type GraphNode, type ProjectIndex, sym, type Usage } from './graph';
-import { type Binding, type ExprSite, type LocatedRef, lookup, type SiteField, type UnitDecl } from './ir';
+import {
+  type Binding,
+  type ExprSite,
+  type InputDecl,
+  type LocatedRef,
+  lookup,
+  type SiteField,
+  type UnitDecl,
+} from './ir';
 import { type Cell, comboLabel, expandMatrix } from './matrix';
 import { secretsNeededBy } from './queries';
 import type { Loc } from './source';
@@ -7,11 +15,17 @@ import type { Loc } from './source';
 export interface TraceLeaf {
   /**
    * Downstream, what the value is used for, e.g. `run script`, `condition`, `runs-on`. Upstream, where it comes from
-   * when that is not another symbol: `literal` (a plain value: passed by a caller or a step, or an env variable's or
-   * output's own value), `omitted` (a caller or step does not pass the input), `value`, `missing` and `dynamic` (a
-   * matrix key's combinations), `context` (read from a context the graph does not follow, such as
-   * `github.event.pull_request.title` or `runner.os`; `text` is the reference), `invalid` (an expression that does not
-   * parse) and `expression` (an expression that reads no context, e.g. a `format()` of literals).
+   * when that is not another symbol: `literal` (a plain value: passed by a caller or a step, an env variable's or
+   * output's own value, or an input's default), `omitted` (a caller or step does not pass the input), `value`,
+   * `missing` and `dynamic` (a matrix key's combinations), `context` (read from a context the graph does not follow,
+   * such as `github.event.pull_request.title` or `runner.os`; `text` is the reference), `invalid` (an expression that
+   * does not parse) and `expression` (an expression that reads no context, e.g. a `format()` of literals).
+   *
+   * When a caller or step omits an input, its `default:` is the value there, so the input's trace also ends at the
+   * default, after the calls: a `literal`, or the `context`, `invalid` or `expression` leaves of an expression, with
+   * `where` naming it (`<unit> › on.workflow_call.inputs.<name>.default`, `<unit> › inputs.<name>.default` in an
+   * action). The symbols an expression default reads (another input, `vars`) are the node's children. A default no
+   * call falls back to is not shown.
    */
   role: string;
   where: string;
@@ -199,23 +213,30 @@ function up(
   const { node, next } = enter(index, symbol, depth, path, expanded);
   if (!next) return node;
   const parent = (from: string) => up(index, from, depth - 1, next, expanded);
+  const fallback = omittedDefault(index, symbol);
 
-  node.children = [...flowParents(index, symbol, parent), ...inheritParents(index, symbol, parent)];
-  node.leaves = endSources(index, symbol);
+  node.children = [
+    ...flowParents(index, symbol, parent),
+    ...inheritParents(index, symbol, parent),
+    ...(fallback ? defaultParents(index, fallback, parent) : []),
+  ];
+  node.leaves = endSources(index, symbol, fallback);
   return node;
 }
 
 /**
- * Where the trace ends: a matrix key's combinations, callers' literal values and omissions, and what each definition
- * reads that is not a symbol. Arrays are joined, not spread into `push`, which has an argument limit.
+ * Where the trace ends: a matrix key's combinations, callers' literal values and omissions, then the input's default
+ * when a call omits it, and what each definition reads that is not a symbol. Arrays are joined, not spread into
+ * `push`, which has an argument limit.
  */
-function endSources(index: ProjectIndex, symbol: string): TraceLeaf[] {
+function endSources(index: ProjectIndex, symbol: string, fallback: InputDefault | undefined): TraceLeaf[] {
   const n = index.nodes.get(symbol);
   const matrix = n?.unit && n.kind === 'matrix' ? matrixSources(index, symbol, n.unit) : [];
   const callers = n?.unit && n.kind === 'input' ? callerValues(index, symbol, n.unit) : [];
   return [
     ...matrix,
     ...callers,
+    ...(fallback ? defaultSources(index, fallback) : []),
     ...index.definitionsOf(symbol).flatMap((def) => definitionSources(index, def)),
   ];
 }
@@ -290,22 +311,104 @@ function comboLeaf(cell: Cell | undefined, where: string, loc: Loc): TraceLeaf {
   return { role: 'value', where, loc, text: cell.known ? JSON.stringify(cell.value) : '<expression>' };
 }
 
-/** Literal values and omissions by the callers of a workflow and the steps that use an action. */
-function callerValues(index: ProjectIndex, symbol: string, unit: string): TraceLeaf[] {
-  const name = symbol.slice(symbol.indexOf('#inputs.') + '#inputs.'.length);
-  const calls = index
-    .callersOf(unit)
-    .map((c) =>
-      valueLeaf(
-        lookup(c.job.with, name),
-        `${c.caller.path} › jobs.${c.job.id}`,
-        c.job.uses?.loc ?? c.job.loc,
-      ),
-    );
+/** A job calling a reusable workflow, or a step using an action: what it passes, and where. */
+interface Call {
+  with: Record<string, Binding>;
+  where: string;
+  loc: Loc;
+}
+
+/** The jobs that call the workflow `unit`, then the steps that use the action `unit`. */
+function callsOf(index: ProjectIndex, unit: string): Call[] {
+  const calls = index.callersOf(unit).map((c) => ({
+    with: c.job.with,
+    where: `${c.caller.path} › jobs.${c.job.id}`,
+    loc: c.job.uses?.loc ?? c.job.loc,
+  }));
   const uses = index
     .usersOf(unit)
-    .map((u) => valueLeaf(lookup(u.step.with, name), stepWhere(u), u.step.uses?.loc ?? u.step.loc));
-  return [...calls, ...uses].filter((l): l is TraceLeaf => l !== undefined);
+    .map((u) => ({ with: u.step.with, where: stepWhere(u), loc: u.step.uses?.loc ?? u.step.loc }));
+  return [...calls, ...uses];
+}
+
+/** `<unit>#inputs.<name>` (see `sym.input`) → `<name>`. */
+const inputName = (symbol: string) => symbol.slice(symbol.indexOf('#inputs.') + '#inputs.'.length);
+
+/** Literal values and omissions by the callers of a workflow and the steps that use an action. */
+function callerValues(index: ProjectIndex, symbol: string, unit: string): TraceLeaf[] {
+  const name = inputName(symbol);
+  return callsOf(index, unit)
+    .map((c) => valueLeaf(lookup(c.with, name), c.where, c.loc))
+    .filter((l): l is TraceLeaf => l !== undefined);
+}
+
+/** An input's `default:`, and the place its leaves name (`<unit> › on.workflow_call.inputs.<name>.default`). */
+interface InputDefault {
+  unit: UnitDecl;
+  input: InputDecl;
+  where: string;
+}
+
+/**
+ * The input's default when a caller or step omits the input, which makes the default its value there. A default no
+ * call falls back to is not a source.
+ */
+function omittedDefault(index: ProjectIndex, symbol: string): InputDefault | undefined {
+  const declared = calledInput(index, symbol);
+  if (!declared?.input.hasDefault) return undefined;
+  const { unit, input } = declared;
+  if (callsOf(index, unit.path).every((c) => lookup(c.with, input.name))) return undefined;
+  const at = unit.kind === 'action' ? 'inputs' : 'on.workflow_call.inputs';
+  return { unit, input, where: `${unit.path} › ${at}.${input.name}.default` };
+}
+
+/** The input `symbol`, among the inputs a call passes (see `callInputs`). */
+function calledInput(index: ProjectIndex, symbol: string): { unit: UnitDecl; input: InputDecl } | undefined {
+  const n = index.nodes.get(symbol);
+  const unit = n?.kind === 'input' && n.unit ? index.unit(n.unit) : undefined;
+  if (!unit) return undefined;
+  const input = lookup(callInputs(unit), inputName(symbol));
+  return input && { unit, input };
+}
+
+/**
+ * The inputs a call passes: an action's, or a workflow's `workflow_call` ones. Calls never pass a `workflow_dispatch`
+ * input, so its default never applies to them.
+ */
+const callInputs = (unit: UnitDecl) => (unit.kind === 'action' ? unit.inputs : (unit.call?.inputs ?? {}));
+
+/**
+ * The default as a source: a plain value (`literal`), or what its expression reads that is not a symbol, as for a
+ * definition. GitHub lets a `workflow_call` input's default read `github`, `inputs` and `vars`, and an action input's
+ * `github`, `strategy`, `matrix`, `job`, `runner` and `hashFiles()`; for an action, those are the calling job's.
+ */
+function defaultSources(index: ProjectIndex, d: InputDefault): TraceLeaf[] {
+  const { input, where } = d;
+  if (input.defaultSite) return siteSources(index, d.unit, input.defaultSite, where);
+  return [
+    { role: 'literal', where, loc: input.defaultLoc ?? input.loc, text: JSON.stringify(input.default) },
+  ];
+}
+
+/** The symbols an expression default reads (another input, `vars`): one parent each. */
+function defaultParents(
+  index: ProjectIndex,
+  d: InputDefault,
+  parent: (from: string) => TraceNode,
+): TraceNode[] {
+  const site = d.input.defaultSite;
+  if (!site) return [];
+  const reads = site.segments.flatMap((seg) =>
+    seg.refs.flatMap((ref) => index.readsOf(d.unit, site, ref).map((symbol) => ({ symbol, ref }))),
+  );
+  const seen = new Set<string>();
+  return reads.flatMap(({ symbol, ref }) => {
+    if (seen.has(symbol)) return [];
+    seen.add(symbol);
+    const p = parent(symbol);
+    p.via = { loc: ref.loc, text: short(site.text), note: `the default of inputs.${d.input.name}` };
+    return [p];
+  });
 }
 
 /** `<file> › jobs.<job> › steps[<n>]`, without the job in an action. */
@@ -333,7 +436,11 @@ function definitionSources(index: ProjectIndex, def: Definition): TraceLeaf[] {
     return [{ role: 'literal', where, loc: def.loc, text: JSON.stringify(def.value) }];
   }
   const { unit, site } = def;
-  const where = placeOf(unit, site.job, site.step);
+  return siteSources(index, unit, site, placeOf(unit, site.job, site.step));
+}
+
+/** What an expression site reads that is not a symbol, or the expression itself when it reads nothing. */
+function siteSources(index: ProjectIndex, unit: UnitDecl, site: ExprSite, where: string): TraceLeaf[] {
   const found = new Map<string, TraceLeaf>();
   collectSources(index, unit, site, where, found);
   const readsNothing = site.segments.every((seg) => seg.refs.length === 0 && !seg.expr.error);
