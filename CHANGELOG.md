@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0](https://github.com/ciatlas/core/compare/v2.1.0...v2.2.0) (2026-10-14)
+
+
+### Features
+
+* **graph:** external units for the interfaces of remote workflows and actions ([#44](https://github.com/ciatlas/core/issues/44)) ([d6e2908](https://github.com/ciatlas/core/commit/d6e2908e47f7ad7d3d35f9316b047392ee1609c2))
+
 ## [2.1.0](https://github.com/ciatlas/core/compare/v2.0.0...v2.1.0) (2026-10-14)
 
 
