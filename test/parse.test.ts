@@ -1071,6 +1071,42 @@ describe('expression ends', () => {
   it.each([
     ['LF', '\n'],
     ['CRLF', '\r\n'],
+  ])(
+    'reads a `${{`, `}}` or quote written as escapes or across a `\\` line break as the value does (%s)',
+    (_, eol) => {
+      // The value reads `\x7d` as a `}`, and a `\` line break with the next line's indentation as nothing. A scan for the
+      // `}}` as written ran to the closing quote or to a later expression's `}}`, and a search for the `${{` as written
+      // started the expression near the start of the scalar. A `\x27` opens and closes a string, and the last one is
+      // never closed: its expression runs to the closing quote.
+      const text = stepWorkflow(
+        [
+          '      - run: "echo ${{ inputs.a }\\',
+          '          } ${{ inputs.b }}"',
+          '      - run: "echo ${{ inputs.c \\x7d} && echo done"',
+          '      - run: "echo ${{ inputs.f }} \\x24{\\',
+          '          { format(\'}}\\x27, inputs.g) \\u007d\\U0000007d . ${{ inputs.h }}"',
+          '      - run: "${{ format(\\x27}}"',
+        ],
+        eol,
+      );
+      const segments = parse(text).sites.flatMap((s) => s.segments);
+      expect(
+        segments.map((seg) => [seg.loc, ...seg.refs.map((r) => r.loc)].map((l) => sourceAt(text, l))),
+      ).toEqual([
+        ['inputs.a', 'inputs.a'],
+        ['inputs.b', 'inputs.b'],
+        ['inputs.c', 'inputs.c'],
+        ['inputs.f', 'inputs.f'],
+        ["format('}}\\x27, inputs.g)", 'inputs.g'],
+        ['inputs.h', 'inputs.h'],
+        ['format(\\x27}}'],
+      ]);
+    },
+  );
+
+  it.each([
+    ['LF', '\n'],
+    ['CRLF', '\r\n'],
   ])('places the empty expression of a block that ends the file past its header (%s)', (_, eol) => {
     // With no line after the header, the value is empty: the header and its comment are not the expression.
     const headers = ['|', '|-', '>2', '|+ # x.y', '> # see a.b'];
