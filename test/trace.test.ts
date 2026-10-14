@@ -1337,6 +1337,102 @@ describe('trace: a secret passed by name to a workflow that does not declare it 
   });
 });
 
+describe('trace: secrets: inherit up to a secret a caller passes by name, in another spelling (#27)', () => {
+  const ROOT = `${WF}/root.yml`;
+  const MID = `${WF}/mid.yml`;
+  const LEAF = `${WF}/leaf.yml`;
+  // root.yml passes `X` by name to mid.yml, which does not declare it (GitHub rejects that), reads it as `secrets.x`
+  // and hands every secret to leaf.yml, which reads `secrets.X`.
+  const { index } = load({
+    [ROOT]: yaml`
+      on: push
+      jobs:
+        call:
+          uses: ./.github/workflows/mid.yml
+          secrets:
+            X: \${{ secrets.R }}
+    `,
+    [MID]: yaml`
+      on: workflow_call
+      jobs:
+        call:
+          uses: ./.github/workflows/leaf.yml
+          secrets: inherit
+        use:
+          runs-on: x
+          steps:
+            - run: echo \${{ secrets.x }}
+    `,
+    [LEAF]: yaml`
+      on: workflow_call
+      jobs:
+        a:
+          runs-on: x
+          outputs:
+            v: \${{ secrets.X }}
+          steps:
+            - run: echo
+    `,
+  });
+  const symbols = (t: TraceNode): string[] => [t.symbol, ...t.children.flatMap(symbols)];
+  const lines = (t: TraceNode, indent = ''): string[] => [
+    `${indent}${t.symbol}${t.via ? ` via ${t.via.text}${t.via.note ? ` (${t.via.note})` : ''}` : ''}`,
+    ...t.children.flatMap((c) => lines(c, `${indent}  `)),
+  ];
+
+  it('traces up as far as it traces down, and as far as v1.0.0 did', () => {
+    // Down reaches leaf.yml's output from root.yml's R ...
+    expect(symbols(trace(index, sym.secret(ROOT, 'R')))).toContain(sym.jobOutput(LEAF, 'a', 'v'));
+    // ... so up from that output reaches root.yml's R, through the spelling root.yml passes mid.yml.
+    expect(symbols(trace(index, sym.jobOutput(LEAF, 'a', 'v'), { direction: 'up' }))).toContain(
+      sym.secret(ROOT, 'R'),
+    );
+    expect(lines(trace(index, sym.jobOutput(LEAF, 'a', 'v'), { direction: 'up' }))).toEqual([
+      sym.jobOutput(LEAF, 'a', 'v'),
+      `  ${sym.secret(LEAF, 'X')} via \${{ secrets.X }}`,
+      `    ${sym.secret(MID, 'x')} via secrets: inherit (jobs.call)`,
+      `    ${sym.secret(MID, 'X')} via secrets: inherit (jobs.call)`,
+      `      ${sym.secret(ROOT, 'R')} via \${{ secrets.R }}`,
+    ]);
+  });
+
+  it('traces up to a secret passed by name to a workflow that only hands it on, in another letter case', () => {
+    const { index: lower } = load({
+      [ROOT]: yaml`
+        on: push
+        jobs:
+          call:
+            uses: ./.github/workflows/mid.yml
+            secrets:
+              x: \${{ secrets.R }}
+      `,
+      [MID]: yaml`
+        on: workflow_call
+        jobs:
+          call:
+            uses: ./.github/workflows/leaf.yml
+            secrets: inherit
+      `,
+      [LEAF]: yaml`
+        on: workflow_call
+        jobs:
+          a:
+            runs-on: x
+            outputs:
+              v: \${{ secrets.X }}
+            steps:
+              - run: echo
+      `,
+    });
+    expect(lines(trace(lower, sym.jobOutput(LEAF, 'a', 'v'), { direction: 'up' }))).toEqual([
+      sym.jobOutput(LEAF, 'a', 'v'),
+      `  ${sym.secret(LEAF, 'X')} via \${{ secrets.X }}`,
+      `    ${sym.secret(MID, 'x')} via secrets: inherit (jobs.call)`,
+      `      ${sym.secret(ROOT, 'R')} via \${{ secrets.R }}`,
+    ]);
+  });
+});
+
 describe('trace: a symbol the graph has no node for (#26)', () => {
   const TOP = `${WF}/top.yml`;
   const MID = `${WF}/mid.yml`;

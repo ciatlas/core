@@ -329,18 +329,23 @@ function inheritedSecrets(index: ProjectIndex, job: JobDecl, name: string): stri
 
 /**
  * A workflow's symbols of the secret `name`, which GitHub looks up ignoring case: the secret it declares, else each
- * spelling it reads the secret by (`secrets.deploy`, `secrets.Deploy`), else `name` itself, in a workflow that only
- * hands the secret on.
+ * spelling it reads the secret by (`secrets.deploy`, `secrets.Deploy`) or a caller passes it by under `secrets:` (where
+ * `sinkOf` sends the value), else `name` itself, in a workflow that only hands the secret on.
  */
 function secretSymbols(index: ProjectIndex, wf: WorkflowDecl, name: string): string[] {
   const declared = wf.call && lookup(wf.call.secrets, name);
   if (declared) return [sym.secret(wf.path, declared.name)];
   const prefix = sym.secret(wf.path, '');
   const lower = name.toLowerCase();
-  const spelled = [...index.nodes.values()]
+  const read = [...index.nodes.values()]
     .filter((n) => n.unit === wf.path && n.id.startsWith(prefix))
-    .map((n) => n.id)
-    .filter((id) => id.slice(prefix.length).toLowerCase() === lower);
+    .map((n) => n.id);
+  const passed = index
+    .callersOf(wf.path)
+    .flatMap((c) => Object.values(c.job.secrets).map((b) => sym.secret(wf.path, b.name)));
+  const spelled = [...new Set([...read, ...passed])].filter(
+    (id) => id.slice(prefix.length).toLowerCase() === lower,
+  );
   return spelled.length ? spelled : [sym.secret(wf.path, name)];
 }
 
