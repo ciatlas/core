@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.1.0](https://github.com/ciatlas/core/compare/v2.0.0...v2.1.0) (2026-10-14)
+
+
+### Features
+
+* **ir:** read each job's runs-on and environment ([#43](https://github.com/ciatlas/core/issues/43)) ([0a6f2a9](https://github.com/ciatlas/core/commit/0a6f2a92d2e9cc5ebbec89a14efe22643798301f))
+
+
+### Bug Fixes
+
+* **parse:** read an expression's delimiters within the value only ([#41](https://github.com/ciatlas/core/issues/41)) ([c4fecdf](https://github.com/ciatlas/core/commit/c4fecdf11dd250926b4da3160d33d4258c4590b5))
+
 ## [2.0.0](https://github.com/ciatlas/core/compare/v1.0.0...v2.0.0) (2026-10-14)
 
 
