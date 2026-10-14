@@ -1413,11 +1413,17 @@ describe('trace: a symbol the graph has no node for (#26)', () => {
       `    ${LEAF} secrets.NPM (unresolved)`,
       `      ${LEAF} jobs.a.outputs.all (job-output)`,
     ]);
+    // leaf.yml's whole read also reads the `TOKEN` top.yml passes it, and its own GITHUB_TOKEN (#27).
     expect(named(trace(index, sym.jobOutput(LEAF, 'a', 'all'), { direction: 'up' }))).toEqual([
       `${LEAF} jobs.a.outputs.all (job-output)`,
+      `  ${LEAF} secrets.TOKEN (unresolved)`,
+      `    ${TOP} secrets.NPM (unresolved)`,
+      `    ${MID} secrets.TOKEN (unresolved)`,
+      `      ${TOP} secrets.TOKEN (unresolved)`,
       `  ${LEAF} secrets.NPM (unresolved)`,
       `    ${MID} secrets.NPM (unresolved)`,
       `      ${TOP} secrets.NPM (unresolved)`,
+      `  ${LEAF} secrets.GITHUB_TOKEN (unresolved)`,
     ]);
   });
 
