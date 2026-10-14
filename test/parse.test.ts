@@ -47,6 +47,18 @@ function sourceAt(text: string, l: Loc): string {
   return text.slice(offset(l.line, l.column), offset(l.endLine, l.endColumn));
 }
 
+// The property tests of locations write an expression's strings from these pieces, in each scalar style. `⏎` is a line
+// break in the decoded string: as written in a literal block, a blank line in the folded and flow styles (which fold a
+// single one into a space) and an escape in a double-quoted scalar.
+const piece = fc.constantFrom('inputs.a', "''", ' ', '}}', '${{', 'x', '.', '⏎');
+const styles: Record<string, [(expr: string) => string[], (eol: string) => string]> = {
+  literal: [(e) => ['      - run: |', `          echo ${e}`], (eol) => `${eol}          `],
+  folded: [(e) => ['      - run: >-', `          echo ${e}`], (eol) => `${eol}${eol}          `],
+  plain: [(e) => [`      - run: echo ${e}`], (eol) => `${eol}${eol}          `],
+  single: [(e) => [`      - run: 'echo ${e.replaceAll("'", "''")}'`], (eol) => `${eol}${eol}          `],
+  double: [(e) => [`      - run: "echo ${e}"`], () => '\\r\\n'],
+};
+
 describe('parseWorkflowFile — triggers and interface', () => {
   it.each([
     ['on: push', ['push']],
@@ -694,17 +706,6 @@ describe('reference locations', () => {
     expect(locatedRefs(text)).toEqual(['github.event.sender.login@10:18', 'inputs.a@10:48']);
   });
 
-  // `⏎` is a line break in the decoded string: as written in a literal block, a blank line in the folded and flow
-  // styles (which fold a single one into a space) and an escape in a double-quoted scalar.
-  const piece = fc.constantFrom('inputs.a', "''", ' ', '}}', '${{', 'x', '.', '⏎');
-  const styles: Record<string, [(expr: string) => string[], (eol: string) => string]> = {
-    literal: [(e) => ['      - run: |', `          echo ${e}`], (eol) => `${eol}          `],
-    folded: [(e) => ['      - run: >-', `          echo ${e}`], (eol) => `${eol}${eol}          `],
-    plain: [(e) => [`      - run: echo ${e}`], (eol) => `${eol}${eol}          `],
-    single: [(e) => [`      - run: 'echo ${e.replaceAll("'", "''")}'`], (eol) => `${eol}${eol}          `],
-    double: [(e) => [`      - run: "echo ${e}"`], () => '\\r\\n'],
-  };
-
   it('places references after strings that span lines, and one whose key spans lines, in every style (#14)', () => {
     fc.assert(
       fc.property(
@@ -1003,6 +1004,204 @@ describe('reference locations', () => {
       'echo ${{ env.X ||\tinputs.a }} ${{ fromJSON(env.X).inputs.a || inputs.a }}',
     );
     expect(locatedRefs(text)).toEqual(['env.X@6:24', 'inputs.a@6:34', 'env.X@6:59', 'inputs.a@6:81']);
+  });
+});
+
+describe('expression ends', () => {
+  it('ends an expression where the source ends it, past line breaks, doubled quotes and escapes (#24)', () => {
+    // The end was the start plus the decoded expression's length, which drifts from the source in a block whose
+    // expression spans lines and in a quoted scalar that doubles quotes or writes escapes. `\\t` is a `\` and a `t`, and
+    // a `\t` before `}}` or the closing quote is a space the decoded value trims. The last `${{` has no `}}`.
+    const text = stepWorkflow([
+      '      - run: |',
+      "          echo ${{ fromJSON('[",
+      '          1',
+      "          ]') == foo.bar }} ${{ inputs.b }}",
+      '      - run: >',
+      '          echo ${{ inputs.a ==',
+      '',
+      '            inputs.b }}',
+      '      - run: "echo ${{ format(\'\\t\\x41\', inputs.a)\\t}} ${{ inputs.a\\\\t }} ${{ inputs.b "',
+      "      - if: \"inputs.a == '\\u0009' \\t\\",
+      '          "',
+      '        run: x',
+      "      - if: 'inputs.a == ''x'''",
+      '        run: x',
+      '      - if: |',
+      '          inputs.a ==',
+      "          'x'",
+      '',
+      '        run: x',
+    ]);
+    expect(parse(text).sites.flatMap((s) => s.segments.map((seg) => sourceAt(text, seg.loc)))).toEqual([
+      "fromJSON('[\n          1\n          ]') == foo.bar",
+      'inputs.b',
+      'inputs.a ==\n\n            inputs.b',
+      "format('\\t\\x41', inputs.a)",
+      'inputs.a\\\\t',
+      'inputs.b',
+      "inputs.a == '\\u0009'",
+      "inputs.a == ''x''",
+      "inputs.a ==\n          'x'",
+    ]);
+  });
+
+  it('ends each expression where it is written to end, whatever its strings hold, in every style (#24)', () => {
+    fc.assert(
+      fc.property(
+        fc.array(piece, { maxLength: 8 }),
+        fc.array(piece, { maxLength: 8 }),
+        fc.constantFrom(...Object.keys(styles)),
+        fc.constantFrom('\n', '\r\n'),
+        (a, b, style, eol) => {
+          const [lines, lineBreak] = styles[style]!;
+          const exprs = [`format('${a.join('')}', inputs.a)`, `github.event['${b.join('')}'] == ''`];
+          const template = exprs.map((e) => `\${{ ${e} }}`).join(' ');
+          const text = stepWorkflow(lines(template), eol).replaceAll('⏎', lineBreak(eol));
+          const quote = style === 'single' ? "''" : "'";
+          const segments = parse(text).sites.flatMap((s) => s.segments);
+          expect(segments.map((seg) => sourceAt(text, seg.loc))).toEqual(
+            exprs.map((e) => e.replaceAll("'", quote).replaceAll('⏎', lineBreak(eol))),
+          );
+        },
+      ),
+    );
+  });
+
+  it.each([
+    ['LF', '\n'],
+    ['CRLF', '\r\n'],
+  ])(
+    'reads a `${{`, `}}` or quote written as escapes or across a `\\` line break as the value does (%s)',
+    (_, eol) => {
+      // The value reads `\x7d` as a `}`, and a `\` line break with the next line's indentation as nothing. A scan for the
+      // `}}` as written ran to the closing quote or to a later expression's `}}`, and a search for the `${{` as written
+      // started the expression near the start of the scalar. A `\x27` opens and closes a string, and the last one is
+      // never closed: its expression runs to the closing quote.
+      const text = stepWorkflow(
+        [
+          '      - run: "echo ${{ inputs.a }\\',
+          '          } ${{ inputs.b }}"',
+          '      - run: "echo ${{ inputs.c \\x7d} && echo done"',
+          '      - run: "echo ${{ inputs.f }} \\x24{\\',
+          '          { format(\'}}\\x27, inputs.g) \\u007d\\U0000007d . ${{ inputs.h }}"',
+          '      - run: "${{ format(\\x27}}"',
+        ],
+        eol,
+      );
+      const segments = parse(text).sites.flatMap((s) => s.segments);
+      expect(
+        segments.map((seg) => [seg.loc, ...seg.refs.map((r) => r.loc)].map((l) => sourceAt(text, l))),
+      ).toEqual([
+        ['inputs.a', 'inputs.a'],
+        ['inputs.b', 'inputs.b'],
+        ['inputs.c', 'inputs.c'],
+        ['inputs.f', 'inputs.f'],
+        ["format('}}\\x27, inputs.g)", 'inputs.g'],
+        ['inputs.h', 'inputs.h'],
+        ['format(\\x27}}'],
+      ]);
+    },
+  );
+
+  it.each([
+    ['LF', '\n'],
+    ['CRLF', '\r\n'],
+  ])('places the empty expression of a block that ends the file past its header (%s)', (_, eol) => {
+    // With no line after the header, the value is empty: the header and its comment are not the expression.
+    const headers = ['|', '|-', '>2', '|+ # x.y', '> # see a.b'];
+    const segments = headers.map((header) => {
+      const text = stepWorkflow(['      - run: x', `        if: ${header}`], eol).trimEnd();
+      return lineCol(parse(text).sites[0]!.segments[0]!.loc);
+    });
+    expect(segments).toEqual(['7:14-7:14', '7:15-7:15', '7:15-7:15', '7:21-7:21', '7:24-7:24']);
+  });
+});
+
+describe('properties after a dot and spaces', () => {
+  it.each([
+    ['LF', '\n'],
+    ['CRLF', '\r\n'],
+  ])(
+    'skips a copy of a reference that is a property after a dot and spaces or line breaks (#25, %s)',
+    (_, eol) => {
+      // `fromJSON(env.X). inputs.a` reads the property `inputs` of fromJSON's result: the reference is the one after `||`.
+      // The dot can end a line of a block or a flow scalar, and a double-quoted scalar can write the spaces as escapes or
+      // join the next line with a `\`. A dot in a block's header comment is not in the value, and a reference after
+      // spaces that follow anything else than a dot is one.
+      const text = stepWorkflow(
+        [
+          '      - run: echo ${{ fromJSON(env.X). inputs.a || inputs.a }}',
+          '      - run: >',
+          '          echo ${{ fromJSON(env.X).',
+          '          inputs.a || inputs.a }}',
+          '      - run: |',
+          '          echo ${{ fromJSON(env.X).',
+          '',
+          '            inputs.a || inputs.a }}',
+          '      - run: "echo ${{ fromJSON(env.X).\\',
+          '          inputs.a || inputs.a }}"',
+          '      - run: "echo ${{ fromJSON(env.X)\\x2e\\t\\x20 inputs.a || inputs.a }}"',
+          "      - if: 'fromJSON(env.X).",
+          "          inputs.a || inputs.a'",
+          '        run: x',
+          '      - if: > # a dot.',
+          "          inputs.a == 'x'",
+          '        run: x',
+          '      - run: echo ${{ env.X || inputs.a }} ${{ env.X ||',
+          '          inputs.a }}',
+        ],
+        eol,
+      );
+      expect(locatedRefs(text)).toEqual([
+        'env.X@6:32',
+        'inputs.a@6:52',
+        'env.X@8:29',
+        'inputs.a@9:23',
+        'env.X@11:29',
+        'inputs.a@13:25',
+        'env.X@14:33',
+        'inputs.a@15:23',
+        'env.X@16:33',
+        'inputs.a@16:62',
+        'env.X@17:23',
+        'inputs.a@18:23',
+        'inputs.a@21:11',
+        'env.X@23:23',
+        'inputs.a@23:32',
+        'env.X@23:48',
+        'inputs.a@24:11',
+      ]);
+    },
+  );
+
+  it('skips a property after a dot and any spaces and line breaks, in every style (#25)', () => {
+    // `↵` is a line break and the indentation, which a literal block keeps and the other styles fold into a space; a
+    // `\` before it joins the lines of a double-quoted scalar, with nothing between the dot and the name.
+    const spaces: Record<string, string[]> = {
+      plain: [' ', '↵'],
+      single: [' ', '↵'],
+      double: [' ', '↵', '\\t', '\\x20', '\\↵'],
+      literal: [' ', '↵'],
+      folded: [' ', '↵'],
+    };
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...Object.keys(spaces)),
+        fc.array(fc.nat(), { minLength: 1, maxLength: 3 }),
+        fc.constantFrom('\n', '\r\n'),
+        (style, picks, eol) => {
+          const space = picks.map((n) => spaces[style]![n % spaces[style]!.length]).join('');
+          const [lines] = styles[style]!;
+          const expr = `\${{ fromJSON(env.X).${space}inputs.a || inputs.a }}`;
+          const text = stepWorkflow(lines(expr), eol).replaceAll('↵', `${eol}          `);
+          const refs = parse(text).sites.flatMap((s) => s.segments.flatMap((seg) => seg.refs));
+          expect(refs.map((r) => r.context)).toEqual(['env', 'inputs']);
+          const { loc } = refs[1]!;
+          expect(sourceAt(text, { ...loc, endColumn: loc.endColumn + 3 })).toBe('inputs.a }}');
+        },
+      ),
+    );
   });
 });
 
