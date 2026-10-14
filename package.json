@@ -1,6 +1,6 @@
 {
   "name": "@ciatlas/core",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "description": "The GitHub Actions workflow model: YAML to IR, expression analysis, matrix expansion and the data-flow graph.",
   "license": "MIT",
