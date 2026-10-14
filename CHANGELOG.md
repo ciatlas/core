@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.0.0](https://github.com/ciatlas/core/compare/v1.0.0...v2.0.0) (2026-10-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* **graph:** In a workflow, `ProjectIndex.readsOf` of a whole or computed `secrets` reference (`toJSON(secrets)`, `secrets.*`, `secrets[x]`) returns, besides the secrets the workflow declares under `workflow_call`, each secret it reads by name or a caller passes it by name under `secrets:` (one symbol per spelling), `GITHUB_TOKEN`, and each secret that a caller handing it every secret through `secrets: inherit`, directly or through workflows that do, declares, reads by name or is passed by name. `usagesOf` lists the read as a whole usage (`whole: true`) of each of them, so a secret read by name and a named `GITHUB_TOKEN` get more usages, and `nodes` and `edges` gain an `unresolved` node for each secret only a whole read reads and a `flows` edge from each to the site's sink.
+
+### Features
+
+* **graph:** read every secret a workflow holds in a whole secrets read: those it reads by name, those callers pass it, those behind secrets: inherit, and GITHUB_TOKEN ([#39](https://github.com/ciatlas/core/issues/39)) ([f108a23](https://github.com/ciatlas/core/commit/f108a2386afbe0a8eb3a9e59848d193a81f8bb0c))
+
+
+### Bug Fixes
+
+* **parse:** end an expression where the source ends it, also in a block scalar or a double-quoted scalar with escapes ([#38](https://github.com/ciatlas/core/issues/38)) ([dc9809c](https://github.com/ciatlas/core/commit/dc9809cd3772ecf7e655f379cf363665f6fdd0b9))
+* **parse:** locate a reference written after a property that follows a dot and spaces or a line break ([#38](https://github.com/ciatlas/core/issues/38)) ([dc9809c](https://github.com/ciatlas/core/commit/dc9809cd3772ecf7e655f379cf363665f6fdd0b9))
+* **trace:** follow secrets: inherit to the spelling the other workflow uses, up and down, and never hand on GITHUB_TOKEN ([#39](https://github.com/ciatlas/core/issues/39)) ([f108a23](https://github.com/ciatlas/core/commit/f108a2386afbe0a8eb3a9e59848d193a81f8bb0c))
+* **trace:** name the workflow of a symbol the graph has no node for ([#36](https://github.com/ciatlas/core/issues/36)) ([2c8d903](https://github.com/ciatlas/core/commit/2c8d903514e052938379fabb5cf0352e7486219c))
+
 ## [1.0.0](https://github.com/ciatlas/core/compare/v0.4.0...v1.0.0) (2026-10-13)
 
 
