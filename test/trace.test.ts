@@ -2933,6 +2933,35 @@ describe('trace: whole inputs, matrix, secrets and env', () => {
       leaves: [omitted],
     });
   });
+
+  it('ends toJSON(needs) at the outputs of the jobs it needs, as one job’s needs ends', () => {
+    const { index: needs } = load({
+      [W]: yaml`
+        on: push
+        jobs:
+          build:
+            runs-on: x
+            outputs:
+              tag: v1
+            steps:
+              - run: echo
+          use:
+            needs: build
+            runs-on: x
+            outputs:
+              all: \${{ toJSON(needs) }}
+              one: \${{ toJSON(needs.build) }}
+            steps:
+              - run: echo
+      `,
+    });
+    const ends = (out: string) => {
+      const t = trace(needs, sym.jobOutput(W, 'use', out), { direction: 'up' });
+      return [...t.children.map((c) => c.symbol), ...leavesOf(t)];
+    };
+    expect(ends('all')).toEqual([sym.jobOutput(W, 'build', 'tag')]);
+    expect(ends('one')).toEqual(ends('all'));
+  });
 });
 
 // A whole env (#12) over a step's own env values that read github.event.inputs (#10).
