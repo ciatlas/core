@@ -475,4 +475,56 @@ describe('parsed job fields used for check names and impact', () => {
     expect(wf.jobs.b!.name).toBe('');
     expect(wf.jobs.b!.permissions).toEqual({ contents: 'write', 'id-token': 'write' });
   });
+
+  it('reads runs-on and environment in each form', () => {
+    const { project } = load({
+      [`${WF}/c.yml`]: yaml`
+        on: push
+        jobs:
+          a:
+            runs-on: ubuntu-latest
+            environment: production
+            steps: [{ run: x }]
+          b:
+            runs-on: [self-hosted, linux, gpu]
+            environment: { name: staging, url: https://x }
+            steps: [{ run: x }]
+          c:
+            runs-on: { group: builders, labels: [linux] }
+            environment: { url: https://x }
+            steps: [{ run: x }]
+          d:
+            runs-on: \${{ inputs.runner }}
+            environment: \${{ inputs.env }}
+            steps: [{ run: x }]
+          e:
+            uses: ./.github/workflows/c.yml
+      `,
+    });
+    const jobs = project.workflows.get(`${WF}/c.yml`)!.jobs;
+    const shape = (id: string) => {
+      const { runsOn, environment } = jobs[id]!;
+      return {
+        runsOn: runsOn && { labels: runsOn.labels, group: runsOn.group, dynamic: runsOn.dynamic },
+        environment: environment && { name: environment.name, dynamic: environment.dynamic },
+      };
+    };
+    expect(shape('a')).toEqual({
+      runsOn: { labels: ['ubuntu-latest'], group: undefined, dynamic: false },
+      environment: { name: 'production', dynamic: false },
+    });
+    expect(shape('b')).toEqual({
+      runsOn: { labels: ['self-hosted', 'linux', 'gpu'], group: undefined, dynamic: false },
+      environment: { name: 'staging', dynamic: false },
+    });
+    expect(shape('c')).toEqual({
+      runsOn: { labels: ['linux'], group: 'builders', dynamic: false },
+      environment: undefined,
+    });
+    expect(shape('d')).toEqual({
+      runsOn: { labels: ['${{ inputs.runner }}'], group: undefined, dynamic: true },
+      environment: { name: '${{ inputs.env }}', dynamic: true },
+    });
+    expect(shape('e')).toEqual({ runsOn: undefined, environment: undefined });
+  });
 });

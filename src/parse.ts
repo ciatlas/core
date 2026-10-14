@@ -24,6 +24,7 @@ import type {
   ActionDecl,
   Binding,
   Diagnostic,
+  EnvironmentDecl,
   ExprSegment,
   ExprSite,
   InputDecl,
@@ -33,6 +34,7 @@ import type {
   MatrixEntry,
   OutputDecl,
   PermissionsDecl,
+  RunsOnDecl,
   SecretDecl,
   StepDecl,
   UsesRef,
@@ -1004,7 +1006,6 @@ function jobs(unit: Unit, node: unknown, ctx: ParseContext): Record<string, JobD
     const name = str(get(j, 'name'));
     const nameSite = unit.siteByPath.get(pathKey([...p, 'name']));
     const namePair = getPair(j, 'name');
-    const perms = permissions(get(j, 'permissions'));
     const ifNode = get(j, 'if');
     const ifValue = isScalar(ifNode) && typeof ifNode.value === 'boolean' ? ifNode.value : undefined;
     const strategy = get(j, 'strategy');
@@ -1015,7 +1016,7 @@ function jobs(unit: Unit, node: unknown, ctx: ParseContext): Record<string, JobD
       ...(name !== undefined ? { name } : {}),
       ...(nameSite ? { nameSite } : {}),
       ...(namePair?.value ? { nameLoc: nodeLoc(unit.source, namePair.value as Node) } : {}),
-      ...(perms ? { permissions: perms } : {}),
+      ...jobSettings(unit.source, j),
       ...(ifValue !== undefined ? { ifValue } : {}),
       needs,
       ...(ifSite ? { ifSite } : {}),
@@ -1031,6 +1032,46 @@ function jobs(unit: Unit, node: unknown, ctx: ParseContext): Record<string, JobD
     };
   }
   return out;
+}
+
+/** A job's `permissions:`, `runs-on:` and `environment:`, each only when it has one. */
+function jobSettings(
+  source: SourceFile,
+  j: unknown,
+): Pick<JobDecl, 'permissions' | 'runsOn' | 'environment'> {
+  const perms = permissions(get(j, 'permissions'));
+  const runs = runsOn(source, get(j, 'runs-on'));
+  const env = environment(source, get(j, 'environment'));
+  return {
+    ...(perms ? { permissions: perms } : {}),
+    ...(runs ? { runsOn: runs } : {}),
+    ...(env ? { environment: env } : {}),
+  };
+}
+
+const isExpression = (text: string) => text.includes('${{');
+
+/** The texts of a scalar, or of the scalars of a list. */
+function texts(node: unknown): string[] {
+  if (isSeq(node)) return node.items.flatMap((n) => (str(n) === undefined ? [] : [str(n)!]));
+  const one = str(node);
+  return one === undefined ? [] : [one];
+}
+
+/** `runs-on:` as written: labels and group, or undefined when the job has none (a job that calls a workflow). */
+function runsOn(source: SourceFile, node: Node | undefined): RunsOnDecl | undefined {
+  if (!node) return undefined;
+  const group = isMap(node) ? str(get(node, 'group')) : undefined;
+  const labels = texts(isMap(node) ? get(node, 'labels') : node);
+  const dynamic = [...labels, group ?? ''].some(isExpression) || !(isMap(node) || labels.length);
+  return { labels, ...(group !== undefined ? { group } : {}), dynamic, loc: nodeLoc(source, node) };
+}
+
+/** `environment:` as written: a name, or the `name` of a map; undefined without one. */
+function environment(source: SourceFile, node: Node | undefined): EnvironmentDecl | undefined {
+  const name = str(isMap(node) ? get(node, 'name') : node);
+  if (name === undefined || !node) return undefined;
+  return { name, dynamic: isExpression(name), loc: nodeLoc(source, node) };
 }
 
 /** `permissions:` as written: `read-all` / `write-all`, or a map of scopes (unknown values are skipped). */
