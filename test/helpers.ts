@@ -1,4 +1,10 @@
-import { loadProject, memoryFileSystem, type Project, ProjectIndex } from '@ciatlas/core';
+import {
+  loadProject,
+  memoryFileSystem,
+  type Project,
+  ProjectIndex,
+  type RemoteInterface,
+} from '@ciatlas/core';
 
 /** Strips the common leading indentation so YAML can be written inline in tests. */
 export function yaml(strings: TemplateStringsArray, ...values: unknown[]): string {
@@ -15,6 +21,7 @@ export interface LoadOptions {
   paths?: string[];
   publish?: string[];
   validateSchema?: boolean;
+  remotes?: RemoteInterface[];
 }
 
 /** Loads a repository from in-memory files the way the linter does (schema validation on), without running any rule. */
@@ -29,6 +36,7 @@ export function load(
     validateSchema: opts.validateSchema ?? true,
     ...(opts.paths ? { paths: opts.paths } : {}),
     ...(opts.publish ? { publish: opts.publish } : {}),
+    ...(opts.remotes ? { remotes: opts.remotes } : {}),
   });
   return { project, index: new ProjectIndex(project) };
 }

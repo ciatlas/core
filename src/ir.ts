@@ -250,6 +250,11 @@ interface BaseDecl {
   path: string;
   file: string;
   name?: string;
+  /**
+   * Set on a unit of another repository, made from its interface alone (see `LoadProjectOptions.remotes`): its `path`
+   * and `file` are the `uses:` reference, and it has no jobs or steps to follow.
+   */
+  external?: true;
   source: SourceFile;
   sites: ExprSite[];
   parseErrors: Diagnostic[];

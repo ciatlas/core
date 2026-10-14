@@ -196,11 +196,25 @@ function matrixKeys(job: JobDecl | undefined): string[] {
   return m ? [...m.dims.map((d) => d.name), ...m.include.flatMap((inc) => Object.keys(inc.keyLocs))] : [];
 }
 
+/**
+ * The key of a remote `uses:` reference (`owner/repo/path@ref`): GitHub matches the owner and repository in any letter
+ * case, and the path and ref as written.
+ */
+export function remoteKey(raw: string): string {
+  const [owner = '', repo = '', ...rest] = raw.trim().split('/');
+  return [owner.toLowerCase(), repo.toLowerCase(), ...rest].join('/');
+}
+
 export interface Project {
   root: string;
   repository?: string;
   workflows: Map<string, WorkflowDecl>;
   actions: Map<string, ActionDecl>;
+  /**
+   * Units of other repositories, made from their interfaces (see `LoadProjectOptions.remotes`), by `remoteKey` of their
+   * `uses:` reference. They are kept out of `workflows` and `actions`, so nothing that follows a call reaches them.
+   */
+  external?: Map<string, UnitDecl>;
   /** Files the requested paths name; every other file is loaded only as context. Empty = everything. */
   targets: Set<string>;
   /** Requested paths that do not exist (or lie outside the repository). */
@@ -388,6 +402,25 @@ export class ProjectIndex {
       return undefined;
     if (!/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(job.uses.target)) return undefined;
     return this.project.workflows.get(job.uses.target);
+  }
+
+  /**
+   * The interface a job calls: its local reusable workflow, or the external unit of its remote one (see
+   * `Project.external`). Only checks of what a caller passes and reads use it; `calleeOf` never returns an external unit.
+   */
+  // fallow-ignore-next-line unused-class-member -- API for flowpact's checks of remote calls (ciatlas/flowpact#152)
+  interfaceOf(job: JobDecl): WorkflowDecl | undefined {
+    if (job.uses?.kind !== 'remote-workflow') return this.calleeOf(job);
+    const unit = this.project.external?.get(remoteKey(job.uses.raw));
+    return unit?.kind === 'workflow' && unit.call ? unit : undefined;
+  }
+
+  /** The interface a step uses: its local action, or the external unit of its remote one (see `interfaceOf`). */
+  // fallow-ignore-next-line unused-class-member -- API for flowpact's checks of remote actions (ciatlas/flowpact#152)
+  actionInterfaceOf(step: StepDecl): ActionDecl | undefined {
+    if (step.uses?.kind !== 'remote-action') return this.actionOf(step);
+    const unit = this.project.external?.get(remoteKey(step.uses.raw));
+    return unit?.kind === 'action' ? unit : undefined;
   }
 
   actionOf(step: StepDecl): ActionDecl | undefined {
