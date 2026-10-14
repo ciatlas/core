@@ -1116,6 +1116,22 @@ describe('expression ends', () => {
     });
     expect(segments).toEqual(['7:14-7:14', '7:15-7:15', '7:15-7:15', '7:21-7:21', '7:24-7:24']);
   });
+
+  it.each([
+    ['double', '"'],
+    ['single', "'"],
+  ])(
+    'ends the last expression of a %s-quoted scalar the file ends without closing at the value (#40)',
+    (_, q) => {
+      // The parser takes the file's last character, `}`, for the closing quote, so the value ends `${{ inputs.b }`: the
+      // expression is `inputs.b }`, and the `}}` the file ends with is not in it.
+      const text = stepWorkflow([`      - run: ${q}echo \${{ inputs.a }} \${{ inputs.b }}`]).trimEnd();
+      expect(parse(text).sites[0]!.segments.map((seg) => lineCol(seg.loc))).toEqual([
+        '6:24-6:32',
+        '6:40-6:50',
+      ]);
+    },
+  );
 });
 
 describe('properties after a dot and spaces', () => {

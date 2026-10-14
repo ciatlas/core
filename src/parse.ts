@@ -344,12 +344,14 @@ function charAt(s: RawScalar, at: number): [string, number] {
 /**
  * The length of `text` written at `at` as the value reads it, or 0 when it is not there. A double-quoted scalar may
  * write its characters as escapes (`\x7d` for `}`) and join them across lines with a `\` line break, which the value
- * reads as nothing, with the next line's indentation.
+ * reads as nothing, with the next line's indentation. It is read within the value only: where a quote is never
+ * closed, the parser takes the file's last character for the closing quote, which the value does not hold.
  */
 function writtenLength(s: RawScalar, at: number, text: string): number {
   let i = at;
   for (let n = 0; n < text.length; n++) {
     if (n > 0) i = pastJoins(s, i);
+    if (i >= s.close) return 0;
     const [char, length] = charAt(s, i);
     if (char !== text[n]) return 0;
     i += length;
