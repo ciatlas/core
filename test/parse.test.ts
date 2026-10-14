@@ -47,6 +47,18 @@ function sourceAt(text: string, l: Loc): string {
   return text.slice(offset(l.line, l.column), offset(l.endLine, l.endColumn));
 }
 
+// The property tests of locations write an expression's strings from these pieces, in each scalar style. `⏎` is a line
+// break in the decoded string: as written in a literal block, a blank line in the folded and flow styles (which fold a
+// single one into a space) and an escape in a double-quoted scalar.
+const piece = fc.constantFrom('inputs.a', "''", ' ', '}}', '${{', 'x', '.', '⏎');
+const styles: Record<string, [(expr: string) => string[], (eol: string) => string]> = {
+  literal: [(e) => ['      - run: |', `          echo ${e}`], (eol) => `${eol}          `],
+  folded: [(e) => ['      - run: >-', `          echo ${e}`], (eol) => `${eol}${eol}          `],
+  plain: [(e) => [`      - run: echo ${e}`], (eol) => `${eol}${eol}          `],
+  single: [(e) => [`      - run: 'echo ${e.replaceAll("'", "''")}'`], (eol) => `${eol}${eol}          `],
+  double: [(e) => [`      - run: "echo ${e}"`], () => '\\r\\n'],
+};
+
 describe('parseWorkflowFile — triggers and interface', () => {
   it.each([
     ['on: push', ['push']],
@@ -694,17 +706,6 @@ describe('reference locations', () => {
     expect(locatedRefs(text)).toEqual(['github.event.sender.login@10:18', 'inputs.a@10:48']);
   });
 
-  // `⏎` is a line break in the decoded string: as written in a literal block, a blank line in the folded and flow
-  // styles (which fold a single one into a space) and an escape in a double-quoted scalar.
-  const piece = fc.constantFrom('inputs.a', "''", ' ', '}}', '${{', 'x', '.', '⏎');
-  const styles: Record<string, [(expr: string) => string[], (eol: string) => string]> = {
-    literal: [(e) => ['      - run: |', `          echo ${e}`], (eol) => `${eol}          `],
-    folded: [(e) => ['      - run: >-', `          echo ${e}`], (eol) => `${eol}${eol}          `],
-    plain: [(e) => [`      - run: echo ${e}`], (eol) => `${eol}${eol}          `],
-    single: [(e) => [`      - run: 'echo ${e.replaceAll("'", "''")}'`], (eol) => `${eol}${eol}          `],
-    double: [(e) => [`      - run: "echo ${e}"`], () => '\\r\\n'],
-  };
-
   it('places references after strings that span lines, and one whose key spans lines, in every style (#14)', () => {
     fc.assert(
       fc.property(
@@ -976,6 +977,37 @@ describe('reference locations', () => {
     ]);
   });
 
+  it('skips a copy of a reference that continues a name or a property chain', () => {
+    // `.inputs.a` is a property of fromJSON's result, and `my-inputs.a` and `myinputs.a` are longer names.
+    const text = stepWorkflow([
+      '      - run: echo ${{ fromJSON(env.X).inputs.a || inputs.a }}',
+      '      - run: echo ${{ fromJSON(env.X).my-inputs.a || inputs.a }}',
+      '      - run: echo ${{ fromJSON(env.X).myinputs.a || inputs.a }}',
+    ]);
+    expect(locatedRefs(text)).toEqual([
+      'env.X@6:32',
+      'inputs.a@6:51',
+      'env.X@7:32',
+      'inputs.a@7:54',
+      'env.X@8:32',
+      'inputs.a@8:53',
+    ]);
+  });
+
+  it('reads the escape before a copy of a reference in a double-quoted scalar', () => {
+    // run: "echo ${{ env.X ||\tinputs.a }} ${{ fromJSON(env.X)\x2einputs.a || inputs.a }}": `\t` is a tab, so the
+    // first inputs.a is a reference; `\x2e` is a `.`, so the second one is a property.
+    const text = stepWorkflow([
+      '      - run: "echo ${{ env.X ||\\tinputs.a }} ${{ fromJSON(env.X)\\x2einputs.a || inputs.a }}"',
+    ]);
+    expect(parse(text).sites[0]!.text).toBe(
+      'echo ${{ env.X ||\tinputs.a }} ${{ fromJSON(env.X).inputs.a || inputs.a }}',
+    );
+    expect(locatedRefs(text)).toEqual(['env.X@6:24', 'inputs.a@6:34', 'env.X@6:59', 'inputs.a@6:81']);
+  });
+});
+
+describe('expression ends', () => {
   it('ends an expression where the source ends it, past line breaks, doubled quotes and escapes (#24)', () => {
     // The end was the start plus the decoded expression's length, which drifts from the source in a block whose
     // expression spans lines and in a quoted scalar that doubles quotes or writes escapes. `\\t` is a `\` and a `t`, and
@@ -1035,36 +1067,9 @@ describe('reference locations', () => {
       ),
     );
   });
+});
 
-  it('skips a copy of a reference that continues a name or a property chain', () => {
-    // `.inputs.a` is a property of fromJSON's result, and `my-inputs.a` and `myinputs.a` are longer names.
-    const text = stepWorkflow([
-      '      - run: echo ${{ fromJSON(env.X).inputs.a || inputs.a }}',
-      '      - run: echo ${{ fromJSON(env.X).my-inputs.a || inputs.a }}',
-      '      - run: echo ${{ fromJSON(env.X).myinputs.a || inputs.a }}',
-    ]);
-    expect(locatedRefs(text)).toEqual([
-      'env.X@6:32',
-      'inputs.a@6:51',
-      'env.X@7:32',
-      'inputs.a@7:54',
-      'env.X@8:32',
-      'inputs.a@8:53',
-    ]);
-  });
-
-  it('reads the escape before a copy of a reference in a double-quoted scalar', () => {
-    // run: "echo ${{ env.X ||\tinputs.a }} ${{ fromJSON(env.X)\x2einputs.a || inputs.a }}": `\t` is a tab, so the
-    // first inputs.a is a reference; `\x2e` is a `.`, so the second one is a property.
-    const text = stepWorkflow([
-      '      - run: "echo ${{ env.X ||\\tinputs.a }} ${{ fromJSON(env.X)\\x2einputs.a || inputs.a }}"',
-    ]);
-    expect(parse(text).sites[0]!.text).toBe(
-      'echo ${{ env.X ||\tinputs.a }} ${{ fromJSON(env.X).inputs.a || inputs.a }}',
-    );
-    expect(locatedRefs(text)).toEqual(['env.X@6:24', 'inputs.a@6:34', 'env.X@6:59', 'inputs.a@6:81']);
-  });
-
+describe('properties after a dot and spaces', () => {
   it.each([
     ['LF', '\n'],
     ['CRLF', '\r\n'],
