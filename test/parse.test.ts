@@ -1067,6 +1067,19 @@ describe('expression ends', () => {
       ),
     );
   });
+
+  it.each([
+    ['LF', '\n'],
+    ['CRLF', '\r\n'],
+  ])('places the empty expression of a block that ends the file past its header (%s)', (_, eol) => {
+    // With no line after the header, the value is empty: the header and its comment are not the expression.
+    const headers = ['|', '|-', '>2', '|+ # x.y', '> # see a.b'];
+    const segments = headers.map((header) => {
+      const text = stepWorkflow(['      - run: x', `        if: ${header}`], eol).trimEnd();
+      return lineCol(parse(text).sites[0]!.segments[0]!.loc);
+    });
+    expect(segments).toEqual(['7:14-7:14', '7:15-7:15', '7:15-7:15', '7:21-7:21', '7:24-7:24']);
+  });
 });
 
 describe('properties after a dot and spaces', () => {

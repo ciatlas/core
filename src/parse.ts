@@ -265,11 +265,13 @@ function rawScalar(source: SourceFile, node: Scalar): RawScalar {
 /**
  * Where a scalar's value starts in its source. A block scalar's range includes its header line (`|`, `>`, their
  * indicators and a comment), whose text is not in the value: a `'`, `${{` or copy of an expression there is skipped.
+ * A block that ends the file on its header line has an empty value, which starts past the header.
  */
 function valueStart(type: Scalar['type'], raw: string): number {
   if (type === 'QUOTE_SINGLE' || type === 'QUOTE_DOUBLE') return 1;
-  if (type === 'BLOCK_LITERAL' || type === 'BLOCK_FOLDED') return raw.indexOf('\n') + 1;
-  return 0;
+  if (type !== 'BLOCK_LITERAL' && type !== 'BLOCK_FOLDED') return 0;
+  const headerEnd = raw.indexOf('\n');
+  return headerEnd < 0 ? raw.length : headerEnd + 1;
 }
 
 /**
