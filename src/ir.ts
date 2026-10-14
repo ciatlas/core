@@ -179,6 +179,24 @@ export interface StepDecl {
   writesEnv: { names: string[]; dynamic: boolean };
 }
 
+/**
+ * `runs-on:` of a job: its labels (a string, a list, or the `labels` of a map) and the runner `group` of a map.
+ * `dynamic` when a part is an expression, so the runners it selects are only known at run time.
+ */
+export interface RunsOnDecl {
+  labels: string[];
+  group?: string;
+  dynamic: boolean;
+  loc: Loc;
+}
+
+/** `environment:` of a job: its name (a string, or the `name` of a map); `dynamic` when it is an expression. */
+export interface EnvironmentDecl {
+  name: string;
+  dynamic: boolean;
+  loc: Loc;
+}
+
 /** `permissions:` of a workflow or job: a shorthand, or a scope → level map (`{}` grants nothing). */
 export type PermissionsDecl = 'read-all' | 'write-all' | Record<string, 'read' | 'write' | 'none'>;
 
@@ -190,6 +208,8 @@ export interface JobDecl {
   nameSite?: ExprSite;
   nameLoc?: Loc;
   permissions?: PermissionsDecl;
+  runsOn?: RunsOnDecl;
+  environment?: EnvironmentDecl;
   /** `if:` written as a YAML boolean (`if: false`), which has no expression site. */
   ifValue?: boolean;
   needs: { id: string; loc: Loc }[];
