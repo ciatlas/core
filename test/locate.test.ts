@@ -346,6 +346,51 @@ describe('SymbolLocator: whole inputs and matrix', () => {
   });
 });
 
+describe('SymbolLocator: whole secrets (#27)', () => {
+  const TOP = `${WF}/top.yml`;
+  const LIB = `${WF}/lib.yml`;
+  const top = yaml`
+    on: push
+    jobs:
+      call:
+        uses: ./.github/workflows/lib.yml
+        secrets: inherit
+      use:
+        runs-on: x
+        steps:
+          - run: echo \${{ secrets.DEPLOY }} '\${{ toJSON(secrets) }}'
+  `;
+  const lib = yaml`
+    on: workflow_call
+    jobs:
+      j:
+        runs-on: x
+        steps:
+          - run: echo '\${{ toJSON(secrets) }}'
+  `;
+  const locator = new SymbolLocator(load({ [TOP]: top, [LIB]: lib }).index);
+  const at = (text: string, needle: string) => {
+    const before = text.slice(0, text.indexOf(needle)).split('\n');
+    return `${before.length}:${before.at(-1)!.length + 1}`;
+  };
+  const occurrences = (symbol: string) =>
+    locator.occurrences(symbol).map((o) => `${o.role} ${o.loc.line}:${o.loc.column}`);
+
+  it('lists a whole read among the references of a secret read by name, and of GITHUB_TOKEN', () => {
+    expect(occurrences(sym.secret(TOP, 'DEPLOY'))).toEqual([
+      `read ${at(top, 'secrets.DEPLOY')}`,
+      `read ${at(top, 'secrets) }}')}`,
+    ]);
+    expect(occurrences(sym.secret(TOP, 'GITHUB_TOKEN'))).toEqual([`read ${at(top, 'secrets) }}')}`]);
+  });
+
+  it('lists a callee’s whole read among the references of a secret it gets through secrets: inherit', () => {
+    expect(occurrences(sym.secret(LIB, 'DEPLOY'))).toEqual([`read ${at(lib, 'secrets) }}')}`]);
+    const [line, column] = at(lib, 'secrets) }}').split(':').map(Number);
+    expect(locator.at(LIB, line!, column! + 1)).toBeUndefined();
+  });
+});
+
 describe('SymbolLocator: env, aliases, script outputs and bindings', () => {
   const E = `${WF}/env.yml`;
   const LIB = `${WF}/lib.yml`;
