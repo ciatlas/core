@@ -96,7 +96,7 @@ function wholeReads(reads: Read[]): Read[] {
   return [...first.values()];
 }
 
-/** The names of declared inputs, secrets or env variables, as declared. */
+/** The names of declared inputs, secrets or env variables, or of the keys a job passes, as written. */
 const declaredNames = (decls: Record<string, { name: string }> | undefined) =>
   Object.values(decls ?? {}).map((d) => d.name);
 
@@ -718,8 +718,8 @@ export class ProjectIndex {
    *   `workflow_call` output's value, which GitHub evaluates only when the workflow is called;
    * - `toJSON(matrix)` or `matrix[inputs.key]`: every key of the job's matrix;
    * - `toJSON(secrets)` or `secrets[inputs.name]`: every secret the workflow holds that the files name (see
-   *   `secretNames`): those it declares under `workflow_call` or reads by name, `GITHUB_TOKEN`, and those callers that
-   *   hand it every secret through `secrets: inherit` name;
+   *   `secretNames`): those it declares under `workflow_call`, reads by name or is passed by name, `GITHUB_TOKEN`, and
+   *   those callers that hand it every secret through `secrets: inherit` name;
    * - `toJSON(env)` or `env[inputs.name]`: every env variable in scope, a step's own read through their values.
    *
    * Variables are set in the repository's settings, not in its files, so a whole `vars` reads nothing. See
@@ -783,30 +783,40 @@ export class ProjectIndex {
   }
 
   /**
-   * The secrets a whole `secrets` holds in a workflow that the files name: each one it declares under `workflow_call`,
-   * each spelling it reads by name, then those it gets through `secrets: inherit` that the callers handing them on name
+   * The secrets a whole `secrets` holds in a workflow that the files name: each spelling of one it names itself (see
+   * `ownSecretNames`), then those it gets through `secrets: inherit` that the callers handing them on name themselves
    * (see `inheritedSecretNames`), and `GITHUB_TOKEN`, which GitHub gives every workflow. GitHub looks secret names up
-   * ignoring case, so those last two leave out a secret the workflow names in another case. A secret that neither the
+   * ignoring case, so those last two leave out a secret named before them in another case. A secret that neither the
    * workflow nor those callers name, such as a repository secret no file names or one only another of their callees
    * reads, has no symbol here.
    */
   private secretNames(wf: WorkflowDecl): string[] {
     const known = this.heldSecrets.get(wf.path);
     if (known) return known;
-    const own = [...declaredNames(wf.call?.secrets), ...namedSecrets(wf)];
-    const names = addNames(own, [...this.inheritedSecretNames(wf), GITHUB_TOKEN]);
+    const names = addNames(this.ownSecretNames(wf), [...this.inheritedSecretNames(wf), GITHUB_TOKEN]);
     this.heldSecrets.set(wf.path, names);
     return names;
   }
 
   /**
-   * The secrets a workflow gets through `secrets: inherit` that the callers handing them on name: those each workflow
-   * that hands it every secret, directly or through others that do, declares or reads by name. Not `GITHUB_TOKEN`,
-   * which `secrets: inherit` does not pass.
+   * The secrets a workflow names itself, as written: those it declares under `workflow_call`, reads by name, or is
+   * passed by name under a caller's `secrets:`. GitHub rejects a secret passed to a workflow that does not declare it,
+   * but the files still send its value there (see `sinkOf`). A spelling of a declared secret is that secret (see
+   * `resolveSecret`); any other is a symbol of its own, as for a reference.
+   */
+  private ownSecretNames(wf: WorkflowDecl): string[] {
+    const passed = this.callersOf(wf.path).flatMap((c) => declaredNames(c.job.secrets));
+    return [...declaredNames(wf.call?.secrets), ...namedSecrets(wf), ...passed];
+  }
+
+  /**
+   * The secrets a workflow gets through `secrets: inherit` that the callers handing them on name themselves (see
+   * `ownSecretNames`): each workflow that hands it every secret, directly or through others that do. Not
+   * `GITHUB_TOKEN`, which `secrets: inherit` does not pass.
    */
   private inheritedSecretNames(wf: WorkflowDecl): string[] {
     return this.inheritingCallers(wf)
-      .flatMap((caller) => [...declaredNames(caller.call?.secrets), ...namedSecrets(caller)])
+      .flatMap((caller) => this.ownSecretNames(caller))
       .filter((name) => !BUILTIN_SECRETS.has(name.toLowerCase()));
   }
 

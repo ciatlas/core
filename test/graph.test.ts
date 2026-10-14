@@ -1782,3 +1782,91 @@ describe('ProjectIndex.readsOf: every secret a whole secrets holds (#27)', () =>
     ]);
   });
 });
+
+// GitHub rejects a secret a caller passes by name that the called workflow does not declare. The files still say where
+// its value goes, so a whole read reads it too, in the workflow and in those it hands every secret to.
+describe('ProjectIndex.readsOf: a secret passed by name that the callee does not declare (#27)', () => {
+  const TOP = `${WF}/top.yml`;
+  const MID = `${WF}/mid.yml`;
+  const LEAF = `${WF}/leaf.yml`;
+  const { index } = load({
+    [TOP]: yaml`
+      on: push
+      jobs:
+        pass:
+          uses: ./.github/workflows/mid.yml
+          secrets:
+            N: \${{ secrets.S }}
+            Mine: \${{ secrets.S }}
+        direct:
+          uses: ./.github/workflows/leaf.yml
+          secrets:
+            DIRECT: \${{ secrets.S }}
+            n: \${{ secrets.S }}
+    `,
+    [MID]: yaml`
+      on:
+        workflow_call:
+          secrets:
+            MINE: {}
+      jobs:
+        call:
+          uses: ./.github/workflows/leaf.yml
+          secrets: inherit
+        use:
+          runs-on: x
+          outputs:
+            all: \${{ toJSON(secrets) }}
+          steps:
+            - run: echo
+    `,
+    [LEAF]: yaml`
+      on: workflow_call
+      jobs:
+        a:
+          runs-on: x
+          outputs:
+            all: \${{ toJSON(secrets) }}
+          steps:
+            - run: echo \${{ secrets.direct }}
+    `,
+  });
+  const whole = (file: string) => {
+    const unit = index.unit(file)!;
+    const { site, ref } = [...refsOf(unit)].find(({ ref }) => ref.context === 'secrets' && !ref.path.length)!;
+    return index.readsOf(unit, site, ref);
+  };
+
+  it('reads it in the workflow it is passed to, as the secret it declares of that name if any', () => {
+    expect(whole(MID)).toEqual([
+      sym.secret(MID, 'MINE'),
+      sym.secret(MID, 'N'),
+      sym.secret(MID, 'GITHUB_TOKEN'),
+    ]);
+  });
+
+  it('reads it under each spelling it is passed by, which is where its value goes', () => {
+    // leaf.yml reads `direct` by name, and top.yml passes it `DIRECT` and `n`.
+    expect(whole(LEAF).slice(0, 3)).toEqual([
+      sym.secret(LEAF, 'direct'),
+      sym.secret(LEAF, 'DIRECT'),
+      sym.secret(LEAF, 'n'),
+    ]);
+    // Each place top.yml's secret goes has the whole read among its usages.
+    const read = (to: string) => index.usagesOf(to).some((u) => u.whole);
+    expect(index.outgoing(sym.secret(TOP, 'S'), 'flows').map((e) => [e.to, read(e.to)])).toEqual([
+      [sym.secret(MID, 'N'), true],
+      [sym.secret(MID, 'MINE'), true],
+      [sym.secret(LEAF, 'DIRECT'), true],
+      [sym.secret(LEAF, 'n'), true],
+    ]);
+  });
+
+  it('reads it in a workflow that gets every secret from one it is passed to', () => {
+    // leaf.yml gets `MINE` and `N` (its `n`) with every secret mid.yml has.
+    expect(whole(LEAF).slice(3)).toEqual([sym.secret(LEAF, 'MINE'), sym.secret(LEAF, 'GITHUB_TOKEN')]);
+    expect(index.usagesOf(sym.secret(LEAF, 'MINE')).map((u) => [u.site.field, u.sink, u.whole])).toEqual([
+      ['job.output', sym.jobOutput(LEAF, 'a', 'all'), true],
+    ]);
+  });
+});
