@@ -1,8 +1,8 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { matchesPattern } from './glob';
-import type { Project, UnverifiedUse } from './graph';
-import type { ActionDecl, JobDecl, WorkflowDecl } from './ir';
+import { type Project, remoteKey, type UnverifiedUse } from './graph';
+import type { ActionDecl, JobDecl, UnitDecl, WorkflowDecl } from './ir';
 import type { Logger } from './logger';
 import { silentLogger } from './logger';
 import { createParseContext, parseActionFile, parseWorkflowFile } from './parse';
@@ -187,6 +187,17 @@ export interface LoadProjectOptions {
   logger?: Logger;
   /** Globs of published actions: the actions they match are loaded even when nothing in the repository uses them. */
   publish?: string[];
+  /**
+   * The interfaces of remote reusable workflows and actions, by their `uses:` reference (`owner/repo/path@ref`), as
+   * the YAML of a workflow or `action.yml` that declares them. Each becomes an external unit (see `Project.external`).
+   */
+  remotes?: RemoteInterface[];
+}
+
+export interface RemoteInterface {
+  ref: string;
+  kind: 'workflow' | 'action';
+  text: string;
 }
 
 const isYaml = (p: string) => /\.ya?ml$/i.test(p);
@@ -389,5 +400,26 @@ export function loadProject(opts: LoadProjectOptions): Project {
     missing,
     invalidTargets: invalid,
     unverified,
+    ...externalUnits(opts.remotes, ctx),
   };
+}
+
+/**
+ * The external units of remote interfaces (see `LoadProjectOptions.remotes`), by `remoteKey` of their reference; none
+ * without remotes.
+ */
+function externalUnits(
+  remotes: RemoteInterface[] = [],
+  ctx: ReturnType<typeof createParseContext>,
+): Pick<Project, 'external'> {
+  if (!remotes.length) return {};
+  const out = new Map<string, UnitDecl>();
+  for (const r of remotes) {
+    const unit: UnitDecl =
+      r.kind === 'workflow'
+        ? parseWorkflowFile(r.ref, r.text, ctx)
+        : parseActionFile(r.ref, r.ref, r.text, ctx);
+    out.set(remoteKey(r.ref), { ...unit, external: true });
+  }
+  return { external: out };
 }
