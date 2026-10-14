@@ -243,11 +243,14 @@ interface RawScalar {
   escapes: boolean;
   /** Where the value starts: past the opening quote of a quoted scalar, or past the header line of a block scalar. */
   open: number;
+  /** Where the value ends: at the closing quote of a quoted scalar. */
+  close: number;
 }
 
 function rawScalar(source: SourceFile, node: Scalar): RawScalar {
   const [start, end] = node.range ?? [0, 0];
   const raw = source.text.slice(start, end);
+  const quoted = node.type === 'QUOTE_SINGLE' || node.type === 'QUOTE_DOUBLE';
   return {
     source,
     start,
@@ -255,17 +258,20 @@ function rawScalar(source: SourceFile, node: Scalar): RawScalar {
     quote: node.type === 'QUOTE_SINGLE' ? "''" : "'",
     escapes: node.type === 'QUOTE_DOUBLE',
     open: valueStart(node.type, raw),
+    close: quoted ? raw.length - 1 : raw.length,
   };
 }
 
 /**
  * Where a scalar's value starts in its source. A block scalar's range includes its header line (`|`, `>`, their
  * indicators and a comment), whose text is not in the value: a `'`, `${{` or copy of an expression there is skipped.
+ * A block that ends the file on its header line has an empty value, which starts past the header.
  */
 function valueStart(type: Scalar['type'], raw: string): number {
   if (type === 'QUOTE_SINGLE' || type === 'QUOTE_DOUBLE') return 1;
-  if (type === 'BLOCK_LITERAL' || type === 'BLOCK_FOLDED') return raw.indexOf('\n') + 1;
-  return 0;
+  if (type !== 'BLOCK_LITERAL' && type !== 'BLOCK_FOLDED') return 0;
+  const headerEnd = raw.indexOf('\n');
+  return headerEnd < 0 ? raw.length : headerEnd + 1;
 }
 
 /**
@@ -276,13 +282,15 @@ function conditionSegment(s: RawScalar, text: string): ExprSegment {
   return locateExpression(s, skipSpace(s, s.open), parseExpression(text.trim()), false).segment;
 }
 
-/** Each `${{ }}` is found after the one before it ends, so a `${{` inside a string literal does not start one. */
+/**
+ * Each `${{ }}` is found after the one before it ends, so a `${{` inside a string literal does not start one. It is
+ * found as the value reads it, which finds each one the value holds: a double-quoted scalar may write it as escapes
+ * (`\x24{{`) or across a `\` line break.
+ */
 function templateSegments(s: RawScalar, templated: TemplateSegment[]): ExprSegment[] {
   let searchFrom = s.open;
   return templated.map((seg) => {
-    const open = s.raw.indexOf('${{', searchFrom);
-    if (open < 0) return locateExpression(s, seg.innerStart - seg.start, seg.expr, true).segment;
-    const located = locateExpression(s, skipSpace(s, open + 3), seg.expr, true);
+    const located = locateExpression(s, skipSpace(s, pastWritten(s, '${{', searchFrom)), seg.expr, true);
     searchFrom = located.end;
     return located.segment;
   });
@@ -322,11 +330,56 @@ function escapesSpace(esc: RegExpExecArray): boolean {
 const escapedCode = (esc: RegExpExecArray) => Number.parseInt(esc[1] ?? esc[2] ?? esc[3] ?? '0', 16);
 
 /**
+ * The character an escape spells as the value reads it: `\x2e` is a `.`, `\U0001002e` is not, and a one-character
+ * escape (`\0`, `\"`) reads as a control character, which no delimiter or name is; YAML decodes no code past U+10FFFF.
+ */
+const escapedChar = (esc: RegExpExecArray) => String.fromCodePoint(Math.min(escapedCode(esc), 0x10ffff));
+
+/** The character at `at` as the value reads it, and its length as written: an escape's in a double-quoted scalar. */
+function charAt(s: RawScalar, at: number): [string, number] {
+  const esc = s.escapes ? ESCAPE_AT_START.exec(s.raw.slice(at, at + 10)) : null;
+  return esc ? [escapedChar(esc), esc[0].length] : [s.raw[at] ?? '', 1];
+}
+
+/**
+ * The length of `text` written at `at` as the value reads it, or 0 when it is not there. A double-quoted scalar may
+ * write its characters as escapes (`\x7d` for `}`) and join them across lines with a `\` line break, which the value
+ * reads as nothing, with the next line's indentation.
+ */
+function writtenLength(s: RawScalar, at: number, text: string): number {
+  let i = at;
+  for (let n = 0; n < text.length; n++) {
+    if (n > 0) i = pastJoins(s, i);
+    const [char, length] = charAt(s, i);
+    if (char !== text[n]) return 0;
+    i += length;
+  }
+  return i - at;
+}
+
+/** Past the `\` line breaks at `at` in a double-quoted scalar, each with the next line's indentation. */
+function pastJoins(s: RawScalar, at: number): number {
+  let i = at;
+  while (s.escapes && s.raw[i] === '\\' && /^\r?\n/.test(s.raw.slice(i + 1, i + 3))) {
+    i = s.raw.indexOf('\n', i) + 1;
+    while (s.raw[i] === ' ' || s.raw[i] === '\t') i++;
+  }
+  return i;
+}
+
+/** Past the first `text` written from `from` as `writtenLength` reads it, or at the end of the value without one. */
+function pastWritten(s: RawScalar, text: string, from: number): number {
+  let i = from;
+  while (i < s.close && !writtenLength(s, i, text)) i += charAt(s, i)[1];
+  return i + writtenLength(s, i, text);
+}
+
+/**
  * Locates the expression that starts at `from` in the raw scalar. Offsets in the decoded value drift from the source in
  * folded and literal blocks, quoted scalars with escapes and CRLF files, so each reference is found by its own text, in
  * the order they are written, within the expression and outside its string literals (a copy of the text there is not
  * the reference). A reference the source spells with an escape (`\x62` for `b` in a double-quoted scalar) keeps the
- * expression's own offsets.
+ * expression's own offsets. The expression ends where the source ends it, before its `}}` or the end of the value.
  */
 function locateExpression(
   s: RawScalar,
@@ -334,7 +387,7 @@ function locateExpression(
   expr: ParsedExpression,
   closes: boolean,
 ): { segment: ExprSegment; end: number } {
-  const scan = scanExpression(s.raw, from, s.quote, closes);
+  const scan = scanExpression(s, from, closes);
   const at = s.start + from;
   let cursor = from;
   const locs = new Map<ExprRef, Loc>();
@@ -350,7 +403,22 @@ function locateExpression(
     locs.set(r, s.source.loc(start, end));
   }
   const refs = expr.refs.map((r) => ({ ...r, loc: locs.get(r)! }));
-  return { segment: { expr, loc: s.source.loc(at, at + expr.source.length), refs }, end: scan.end };
+  const end = s.start + expressionEnd(s, from, scan.end);
+  return { segment: { expr, loc: s.source.loc(at, end), refs }, end: scan.end };
+}
+
+/**
+ * Where the expression from `from` ends before `to`: past its last character that is not a space, as the decoded
+ * value's `trim()` leaves it. An escape is one character: `\\t` is a `\` and a `t`, not a tab.
+ */
+function expressionEnd(s: RawScalar, from: number, to: number): number {
+  let end = from;
+  for (let i = from; i < to; ) {
+    const space = spaceLength(s, i);
+    i += space || charAt(s, i)[1];
+    if (!space) end = i;
+  }
+  return end;
 }
 
 /**
@@ -401,37 +469,45 @@ interface RawExpression {
 }
 
 /**
- * Scans an expression the way `findTemplateSegments` scans the decoded value: `quote` opens and closes a string, and a
- * doubled one inside it is an escaped quote. With `closes`, the expression ends at the first `}}` outside a string;
- * otherwise (a bare `if:`) at the end of the scalar.
+ * Scans an expression the way `findTemplateSegments` scans the decoded value, reading each delimiter as `writtenLength`
+ * does: the scalar's `quote` opens and closes a string, and a doubled one inside it is an escaped quote. With `closes`,
+ * the expression ends at the first `}}` outside a string; otherwise (a bare `if:`), and without one, at the end of the
+ * value.
  */
-function scanExpression(raw: string, from: number, quote: string, closes: boolean): RawExpression {
+function scanExpression(s: RawScalar, from: number, closes: boolean): RawExpression {
   const strings: [number, number][] = [];
   let i = from;
-  while (i < raw.length) {
-    if (raw.startsWith(quote, i)) {
-      const end = stringEnd(raw, i + quote.length, quote);
+  while (i < s.close) {
+    const quote = writtenLength(s, i, s.quote);
+    if (quote) {
+      const end = stringEnd(s, i + quote);
       strings.push([i, end]);
       i = end;
-    } else if (closes && raw.startsWith('}}', i)) {
+    } else if (closes && writtenLength(s, i, '}}')) {
       return { end: i, strings };
     } else {
-      i++;
+      i += charAt(s, i)[1];
     }
   }
-  return { end: raw.length, strings };
+  return { end: s.close, strings };
 }
 
-/** Past the quote that closes the string whose text starts at `i`, or the end of the scalar when none does. */
-function stringEnd(raw: string, i: number, quote: string): number {
-  let at = raw.indexOf(quote, i);
-  while (at >= 0 && raw.startsWith(quote, at + quote.length)) at = raw.indexOf(quote, at + 2 * quote.length);
-  return at < 0 ? raw.length : at + quote.length;
+/** Past the quote that closes the string whose text starts at `from`, or the end of the value when none does. */
+function stringEnd(s: RawScalar, from: number): number {
+  let i = from;
+  while (i < s.close) {
+    const doubled = writtenLength(s, i, s.quote.repeat(2));
+    const quote = doubled ? 0 : writtenLength(s, i, s.quote);
+    if (quote) return i + quote;
+    i += doubled || charAt(s, i)[1];
+  }
+  return s.close;
 }
 
 /**
  * The first copy of `text` from `from` that ends within the expression, does not start inside one of its strings and
- * does not continue a name or property chain: in `fromJSON(env.X).inputs.a`, `.inputs.a` is a property, not a reference.
+ * does not continue a name or property chain: in `fromJSON(env.X).inputs.a` and `fromJSON(env.X). inputs.a`,
+ * `inputs.a` is a property, not a reference.
  */
 function indexOutside(s: RawScalar, text: string, from: number, scan: RawExpression): number {
   let at = s.raw.indexOf(text, from);
@@ -445,23 +521,48 @@ function indexOutside(s: RawScalar, text: string, from: number, scan: RawExpress
 
 const NAME_CHAR = /[\w.-]/;
 
-/** A `\` escape of a double-quoted scalar that ends the text, its backslash not itself escaped, with its hex digits. */
+/**
+ * A `\` escape of a double-quoted scalar that ends the text, its backslash not itself escaped: its hex digits, or the one
+ * character after the `\` (a space or a line break too), in the groups of `ESCAPE_AT_START`.
+ */
 const ESCAPE_AT_END =
-  /(?:^|[^\\])(?:\\\\)*\\(?:[0abtnvfreN_LP]|x([\dA-Fa-f]{2})|u([\dA-Fa-f]{4})|U([\dA-Fa-f]{8}))$/;
+  /(?:^|[^\\])(?:\\\\)*\\(?:x([\dA-Fa-f]{2})|u([\dA-Fa-f]{4})|U([\dA-Fa-f]{8})|([0abtnvfreN_LP \t\n\r]))$/;
 
 /**
- * Whether the character before `at` continues a name or property chain (`.`, a word character or `-`). A double-quoted
- * scalar may write that character as an escape.
+ * Whether the text at `at` continues a name or property chain: the character before it is `.`, a word character or `-`,
+ * or it is a `.` before spaces and line breaks (`fromJSON(env.X). inputs.a`, or a `.` that ends a line). A
+ * double-quoted scalar may write those characters as escapes, and join the lines with a `\`.
  */
 function continuesName(s: RawScalar, at: number): boolean {
-  const escaped = s.escapes ? ESCAPE_AT_END.exec(s.raw.slice(Math.max(0, at - 16), at)) : null;
-  return escaped ? escapesNameChar(escaped) : NAME_CHAR.test(s.raw[at - 1] ?? '');
+  const start = spaceStart(s, at);
+  const before = charBefore(s, start);
+  return start < at ? before === '.' : NAME_CHAR.test(before);
 }
 
-/** Whether an escape stands for a name character: `\x2e` is a `.`, and a letter escape (`\t`) a control or space. */
-function escapesNameChar(hex: RegExpExecArray): boolean {
-  const code = escapedCode(hex);
-  return code < 128 && NAME_CHAR.test(String.fromCharCode(code));
+/** Where the spaces and line breaks before `at` start, within the value: a block scalar's header line is not in it. */
+function spaceStart(s: RawScalar, at: number): number {
+  let i = at;
+  for (let n = spaceLengthBefore(s, i); n > 0 && i - n >= s.open; n = spaceLengthBefore(s, i)) i -= n;
+  return i;
+}
+
+/** The length of the space that ends at `at`: a character, or an escape that stands for one; 0 for anything else. */
+function spaceLengthBefore(s: RawScalar, at: number): number {
+  const esc = escapeBefore(s, at);
+  // None of the characters after an escape's `\` is a `\`.
+  if (esc) return escapesSpace(esc) ? esc[0].length - esc[0].lastIndexOf('\\') : 0;
+  return /\s/.test(s.raw[at - 1] ?? '') ? 1 : 0;
+}
+
+/** The character before `at` as the value reads it: a double-quoted scalar may write it as an escape. */
+function charBefore(s: RawScalar, at: number): string {
+  const esc = escapeBefore(s, at);
+  return esc ? escapedChar(esc) : (s.raw[at - 1] ?? '');
+}
+
+/** The escape that ends at `at`, in a double-quoted scalar. */
+function escapeBefore(s: RawScalar, at: number): RegExpExecArray | null {
+  return s.escapes ? ESCAPE_AT_END.exec(s.raw.slice(Math.max(0, at - 16), at)) : null;
 }
 
 // ---------------------------------------------------------------------------
