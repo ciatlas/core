@@ -311,6 +311,17 @@ export const known = (value: Json, taint: Taint[] = []): EvalValue => ({ known: 
 /** Supplies values for context references. Return `undefined` for "not statically known". */
 export type ContextResolver = (ref: { context: string; path: string[] }) => EvalValue | undefined;
 
+/**
+ * Values for the functions whose result only the run knows (`RUNTIME_FUNCTIONS`), by name in lower case, with their
+ * evaluated arguments. `undefined` leaves the call unknown, as it is without the option.
+ */
+export type RuntimeFunctions = (name: string, args: EvalValue[]) => EvalValue | undefined;
+
+export interface EvaluateOptions {
+  /** How the run answers `success()`, `failure()`, `cancelled()` and `hashFiles(…)`; a simulator of one run has them. */
+  runtime?: RuntimeFunctions;
+}
+
 const mergeTaint = (...vals: EvalValue[]): Taint[] => {
   const out: Taint[] = [];
   for (const v of vals) for (const t of v.taint) if (!out.some((o) => o.key === t.key)) out.push(t);
@@ -406,18 +417,18 @@ function literalToJson(lit: Literal): Json {
 }
 
 /** Evaluates as much of the expression as possible; anything that depends on runtime state yields `known: false`. */
-export function evaluate(e: Expr, resolve: ContextResolver): EvalValue {
+export function evaluate(e: Expr, resolve: ContextResolver, options: EvaluateOptions = {}): EvalValue {
   if (e instanceof Literal) return known(literalToJson(e));
-  if (e instanceof Grouping) return evaluate(e.group, resolve);
+  if (e instanceof Grouping) return evaluate(e.group, resolve, options);
   if (e instanceof ContextAccess || e instanceof IndexAccess) {
-    const chain = refChain(e, resolve);
+    const chain = refChain(e, resolve, options);
     if (chain) {
       const resolved = resolve(chain);
       return resolved ?? UNKNOWN;
     }
     if (e instanceof IndexAccess) {
-      const base = evaluate(e.expr, resolve);
-      const idx = e.index instanceof Star ? undefined : evaluate(e.index, resolve);
+      const base = evaluate(e.expr, resolve, options);
+      const idx = e.index instanceof Star ? undefined : evaluate(e.index, resolve, options);
       if (!base.known || !idx?.known) return { known: false, taint: mergeTaint(base, ...(idx ? [idx] : [])) };
       return known(indexInto(base.value, idx.value), mergeTaint(base, idx));
     }
@@ -426,7 +437,7 @@ export function evaluate(e: Expr, resolve: ContextResolver): EvalValue {
   // Negation, comparisons and boolean functions turn a missing value into a well-defined boolean, so their result
   // carries no taint: `!matrix.x` or `matrix.x != ''` are deliberate presence checks, not empty values.
   if (e instanceof Unary) {
-    const v = evaluate(e.expr, resolve);
+    const v = evaluate(e.expr, resolve, options);
     return v.known ? known(!truthy(v.value)) : UNKNOWN;
   }
   if (e instanceof Logical) {
@@ -435,7 +446,7 @@ export function evaluate(e: Expr, resolve: ContextResolver): EvalValue {
     const isAnd = e.operator.type === TokenType.AND;
     let last: EvalValue = UNKNOWN;
     for (const [i, arg] of e.args.entries()) {
-      const v = evaluate(arg, resolve);
+      const v = evaluate(arg, resolve, options);
       last = v;
       if (!v.known) return v;
       if (isAnd ? !truthy(v.value) : truthy(v.value)) {
@@ -446,8 +457,8 @@ export function evaluate(e: Expr, resolve: ContextResolver): EvalValue {
     return last;
   }
   if (e instanceof Binary) {
-    const l = evaluate(e.left, resolve);
-    const r = evaluate(e.right, resolve);
+    const l = evaluate(e.left, resolve, options);
+    const r = evaluate(e.right, resolve, options);
     const taint: Taint[] = [];
     if (!l.known || !r.known) return UNKNOWN;
     switch (e.operator.type) {
@@ -477,18 +488,22 @@ export function evaluate(e: Expr, resolve: ContextResolver): EvalValue {
         return { known: false, taint };
     }
   }
-  if (e instanceof FunctionCall) return evalCall(e, resolve);
+  if (e instanceof FunctionCall) return evalCall(e, resolve, options);
   return UNKNOWN;
 }
 
-function refChain(e: Expr, resolve: ContextResolver): { context: string; path: string[] } | undefined {
+function refChain(
+  e: Expr,
+  resolve: ContextResolver,
+  options: EvaluateOptions,
+): { context: string; path: string[] } | undefined {
   if (e instanceof ContextAccess) return { context: e.name.lexeme.toLowerCase(), path: [] };
   if (e instanceof IndexAccess) {
-    const base = refChain(e.expr, resolve);
+    const base = refChain(e.expr, resolve, options);
     if (!base) return undefined;
     if (e.index instanceof Star) return undefined;
     if (e.index instanceof Literal) return { ...base, path: [...base.path, toStr(literalToJson(e.index))] };
-    const idx = evaluate(e.index, resolve);
+    const idx = evaluate(e.index, resolve, options);
     if (idx.known && (typeof idx.value === 'string' || typeof idx.value === 'number')) {
       return { ...base, path: [...base.path, String(idx.value)] };
     }
@@ -511,17 +526,30 @@ function indexInto(base: Json, idx: Json): Json {
   return null;
 }
 
-/** Functions whose value depends on the run: the job status and the workspace files. `always()` is always true. */
-const RUNTIME_FUNCTIONS = new Set(['success', 'failure', 'cancelled', 'hashfiles']);
+/**
+ * The functions whose value depends on the run (the job status and the workspace files), by name in lower case;
+ * `always()` is not one, it is always true. Unknown unless `EvaluateOptions.runtime` answers them.
+ */
+export const RUNTIME_FUNCTIONS: ReadonlySet<string> = new Set([
+  'success',
+  'failure',
+  'cancelled',
+  'hashfiles',
+]);
 
-function evalCall(e: FunctionCall, resolve: ContextResolver): EvalValue {
+/** What the run answers for a runtime function; without an answer the call stays unknown, with its arguments' taint. */
+function runtimeCall(name: string, args: EvalValue[], taint: Taint[], options: EvaluateOptions): EvalValue {
+  return options.runtime?.(name, args) ?? { known: false, taint };
+}
+
+function evalCall(e: FunctionCall, resolve: ContextResolver, options: EvaluateOptions): EvalValue {
   const name = e.functionName.lexeme.toLowerCase();
-  const args = e.args.map((a) => evaluate(a, resolve));
+  const args = e.args.map((a) => evaluate(a, resolve, options));
   const taint = mergeTaint(...args);
   const allKnown = args.every((a) => a.known);
   const vals = args.map((a) => (a.known ? a.value : null));
   if (name === 'always') return known(true, taint);
-  if (RUNTIME_FUNCTIONS.has(name)) return { known: false, taint };
+  if (RUNTIME_FUNCTIONS.has(name)) return runtimeCall(name, args, taint, options);
   if (!allKnown) return { known: false, taint };
   switch (name) {
     case 'format': {
@@ -711,27 +739,27 @@ export function fallbacksOf(expr: ParsedExpression): Map<number, Expr> {
  * True when a condition is falsy whatever the runtime-only parts evaluate to — e.g. `always() && matrix.k` in a
  * combination without `k`. Used to decide that a guarded step or job is skipped; values are never derived from it.
  */
-export function definitelyFalsy(e: Expr, resolve: ContextResolver): boolean {
-  if (e instanceof Grouping) return definitelyFalsy(e.group, resolve);
+export function definitelyFalsy(e: Expr, resolve: ContextResolver, options: EvaluateOptions = {}): boolean {
+  if (e instanceof Grouping) return definitelyFalsy(e.group, resolve, options);
   if (e instanceof Logical) {
     return e.operator.type === TokenType.AND
-      ? e.args.some((a) => definitelyFalsy(a, resolve))
-      : e.args.every((a) => definitelyFalsy(a, resolve));
+      ? e.args.some((a) => definitelyFalsy(a, resolve, options))
+      : e.args.every((a) => definitelyFalsy(a, resolve, options));
   }
-  if (e instanceof Unary) return definitelyTruthy(e.expr, resolve);
-  const v = evaluate(e, resolve);
+  if (e instanceof Unary) return definitelyTruthy(e.expr, resolve, options);
+  const v = evaluate(e, resolve, options);
   return v.known && !truthy(v.value);
 }
 
-export function definitelyTruthy(e: Expr, resolve: ContextResolver): boolean {
-  if (e instanceof Grouping) return definitelyTruthy(e.group, resolve);
+export function definitelyTruthy(e: Expr, resolve: ContextResolver, options: EvaluateOptions = {}): boolean {
+  if (e instanceof Grouping) return definitelyTruthy(e.group, resolve, options);
   if (e instanceof Logical) {
     return e.operator.type === TokenType.AND
-      ? e.args.every((a) => definitelyTruthy(a, resolve))
-      : e.args.some((a) => definitelyTruthy(a, resolve));
+      ? e.args.every((a) => definitelyTruthy(a, resolve, options))
+      : e.args.some((a) => definitelyTruthy(a, resolve, options));
   }
-  if (e instanceof Unary) return definitelyFalsy(e.expr, resolve);
-  const v = evaluate(e, resolve);
+  if (e instanceof Unary) return definitelyFalsy(e.expr, resolve, options);
+  const v = evaluate(e, resolve, options);
   return v.known && truthy(v.value);
 }
 
@@ -739,19 +767,23 @@ export function definitelyTruthy(e: Expr, resolve: ContextResolver): boolean {
  * Evaluates a whole YAML scalar that may mix literal text and `${{ }}` segments.
  * A scalar that is exactly one segment keeps the expression's type; otherwise the result is a string.
  */
-export function evaluateTemplate(text: string, resolve: ContextResolver): EvalValue {
+export function evaluateTemplate(
+  text: string,
+  resolve: ContextResolver,
+  options: EvaluateOptions = {},
+): EvalValue {
   const segments = findTemplateSegments(text);
   if (segments.length === 0) return known(text);
   const first = segments[0]!;
   if (segments.length === 1 && first.start === 0 && first.end === text.length) {
-    return first.expr.ast ? evaluate(first.expr.ast, resolve) : UNKNOWN;
+    return first.expr.ast ? evaluate(first.expr.ast, resolve, options) : UNKNOWN;
   }
   let out = '';
   let cursor = 0;
   const parts: EvalValue[] = [];
   for (const seg of segments) {
     out += text.slice(cursor, seg.start);
-    const v = seg.expr.ast ? evaluate(seg.expr.ast, resolve) : UNKNOWN;
+    const v = seg.expr.ast ? evaluate(seg.expr.ast, resolve, options) : UNKNOWN;
     parts.push(v);
     if (!v.known) return { known: false, taint: mergeTaint(...parts) };
     out += toStr(v.value);
