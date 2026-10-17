@@ -524,3 +524,93 @@ describe('SymbolLocator: env, aliases, script outputs and bindings', () => {
     expect(locator.occurrences(sym.jobOutput(ROOT, 'mid', 'result')).map((o) => o.role)).toEqual(['read']);
   });
 });
+
+describe('SymbolLocator: steps and their own env', () => {
+  const S = `${WF}/steps.yml`;
+  const ACT = '.github/actions/act';
+  const ACT_FILE = `${ACT}/action.yml`;
+  const more: Record<string, string> = {
+    [S]: yaml`
+      on: push
+      env:
+        MODE: top
+      jobs:
+        a:
+          runs-on: x
+          env:
+            MODE: job
+          steps:
+            - id: test
+              run: make test
+              continue-on-error: true
+            - env:
+                MODE: step
+                FROM: \${{ env.MODE }}
+                ONLY: x
+                SELF: \${{ env.ONLY }}
+              if: steps.test.outcome == 'failure'
+              run: echo \${{ env.MODE }} \${{ steps.TEST.conclusion }} \${{ toJSON(steps.test) }}
+            - run: echo \${{ env.MODE }} \${{ steps.test.outputs.log }}
+            - uses: ./.github/actions/act
+    `,
+    [ACT_FILE]: yaml`
+      name: act
+      runs:
+        using: composite
+        steps:
+          - id: probe
+            shell: bash
+            env:
+              LEVEL: high
+            run: echo \${{ env.LEVEL }}
+          - shell: bash
+            if: steps.probe.outcome == 'success'
+            run: echo \${{ env.LEVEL }}
+    `,
+  };
+  const loc = new SymbolLocator(load(more).index);
+  const at = (file: string, needle: string, nth = 0) => {
+    const p = positionIn(more[file]!, needle, 0, nth);
+    return loc.at(file, p.line, p.column);
+  };
+  const startOf = (file: string, needle: string, nth = 0) => ({
+    file,
+    ...positionIn(more[file]!, needle, 0, nth),
+  });
+  const roles = (symbol: string) => loc.occurrences(symbol).map((o) => `${o.role} ${where(o.loc)}`);
+
+  it("declares a step's own env, which its other fields read and its own values do not", () => {
+    const own = sym.stepEnv(S, 'a', 1, 'MODE');
+    expect(loc.declarations(own)).toMatchObject([{ kind: 'env', unit: S, loc: startOf(S, 'MODE: step') }]);
+    expect(at(S, 'env.MODE', 1)).toMatchObject({ symbol: own, role: 'read' });
+    // Its values are evaluated before it applies, and the next step does not have it.
+    expect(at(S, 'env.MODE', 0)).toMatchObject({ symbol: sym.env(S, 'a', 'MODE') });
+    expect(at(S, 'env.MODE', 2)).toMatchObject({ symbol: sym.env(S, 'a', 'MODE') });
+    expect(at(S, 'env.ONLY')).toBeUndefined();
+    expect(roles(own)).toEqual([
+      `declaration ${where(startOf(S, 'MODE: step') as Loc)}`,
+      `read ${where(startOf(S, 'env.MODE', 1) as Loc)}`,
+    ]);
+  });
+
+  it('declares a step at its id, which its outcome, its conclusion and the whole step read', () => {
+    const test = sym.step(S, 'a', 'test');
+    expect(loc.declarations(test)).toMatchObject([
+      { kind: 'step', unit: S, loc: startOf(S, 'test', 0), decl: { id: 'test' } },
+    ]);
+    expect(at(S, 'test\n')).toMatchObject({ symbol: test, role: 'declaration' });
+    expect(at(S, 'steps.test.outcome')).toMatchObject({ symbol: test, role: 'read' });
+    expect(at(S, 'steps.TEST.conclusion')).toMatchObject({ symbol: test, role: 'read' });
+    expect(at(S, 'steps.test)')).toMatchObject({ symbol: test, role: 'read' });
+    // An output read is among the step's references, but its position stands for the output.
+    expect(at(S, 'steps.test.outputs.log')).toMatchObject({ symbol: sym.stepOutput(S, 'a', 'test', 'log') });
+    expect(loc.occurrences(test).map((o) => o.role)).toEqual(['declaration', 'read', 'read', 'read', 'read']);
+  });
+
+  it('does the same in a composite action, whose steps belong to no job', () => {
+    expect(at(ACT_FILE, 'env.LEVEL')).toMatchObject({ symbol: sym.stepEnv(ACT, undefined, 0, 'LEVEL') });
+    expect(at(ACT_FILE, 'env.LEVEL', 1)).toBeUndefined();
+    expect(at(ACT_FILE, 'steps.probe.outcome')).toMatchObject({ symbol: sym.step(ACT, undefined, 'probe') });
+    expect(loc.declarations(sym.step(ACT, undefined, 'probe'))).toMatchObject([{ kind: 'step', unit: ACT }]);
+  });
+});
