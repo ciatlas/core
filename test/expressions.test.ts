@@ -9,6 +9,7 @@ import {
   findTemplateSegments,
   known,
   parseExpression,
+  RUNTIME_FUNCTIONS,
   toNumber,
   toStr,
   truthy,
@@ -398,5 +399,57 @@ describe('definitelyFalsy / definitelyTruthy', () => {
     expect(decide('always() && matrix.on')).toEqual({ falsy: false, truthy: true });
     expect(decide('!(always() && matrix.on)')).toEqual({ falsy: true, truthy: false });
     expect(decide('!always()')).toEqual({ falsy: true, truthy: false });
+  });
+});
+
+describe('runtime functions', () => {
+  /** The run answers: it succeeded so far, nothing matches the glob. */
+  const runtime = (name: string, args: ReturnType<typeof known>[]) => {
+    if (name === 'success') return known(true);
+    if (name === 'failure' || name === 'cancelled') return known(false);
+    if (name === 'hashfiles') return known(args.every((a) => a.known) ? '' : 'unknown-args');
+    return undefined;
+  };
+  const resolve: ContextResolver = ({ context, path }) =>
+    context === 'matrix' ? known(path[0] === 'on' ? 'yes' : null) : undefined;
+  const parse = (src: string) => {
+    const p = parseExpression(src);
+    if (!p.ast) throw new Error(p.error?.message);
+    return p.ast;
+  };
+
+  it('names the functions only the run can answer', () => {
+    expect([...RUNTIME_FUNCTIONS]).toEqual(['success', 'failure', 'cancelled', 'hashfiles']);
+  });
+
+  it('answers them through the option, by lower-case name, with the evaluated arguments', () => {
+    expect(evaluate(parse('success()'), resolve, { runtime })).toEqual(known(true));
+    expect(evaluate(parse('Failure() || cancelled()'), resolve, { runtime })).toEqual(known(false));
+    expect(evaluate(parse("hashFiles('**/package-lock.json')"), resolve, { runtime })).toEqual(known(''));
+    expect(evaluate(parse('hashFiles(github.sha)'), resolve, { runtime })).toEqual(known('unknown-args'));
+    expect(evaluate(parse("success() && matrix.on == 'yes'"), resolve, { runtime })).toEqual(known(true));
+  });
+
+  it('keeps a call unknown when the option does not answer it, and without the option', () => {
+    expect(evaluate(parse('success()'), resolve, { runtime: () => undefined }).known).toBe(false);
+    expect(evaluate(parse('success()'), resolve).known).toBe(false);
+    expect(evaluate(parse('success()'), resolve, {}).known).toBe(false);
+  });
+
+  it('leaves always() true whatever the option says', () => {
+    expect(evaluate(parse('always()'), resolve, { runtime: () => known(false) })).toEqual(known(true));
+  });
+
+  it('reaches the truthiness helpers, templates and computed indexes', () => {
+    expect(definitelyTruthy(parse('success() && matrix.on'), resolve, { runtime })).toBe(true);
+    expect(definitelyFalsy(parse('!success()'), resolve, { runtime })).toBe(true);
+    expect(definitelyFalsy(parse('failure() && matrix.on'), resolve, { runtime })).toBe(true);
+    expect(definitelyTruthy(parse('success() && matrix.on'), resolve)).toBe(false);
+    expect(
+      evaluateTemplate("lock-${{ hashFiles('**/lock') }}-${{ success() }}", resolve, { runtime }),
+    ).toEqual(known('lock--true'));
+    expect(evaluate(parse("matrix[format('{0}', success() && 'on')]"), resolve, { runtime })).toEqual(
+      known('yes'),
+    );
   });
 });
