@@ -315,6 +315,14 @@ export const sym = {
       : `${unit}#jobs.${job}.steps.${step}.outputs.${name}`,
   env: (unit: string, job: string | undefined, name: string) =>
     job === undefined ? `${unit}#env.${name}` : `${unit}#jobs.${job}.env.${name}`,
+  /** A step, by its id (in a job, or in an action, which has no jobs). */
+  step: (unit: string, job: string | undefined, id: string) =>
+    job === undefined ? `${unit}#steps.${id}` : `${unit}#jobs.${job}.steps.${id}`,
+  /** A variable of a step's own `env:`, by the step's index: a step needs no id. */
+  stepEnv: (unit: string, job: string | undefined, step: number, name: string) =>
+    job === undefined
+      ? `${unit}#steps[${step}].env.${name}`
+      : `${unit}#jobs.${job}.steps[${step}].env.${name}`,
   matrix: (unit: string, job: string, key: string) => `${unit}#jobs.${job}.matrix.${key}`,
   var: (name: string) => `vars.${name}`,
   remote: (raw: string) => `remote:${raw}`,

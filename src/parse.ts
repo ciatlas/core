@@ -65,6 +65,12 @@ interface Unit {
 
 const pathKey = (p: YPath) => JSON.stringify(p);
 
+/** Where a step's `id:` key and its value are written. */
+const idLocs = (source: SourceFile, pair: { key: unknown; value: unknown }) => ({
+  idLoc: nodeLoc(source, pair.key as Node),
+  idValueLoc: nodeLoc(source, pair.value as Node),
+});
+
 function nodeLoc(source: SourceFile, node: Node | null | undefined): Loc {
   const r = node?.range;
   if (!r) return source.loc(0, 0);
@@ -765,7 +771,7 @@ function steps(
     void at;
     return {
       index,
-      ...(id ? { id, idLoc: nodeLoc(unit.source, idPair?.key) } : {}),
+      ...(id ? { id, ...idLocs(unit.source, idPair!) } : {}),
       ...(name ? { name } : {}),
       loc: nodeLoc(unit.source, item as Node),
       ...(usesRaw ? { uses: classifyUses(usesRaw, 'step', nodeLoc(unit.source, usesNode), ctx) } : {}),

@@ -24,7 +24,10 @@ export type Declaration =
   | { kind: 'env'; unit: string; loc: Loc; decl: Binding }
   /** A matrix dimension or a key of an `include` entry. */
   | { kind: 'matrix'; unit: string; loc: Loc; job: JobDecl; key: string }
-  /** A step whose outputs are written by its script or by a remote action, so no output is declared. */
+  /**
+   * A step, at its `id:`: what `steps.<id>.outcome` and `.conclusion` read, and the closest definition of outputs its
+   * script or a remote action writes, which nothing declares.
+   */
   | { kind: 'step'; unit: string; loc: Loc; decl: StepDecl }
   /** A workflow or action file (what `uses:` points at). */
   | { kind: 'unit'; unit: string; loc: Loc; decl: UnitDecl };
@@ -46,6 +49,12 @@ export interface Occurrence {
   symbol: string;
   loc: Loc;
   role: OccurrenceRole;
+}
+
+/** The step of the site's job (or action) with an id, which GitHub matches case-insensitively. */
+function stepNamed(unit: UnitDecl, site: ExprSite, id: string | undefined): StepDecl | undefined {
+  const steps = unit.kind === 'action' ? unit.steps : site.job ? (unit.jobs[site.job]?.steps ?? []) : [];
+  return id === undefined ? undefined : steps.find((s) => s.id?.toLowerCase() === id.toLowerCase());
 }
 
 const fileStart = (file: string): Loc => ({ file, line: 1, column: 1, endLine: 1, endColumn: 1 });
@@ -200,13 +209,31 @@ export class SymbolLocator {
   }
 
   private indexStep(unit: UnitDecl, job: JobDecl | undefined, step: StepDecl) {
-    if (!step.uses) return;
+    const u = unit.path;
+    for (const e of Object.values(step.env))
+      this.declare(sym.stepEnv(u, job?.id, step.index, e.name), {
+        kind: 'env',
+        unit: u,
+        loc: e.loc,
+        decl: e,
+      });
+    if (step.id && step.idValueLoc)
+      this.declare(sym.step(u, job?.id, step.id), {
+        kind: 'step',
+        unit: u,
+        loc: step.idValueLoc,
+        decl: step,
+      });
+    if (step.uses) this.indexUses(unit, job, step, step.uses);
+  }
+
+  private indexUses(unit: UnitDecl, job: JobDecl | undefined, step: StepDecl, uses: UsesRef) {
     const action = this.index.actionOf(step);
     if (!action) {
-      this.addRemote(step.uses);
+      this.addRemote(uses);
       return;
     }
-    this.add(action.path, step.uses.loc, 'uses');
+    this.add(action.path, uses.loc, 'uses');
     for (const b of Object.values(step.with)) {
       const decl = lookup(action.inputs, b.name);
       if (decl) this.add(sym.input(action.path, decl.name), b.loc, 'binding');
@@ -226,22 +253,40 @@ export class SymbolLocator {
   }
 
   private indexRef(unit: UnitDecl, site: ExprSite, ref: LocatedRef) {
-    const resolved = this.index.resolveRef(unit, site, ref);
+    const resolved = this.index.resolveRef(unit, site, ref) ?? this.stepEnvOf(unit, site, ref);
     if (!resolved) {
       // A whole object (`toJSON(needs.build.outputs)`, `steps.meta.outputs`) reads each output (see `ProjectIndex.readsOf`):
       // it is a reference to each of them, but the position itself stands for the job (or for nothing).
       for (const s of this.index.readsOf(unit, site, ref)) this.add(s, ref.loc, 'read', false);
     }
+    if (ref.context === 'steps') this.indexStepRead(unit, site, ref, resolved);
     const symbol = resolved ?? this.jobOf(unit, site, ref);
-    if (!symbol) return;
-    this.add(symbol, ref.loc, 'read');
-    // Outputs of a `run:` step (or a remote action) are not declared anywhere; the step is the closest definition.
-    if (ref.context === 'steps') {
-      const steps = unit.kind === 'action' ? unit.steps : site.job ? (unit.jobs[site.job]?.steps ?? []) : [];
-      const step = steps.find((s) => s.id?.toLowerCase() === ref.path[0]?.toLowerCase());
-      if (step?.idLoc && !this.index.actionOf(step))
-        this.declare(symbol, { kind: 'step', unit: unit.path, loc: step.idLoc, decl: step }, false);
-    }
+    if (symbol) this.add(symbol, ref.loc, 'read');
+  }
+
+  /**
+   * `env.<name>` that the step's own `env:` sets. The graph leaves it unresolved, since it only shadows the job's and
+   * the workflow's for the rest of the step; its own values are evaluated before it applies, so they read the outer env.
+   */
+  private stepEnvOf(unit: UnitDecl, site: ExprSite, ref: LocatedRef): string | undefined {
+    const [name] = ref.path;
+    if (ref.context !== 'env' || site.field === 'step.env' || name === undefined) return undefined;
+    const step = this.index.stepOf(unit, site);
+    const e = step && lookup(step.env, name);
+    return e && sym.stepEnv(unit.path, site.job, step.index, e.name);
+  }
+
+  /**
+   * A read of `steps.<id>`: `.outcome`, `.conclusion` or the whole step stand for the step; an output read is one of
+   * its references too, and outputs of a `run:` step (or a remote action), which nothing declares, are declared there.
+   */
+  private indexStepRead(unit: UnitDecl, site: ExprSite, ref: LocatedRef, output: string | undefined) {
+    const step = stepNamed(unit, site, ref.path[0]);
+    if (!step?.id) return;
+    const outputs = ref.path[1]?.toLowerCase() === 'outputs';
+    this.add(sym.step(unit.path, site.job, step.id), ref.loc, 'read', !outputs);
+    if (output && step.idLoc && !this.index.actionOf(step))
+      this.declare(output, { kind: 'step', unit: unit.path, loc: step.idLoc, decl: step }, false);
   }
 
   /** `needs.<job>.result` and similar reads that name a job but no output. */

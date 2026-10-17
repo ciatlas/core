@@ -164,6 +164,8 @@ export interface StepDecl {
   index: number;
   id?: string;
   idLoc?: Loc;
+  /** Where the id itself is written: the value of `id:`. */
+  idValueLoc?: Loc;
   name?: string;
   loc: Loc;
   uses?: UsesRef;
