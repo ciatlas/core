@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.0](https://github.com/ciatlas/core/compare/v2.2.0...v2.3.0) (2026-10-17)
+
+
+### Features
+
+* **locate:** a step and a step's own env as symbols ([#46](https://github.com/ciatlas/core/issues/46)) ([2875c47](https://github.com/ciatlas/core/commit/2875c4705e9c662c473fc7fc1c58a41c8cdebef9))
+
 ## [2.2.0](https://github.com/ciatlas/core/compare/v2.1.0...v2.2.0) (2026-10-14)
 
 
