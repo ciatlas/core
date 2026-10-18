@@ -1,4 +1,3 @@
-import { posix } from 'node:path';
 import {
   isAlias,
   isMap,
@@ -40,6 +39,7 @@ import type {
   UsesRef,
   WorkflowDecl,
 } from './ir';
+import { posixNormalize } from './posix';
 import { type Loc, SourceFile } from './source';
 import { trimChar } from './text';
 
@@ -669,7 +669,7 @@ const WORKFLOW_FILE = /^\.github\/workflows\/[^/]+\.ya?ml$/;
 
 /** `a/./b/` → `a/b`, `` → `.`. Anything escaping the root (`../x`) keeps its `..` and is never read. */
 export function normalizeRelative(path: string): string {
-  return trimChar(posix.normalize(trimChar(path, '/') || '.'), '/') || '.';
+  return trimChar(posixNormalize(trimChar(path, '/') || '.'), '/') || '.';
 }
 
 export function classifyUses(raw: string, at: 'job' | 'step', loc: Loc, ctx: ParseContext): UsesRef {

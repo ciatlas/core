@@ -25,6 +25,13 @@ It ships its TypeScript source and no build: bundle it with the `source` export 
 `conditions: ['source']`, TypeScript `customConditions: ["source"]`). Versions follow Semantic Versioning: a breaking
 change is a major release, also before 1.0 (up to 0.4.0 one could come in a minor release).
 
+### In the browser
+
+The package's `browser` export condition (or `@ciatlas/core/browser`) serves an entry without `node:fs`, `node:path`
+or git: the same parser, graph and queries, and a `loadProject` that takes the files it is given through
+`memoryFileSystem`. Bundlers that target the browser pick the condition on their own; `overlayFileSystem` layers
+unsaved edits over it.
+
 ## Development
 
 ```sh
