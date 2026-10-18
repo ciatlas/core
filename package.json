@@ -15,8 +15,16 @@
   },
   "exports": {
     ".": {
+      "browser": {
+        "source": "./src/index.browser.ts",
+        "types": "./src/index.browser.ts"
+      },
       "source": "./src/index.ts",
       "types": "./src/index.ts"
+    },
+    "./browser": {
+      "source": "./src/index.browser.ts",
+      "types": "./src/index.browser.ts"
     }
   },
   "files": [

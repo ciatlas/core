@@ -7,6 +7,7 @@ export * from './ir';
 export * from './locate';
 export * from './logger';
 export * from './matrix';
+export * from './node-fs';
 export {
   classifyUses,
   createParseContext,

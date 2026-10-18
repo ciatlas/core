@@ -1,5 +1,5 @@
-import { posix } from 'node:path';
 import { normalizeRelative } from './parse';
+import { posixBasename, posixJoin } from './posix';
 
 /** A workspace path an inline script creates or writes into, as far as a shallow reading of its commands shows. */
 export interface ScriptWrite {
@@ -171,11 +171,11 @@ function resolveWord(word: string, cwd: string | undefined): string | undefined 
   }
   if (base === undefined || w === '' || /[$`*?[\]{}~]/.test(w) || w.startsWith('/')) return undefined;
   if (/^[A-Za-z][\w+.-]*:/.test(w)) return undefined; // a URL, `C:/...`, `git@host:...`
-  const path = normalizeRelative(posix.join(base, w));
+  const path = normalizeRelative(posixJoin(base, w));
   return escapes(path) ? undefined : path;
 }
 
-const basename = (word: string) => posix.basename(word.replaceAll('\\', '/').replace(/\/+$/, ''));
+const basename = (word: string) => posixBasename(word.replaceAll('\\', '/').replace(/\/+$/, ''));
 
 /**
  * Paths an inline script writes to: destinations of copies, moves, links and `mkdir`, clones and worktrees,

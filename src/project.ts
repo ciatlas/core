@@ -1,18 +1,14 @@
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { matchesPattern } from './glob';
 import { type Project, remoteKey, type UnverifiedUse } from './graph';
 import type { ActionDecl, JobDecl, UnitDecl, WorkflowDecl } from './ir';
 import type { Logger } from './logger';
 import { silentLogger } from './logger';
 import { createParseContext, parseActionFile, parseWorkflowFile } from './parse';
+import { posixIsAbsolute } from './posix';
 import { validateSchema } from './validate';
 import { workspaceResolver } from './workspace';
 
 export const WORKFLOWS_DIR = '.github/workflows';
-/** How many links one path may go through (the OS's ELOOP limit), and how many linked directories one walk expands. */
-const MAX_LINKS = 40;
-const MAX_LINKED_DIRS = 1_000;
 export const ACTIONS_DIR = '.github/actions';
 
 /** Read-only file access, so the loader runs on disk and against in-memory fixtures alike. */
@@ -25,108 +21,7 @@ export interface FileSystem {
   isDir(path: string): boolean;
 }
 
-const toPosix = (p: string) => p.split('\\').join('/');
-
-/**
- * Whether `abs` (after following symlinks) is inside the repository at `root` and outside its `.git` directory. A
- * checkout can contain symlinks; this keeps a caller from reading e.g. /etc or the persisted git credentials, and from
- * writing through a link. A path that does not exist yet is judged by its nearest existing parent.
- */
-export function insideRepository(root: string, abs: string): boolean {
-  let realRoot: string;
-  try {
-    realRoot = realpathSync(root);
-  } catch {
-    realRoot = resolve(root);
-  }
-  let target = resolve(abs);
-  let rest = '';
-  for (;;) {
-    try {
-      target = join(realpathSync(target), rest);
-      break;
-    } catch {
-      const parent = dirname(target);
-      if (parent === target) return false;
-      rest = join(basename(target), rest);
-      target = parent;
-    }
-  }
-  const rel = toPosix(relative(realRoot, target));
-  if (rel === '') return true;
-  // `..` as a whole segment: `..hidden` is a name inside the repository.
-  if (escapesRoot(rel)) return false;
-  return rel !== '.git' && !rel.startsWith('.git/');
-}
-
-export function nodeFileSystem(root: string): FileSystem {
-  const abs = (p: string) => join(root, p);
-  const listings = new Map<string, Set<string>>();
-  /** On case-insensitive file systems, `.GitHub/x.YML` opens `.github/x.yml`; GitHub (Linux) would not find it. */
-  const exactCase = (p: string): boolean => {
-    let dir = root;
-    for (const part of toPosix(p)
-      .split('/')
-      .filter((x) => x && x !== '.')) {
-      if (part === '..') return false;
-      let names = listings.get(dir);
-      if (!names) {
-        try {
-          names = new Set(readdirSync(dir));
-        } catch {
-          return false;
-        }
-        listings.set(dir, names);
-      }
-      if (!names.has(part)) return false;
-      dir = join(dir, part);
-    }
-    return true;
-  };
-  /** Follows symlinks and accepts only existing targets inside the repository (see insideRepository). */
-  const inside = (p: string): boolean => existsSync(abs(p)) && exactCase(p) && insideRepository(root, abs(p));
-  const isFile = (p: string) => inside(p) && statSync(abs(p)).isFile();
-  return {
-    read: (p) => (isFile(p) ? readFileSync(abs(p), 'utf8') : undefined),
-    list: (dir) => {
-      if (!inside(dir) || !statSync(abs(dir)).isDirectory()) return [];
-      return readdirSync(abs(dir))
-        .map((name) => toPosix(join(dir, name)))
-        .filter((f) => isFile(f));
-    },
-    walk: (dir) => {
-      if (!inside(dir) || !statSync(abs(dir)).isDirectory()) return [];
-      // Breadth first, like readdirSync's `recursive`, which follows linked directories without noticing a link to a
-      // directory that holds it: such a loop is not entered again (other links to the same directory still are). As in
-      // gitFileSystem, linked directories nest no deeper than the OS follows links and are expanded a bounded number of
-      // times, so links that fan out cannot multiply the walk; the shallowest paths are kept.
-      const out: string[] = [];
-      let linked = 0;
-      const queue: { dir: string; above: Set<string>; links: number }[] = [
-        { dir: toPosix(dir), above: new Set(), links: 0 },
-      ];
-      for (let i = 0; i < queue.length; i++) {
-        const next = queue[i]!;
-        const real = realpathSync(abs(next.dir));
-        if (next.above.has(real)) continue;
-        const above = new Set(next.above).add(real);
-        for (const name of readdirSync(abs(next.dir))) {
-          // Dependencies and git internals never hold workflows or published actions.
-          if (name === 'node_modules' || name === '.git') continue;
-          const p = toPosix(join(next.dir, name));
-          if (isFile(p)) out.push(p);
-          else if (inside(p) && statSync(abs(p)).isDirectory()) {
-            const link = lstatSync(abs(p)).isSymbolicLink();
-            if (link && (next.links >= MAX_LINKS || linked++ >= MAX_LINKED_DIRS)) continue;
-            queue.push({ dir: p, above, links: next.links + (link ? 1 : 0) });
-          }
-        }
-      }
-      return out;
-    },
-    isDir: (p) => inside(p) && statSync(abs(p)).isDirectory(),
-  };
-}
+export const toPosix = (p: string): string => p.split('\\').join('/');
 
 /** The prefix of the paths below `dir`: `a/` for `a`, `a/`, `./a` or `./a/`, and `` for the root (`.`, `./`, ``). */
 const dirPrefix = (dir: string) => {
@@ -208,26 +103,23 @@ const isWorkflowFile = (p: string) => /^\.github\/workflows\/[^/]+\.ya?ml$/i.tes
 const isCallableWorkflowPath = (p: string) =>
   /^\.github\/workflows\/[^/]+\.ya?ml$/.test(p.replace(/\.ya?ml$/i, (e) => e.toLowerCase()));
 /** Local `uses:` targets must stay inside the repository. */
-const escapesRoot = (p: string) => p === '..' || p.startsWith('../') || isAbsolute(p);
+const escapesRoot = (p: string) => p === '..' || p.startsWith('../') || posixIsAbsolute(p);
 
-/** Detects `owner/repo` from GITHUB_REPOSITORY or the `origin` remote in .git/config. */
-export function detectRepository(
-  root: string,
-  env: Record<string, string | undefined> = process.env,
-): string | undefined {
-  if (env.GITHUB_REPOSITORY) return env.GITHUB_REPOSITORY;
-  const gitConfig = join(root, '.git', 'config');
-  if (!existsSync(gitConfig)) return undefined;
-  const text = readFileSync(gitConfig, 'utf8');
-  // `url` at the start of a line, not the end of `pushurl`.
-  const origin = /\[remote "origin"\][^[]*?^[ \t]*url\s*=\s*(\S+)/m.exec(text)?.[1];
-  const m = origin && /github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/.exec(origin);
-  return m ? m[1] : undefined;
+/** What a host supplies to the loader: its file system when the caller gives none, and its path arithmetic. */
+export interface ProjectHost {
+  /** The file system for `root` when `LoadProjectOptions.fs` is absent; a host without one makes `fs` required. */
+  defaultFs?: (root: string) => FileSystem;
+  /** `p` (relative to `root`, or absolute on the host) as a repository-relative POSIX path; `..` when it escapes. */
+  relativeTo: (root: string, p: string) => string;
 }
 
-export function loadProject(opts: LoadProjectOptions): Project {
+/** Loads a project through a host (`loadProject` of the Node and browser entries wire one in). */
+// The body of 2.4.0's loadProject, unchanged behind the host; splitting it is a change of its own.
+// fallow-ignore-next-line complexity
+export function loadProjectWith(opts: LoadProjectOptions, host: ProjectHost): Project {
   const logger = (opts.logger ?? silentLogger).child('load');
-  const fs = opts.fs ?? nodeFileSystem(opts.root);
+  const fs = opts.fs ?? host.defaultFs?.(opts.root);
+  if (!fs) throw new Error('loadProject needs a file system here: pass fs (memoryFileSystem(files))');
   const ctx = createParseContext(opts.repository);
   const workflows = new Map<string, WorkflowDecl>();
   const actions = new Map<string, ActionDecl>();
@@ -297,7 +189,7 @@ export function loadProject(opts: LoadProjectOptions): Project {
   let wholeRepository = false;
   const ignoredTargets: string[] = [];
   for (const p of opts.paths ?? []) {
-    const rel = toPosix(relative(opts.root, resolve(opts.root, p))) || '.';
+    const rel = host.relativeTo(opts.root, p) || '.';
     if (rel === '.' || rel === '') {
       wholeRepository = true;
       continue;

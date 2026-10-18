@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
   private?: boolean;
   scripts?: Record<string, string>;
-  exports: Record<string, Record<string, string>>;
+  exports: Record<string, Record<string, unknown>>;
   files: string[];
 };
 
@@ -24,7 +24,15 @@ describe('package manifest', () => {
   });
 
   it('ships its TypeScript source, which consumers bundle with the `source` condition', () => {
-    expect(manifest.exports['.']).toEqual({ source: './src/index.ts', types: './src/index.ts' });
+    expect(manifest.exports['.']).toEqual({
+      browser: { source: './src/index.browser.ts', types: './src/index.browser.ts' },
+      source: './src/index.ts',
+      types: './src/index.ts',
+    });
+    expect(manifest.exports['./browser']).toEqual({
+      source: './src/index.browser.ts',
+      types: './src/index.browser.ts',
+    });
     expect(manifest.files).toEqual(['src']);
   });
 
