@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.0](https://github.com/ciatlas/core/compare/v2.3.0...v2.4.0) (2026-10-18)
+
+
+### Features
+
+* **expressions:** evaluate option for the runtime functions ([#48](https://github.com/ciatlas/core/issues/48)) ([edd0f04](https://github.com/ciatlas/core/commit/edd0f04f35c789f99dde36e6da44ed9730382eca))
+
 ## [2.3.0](https://github.com/ciatlas/core/compare/v2.2.0...v2.3.0) (2026-10-17)
 
 
