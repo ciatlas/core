@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.5.0](https://github.com/ciatlas/core/compare/v2.4.0...v2.5.0) (2026-10-18)
+
+
+### Features
+
+* **project:** a browser entry without node:fs, node:path or git ([#50](https://github.com/ciatlas/core/issues/50)) ([7fdfdbd](https://github.com/ciatlas/core/commit/7fdfdbd290acb158873c94b134fde187f8d5e89b))
+
 ## [2.4.0](https://github.com/ciatlas/core/compare/v2.3.0...v2.4.0) (2026-10-18)
 
 
