@@ -2,7 +2,6 @@
 
 The GitHub Actions workflow model behind [flowpact](https://github.com/ciatlas/flowpact) and simul-ci: it reads the
 workflows and local actions of a repository and models what they declare and how data flows between them.
-
 - **Parse:** workflow and action YAML into an IR with source locations, validated against GitHub's schema
   (`@actions/workflow-parser`).
 - **Resolve:** callers → reusable workflows → composite actions, `needs`, inputs, secrets, outputs, env and the
