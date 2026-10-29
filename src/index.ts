@@ -1,3 +1,4 @@
+export * from './actions-lock';
 export * from './checks';
 export * from './expressions';
 export * from './git';
