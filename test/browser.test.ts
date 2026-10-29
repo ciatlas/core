@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadProject as loadOnNode } from '../src/index';
-import { loadProject, memoryFileSystem } from '../src/index.browser';
+import { fetchRemoteSourceAt, loadProject, memoryFileSystem, parseRemoteRef } from '../src/index.browser';
 
 const SRC = resolve(import.meta.dirname, '../src');
 
@@ -30,6 +30,27 @@ describe('the browser entry', () => {
     const offenders = [...files].filter((f) => /from\s+'node:/.test(readFileSync(f, 'utf8')));
     expect(offenders.map((f) => f.slice(SRC.length + 1))).toEqual([]);
     expect([...files].some((f) => f.endsWith('/git.ts') || f.endsWith('/node-fs.ts'))).toBe(false);
+  });
+
+  it('serves the remote fetcher, which reaches nothing but the remote references and no Node global', () => {
+    const files = [...reachable(join(SRC, 'remote-fetch.ts'))].map((f) => f.slice(SRC.length + 1)).sort();
+    expect(files).toEqual(['remote-fetch.ts', 'remote-ref.ts']);
+    for (const file of files)
+      expect(readFileSync(join(SRC, file), 'utf8')).not.toMatch(/\bprocess\.|\bBuffer\b/);
+    expect(reachable(join(SRC, 'index.browser.ts')).has(join(SRC, 'remote-fetch.ts'))).toBe(true);
+  });
+
+  it('reads a remote source through the fetch it is given', async () => {
+    const sha = 'a'.repeat(40);
+    const fetch = async (url: string) =>
+      new Response(url.includes('/commits/') ? sha : 'runs:\n  using: node24\n');
+    const source = await fetchRemoteSourceAt(parseRemoteRef('octo/setup@v1', 'action')!, sha, { fetch });
+    expect(source).toMatchObject({
+      file: 'action.yml',
+      host: 'github.com',
+      text: 'runs:\n  using: node24\n',
+    });
+    expect(source.digest).toMatch(/^sha256-[A-Za-z0-9+/]{43}=$/);
   });
 
   it('loads the files it is given and names its targets by repository-relative paths', () => {

@@ -31,6 +31,13 @@ or git: the same parser, graph and queries, and a `loadProject` that takes the f
 `memoryFileSystem`. Bundlers that target the browser pick the condition on their own; `overlayFileSystem` layers
 unsaved edits over it.
 
+### Remote sources
+
+`resolveRemoteCommit` and `fetchRemoteSourceAt` read another repository's reusable workflow or action over the GitHub
+REST API, at a commit, with retries. The `fetch`, the token and a cache (`memoryRemoteCache`, or your own) are passed
+in, so they run in Node and in the browser; the token is sent only to its API. `@ciatlas/core/remote-fetch` serves them
+and the remote references alone, without the parser.
+
 ## Development
 
 ```sh

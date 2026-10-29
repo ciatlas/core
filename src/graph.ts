@@ -13,7 +13,10 @@ import type {
 } from './ir';
 import { lookup } from './ir';
 import { BUILTIN_SECRETS, refsOf } from './queries';
+import { remoteKey } from './remote-ref';
 import type { Loc } from './source';
+
+export { remoteKey } from './remote-ref';
 
 export type SymbolKind =
   | 'workflow'
@@ -194,15 +197,6 @@ function pickOutputs(names: string[], [, b, c]: string[]): string[] {
 function matrixKeys(job: JobDecl | undefined): string[] {
   const m = job?.matrix;
   return m ? [...m.dims.map((d) => d.name), ...m.include.flatMap((inc) => Object.keys(inc.keyLocs))] : [];
-}
-
-/**
- * The key of a remote `uses:` reference (`owner/repo/path@ref`): GitHub matches the owner and repository in any letter
- * case, and the path and ref as written.
- */
-export function remoteKey(raw: string): string {
-  const [owner = '', repo = '', ...rest] = raw.trim().split('/');
-  return [owner.toLowerCase(), repo.toLowerCase(), ...rest].join('/');
 }
 
 export interface Project {
