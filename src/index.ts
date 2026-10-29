@@ -18,6 +18,8 @@ export {
 } from './parse';
 export * from './project';
 export * from './queries';
+export * from './remote-fetch';
+export * from './remote-ref';
 export * from './source';
 export * from './text';
 export * from './trace';

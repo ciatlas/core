@@ -25,6 +25,10 @@
     "./browser": {
       "source": "./src/index.browser.ts",
       "types": "./src/index.browser.ts"
+    },
+    "./remote-fetch": {
+      "source": "./src/remote-fetch.ts",
+      "types": "./src/remote-fetch.ts"
     }
   },
   "files": [
