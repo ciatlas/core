@@ -2,6 +2,7 @@
  * The browser entry (the `browser` export condition, or `@ciatlas/core/browser`): everything but what needs a disk or
  * git. `loadProject` takes the files it is given (`memoryFileSystem`).
  */
+export * from './actions-lock';
 export * from './checks';
 export * from './expressions';
 export * from './glob';
