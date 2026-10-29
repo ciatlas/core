@@ -248,15 +248,32 @@ export interface Diagnostic {
   fix?: string;
 }
 
+/**
+ * The repository, file and commit of an external unit, from its `uses:` reference: `owner` and `repo` as written,
+ * `path` the file's directory or path in that repository (`''` for an action at its root), `ref` the part after `@`,
+ * and `sha` the commit that ref was read at, when the host knows it.
+ */
+export interface RemoteOrigin {
+  owner: string;
+  repo: string;
+  path: string;
+  ref: string;
+  sha?: string;
+}
+
 interface BaseDecl {
   path: string;
   file: string;
   name?: string;
   /**
-   * Set on a unit of another repository, made from its interface alone (see `LoadProjectOptions.remotes`): its `path`
-   * and `file` are the `uses:` reference, and it has no jobs or steps to follow.
+   * Set on a unit of another repository (see `LoadProjectOptions.remotes`): its `path` and `file` are the `uses:`
+   * reference. It has the jobs and steps of the text it was made from: none for an interface alone, all of them for a
+   * full body. Its `./` and same-repository `uses:` name files of its own repository (see `origin`), so nothing that
+   * follows a call in this project resolves them.
    */
   external?: true;
+  /** Where an external unit comes from, when its reference names one (`owner/repo[/path]@ref`). */
+  origin?: RemoteOrigin;
   source: SourceFile;
   sites: ExprSite[];
   parseErrors: Diagnostic[];
