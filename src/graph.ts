@@ -356,6 +356,17 @@ export interface ActionUse {
   action: ActionDecl;
 }
 
+/** The `uses:` of every job and step of a project's external units. */
+function externalUsesOf(project: Project): WeakSet<UsesRef> {
+  const out = new WeakSet<UsesRef>();
+  for (const unit of project.external?.values() ?? []) {
+    const users =
+      unit.kind === 'action' ? unit.steps : Object.values(unit.jobs).flatMap((j) => [j, ...j.steps]);
+    for (const { uses } of users) if (uses) out.add(uses);
+  }
+  return out;
+}
+
 /**
  * The analyzed repository as a queryable graph: who calls whom, which expression reads which symbol,
  * and where each value flows next.
@@ -370,8 +381,11 @@ export class ProjectIndex {
   private readonly definitions = new Map<string, Definition[]>();
   /** The secrets a whole `secrets` reads in each workflow, by path, once computed (see `secretNames`). */
   private readonly heldSecrets = new Map<string, string[]>();
+  /** The `uses:` of external units' jobs and steps: they name another repository's files, not this project's. */
+  private readonly externalUses: WeakSet<UsesRef>;
 
   constructor(readonly project: Project) {
+    this.externalUses = externalUsesOf(project);
     for (const wf of project.workflows.values()) this.indexWorkflow(wf);
     for (const a of project.actions.values()) this.indexAction(a);
     for (const unit of this.units()) for (const site of unit.sites) this.indexSite(unit, site);
@@ -404,10 +418,14 @@ export class ProjectIndex {
     return wf?.call ? wf : undefined;
   }
 
-  /** The local workflow file a job's `uses:` points at, reusable or not. */
+  /**
+   * The local workflow file a job's `uses:` points at, reusable or not. Never for a job of an external unit, whose `./`
+   * names its own repository's file (as `actionOf` never resolves an external unit's step).
+   */
   targetOf(job: JobDecl): WorkflowDecl | undefined {
     if (job.uses?.kind !== 'local-workflow' || !job.uses.target || job.uses.selfRef !== undefined)
       return undefined;
+    if (this.externalUses.has(job.uses)) return undefined;
     if (!/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(job.uses.target)) return undefined;
     return this.project.workflows.get(job.uses.target);
   }
@@ -434,6 +452,7 @@ export class ProjectIndex {
   actionOf(step: StepDecl): ActionDecl | undefined {
     if (step.uses?.kind !== 'local-action' || !step.uses.target || step.uses.selfRef !== undefined)
       return undefined;
+    if (this.externalUses.has(step.uses)) return undefined;
     return this.project.actions.get(step.uses.target);
   }
 

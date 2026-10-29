@@ -1,6 +1,6 @@
 import { matchesPattern } from './glob';
 import { type Project, remoteKey, type UnverifiedUse } from './graph';
-import type { ActionDecl, JobDecl, UnitDecl, WorkflowDecl } from './ir';
+import type { ActionDecl, JobDecl, RemoteOrigin, UnitDecl, WorkflowDecl } from './ir';
 import type { Logger } from './logger';
 import { silentLogger } from './logger';
 import { createParseContext, parseActionFile, parseWorkflowFile } from './parse';
@@ -93,6 +93,8 @@ export interface RemoteInterface {
   ref: string;
   kind: 'workflow' | 'action';
   text: string;
+  /** The commit `text` was read at, when known; kept on the unit's `origin`. */
+  sha?: string;
 }
 
 const isYaml = (p: string) => /\.ya?ml$/i.test(p);
@@ -298,7 +300,8 @@ export function loadProjectWith(opts: LoadProjectOptions, host: ProjectHost): Pr
 
 /**
  * The external units of remote interfaces (see `LoadProjectOptions.remotes`), by `remoteKey` of their reference; none
- * without remotes.
+ * without remotes. Each is parsed as its own repository's, so its `./` and same-repository `uses:` name that
+ * repository's files, never the caller's; site ids stay unique across the project.
  */
 function externalUnits(
   remotes: RemoteInterface[] = [],
@@ -307,11 +310,26 @@ function externalUnits(
   if (!remotes.length) return {};
   const out = new Map<string, UnitDecl>();
   for (const r of remotes) {
+    const origin = originOf(r);
+    const own = {
+      nextSiteId: ctx.nextSiteId,
+      ...(origin ? { repository: `${origin.owner}/${origin.repo}` } : {}),
+    };
     const unit: UnitDecl =
       r.kind === 'workflow'
-        ? parseWorkflowFile(r.ref, r.text, ctx)
-        : parseActionFile(r.ref, r.ref, r.text, ctx);
-    out.set(remoteKey(r.ref), { ...unit, external: true });
+        ? parseWorkflowFile(r.ref, r.text, own)
+        : parseActionFile(r.ref, r.ref, r.text, own);
+    out.set(remoteKey(r.ref), { ...unit, external: true, ...(origin ? { origin } : {}) });
   }
   return { external: out };
+}
+
+/** `owner/repo[/path]@ref` of a remote reference; undefined when it does not name a repository and a ref. */
+function originOf(r: RemoteInterface): RemoteOrigin | undefined {
+  const value = r.ref.trim();
+  const at = value.indexOf('@');
+  const [owner = '', repo = '', ...path] = (at < 0 ? value : value.slice(0, at)).split('/');
+  const ref = at < 0 ? '' : value.slice(at + 1);
+  if (!owner || !repo || !ref) return undefined;
+  return { owner, repo, path: path.join('/'), ref, ...(r.sha ? { sha: r.sha } : {}) };
 }
