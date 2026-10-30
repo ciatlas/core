@@ -9,6 +9,7 @@ export * from './locate';
 export * from './logger';
 export * from './matrix';
 export * from './node-fs';
+export * from './node-remote-cache';
 export {
   classifyUses,
   createParseContext,
