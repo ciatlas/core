@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.6.0](https://github.com/ciatlas/core/compare/v2.5.0...v2.6.0) (2026-10-30)
+
+
+### Features
+
+* **remote:** fetch remote sources through an injected fetch ([#60](https://github.com/ciatlas/core/issues/60)) ([06aff6f](https://github.com/ciatlas/core/commit/06aff6f8c6160062166ca6ff0d42a0b41d6e9700))
+* **remote:** read GitHub's actions.lock pins ([#58](https://github.com/ciatlas/core/issues/58)) ([6234279](https://github.com/ciatlas/core/commit/62342794ee5152bf68f0e0c1fc38d72c607dbb8d))
+* **remote:** the remote references inside a unit ([#62](https://github.com/ciatlas/core/issues/62)) ([9736c1b](https://github.com/ciatlas/core/commit/9736c1b44ff516ef2ad3cb06644ed5610afb8b08))
+
+
+### Bug Fixes
+
+* **project:** parse each remote unit as its own repository's ([#59](https://github.com/ciatlas/core/issues/59)) ([efd42f0](https://github.com/ciatlas/core/commit/efd42f0b877919c6aa8120c44d9515e89959cf16))
+
 ## [2.5.0](https://github.com/ciatlas/core/compare/v2.4.0...v2.5.0) (2026-10-18)
 
 ### Features
