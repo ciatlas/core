@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.7.0](https://github.com/ciatlas/core/compare/v2.6.0...v2.7.0) (2026-10-30)
+
+
+### Features
+
+* **remote:** a directory cache for remote sources ([#64](https://github.com/ciatlas/core/issues/64)) ([f38356c](https://github.com/ciatlas/core/commit/f38356cc6395fb8b0b85fed3fb2f054cbbdf9516))
+
 ## [2.6.0](https://github.com/ciatlas/core/compare/v2.5.0...v2.6.0) (2026-10-30)
 
 
