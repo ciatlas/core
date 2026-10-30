@@ -38,6 +38,11 @@ REST API, at a commit, with retries. The `fetch`, the token and a cache (`memory
 in, so they run in Node and in the browser; the token is sent only to its API. `@ciatlas/core/remote-fetch` serves them
 and the remote references alone, without the parser.
 
+`remoteRefOfUses` names the remote reference a `uses:` names, resolved where it is written: inside another repository's
+unit, a `./` or same-repository `uses:` names that repository's file at its commit, never yours. `remoteRefsOf` lists
+a project's remote references, and `fetchRemoteClosure` reads every remote source a project reaches, at the commits
+your pins give, breadth first.
+
 ## Development
 
 ```sh
