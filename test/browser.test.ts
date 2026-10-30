@@ -32,6 +32,12 @@ describe('the browser entry', () => {
     expect([...files].some((f) => f.endsWith('/git.ts') || f.endsWith('/node-fs.ts'))).toBe(false);
   });
 
+  it('leaves the directory cache to the Node entry', () => {
+    expect(reachable(join(SRC, 'index.browser.ts')).has(join(SRC, 'node-remote-cache.ts'))).toBe(false);
+    expect(reachable(join(SRC, 'index.ts')).has(join(SRC, 'node-remote-cache.ts'))).toBe(true);
+    expect(reachable(join(SRC, 'remote-fetch.ts')).has(join(SRC, 'node-remote-cache.ts'))).toBe(false);
+  });
+
   it('serves the remote fetcher, which reaches nothing but the remote references and no Node global', () => {
     const files = [...reachable(join(SRC, 'remote-fetch.ts'))].map((f) => f.slice(SRC.length + 1)).sort();
     expect(files).toEqual(['remote-fetch.ts', 'remote-ref.ts']);
