@@ -9,7 +9,10 @@ import { parse as parseYaml } from 'yaml';
 
 export const ACTIONS_LOCK_FILE = '.github/workflows/actions.lock';
 
-/** The schema versions read: v0.0.1 to v0.0.3 so far, which differ in keys this reader does not use. */
+/**
+ * The schema versions read: v0.0.1 to v0.0.3 so far. v0.0.1 keys a pin with its commit (`…@v2:sha1-<hex>`, see
+ * `keyOf`); otherwise they differ in keys this reader does not use.
+ */
 const KNOWN_VERSION = /^v0\.0\.\d+$/;
 
 export interface ActionsLock {
@@ -31,16 +34,20 @@ export interface ActionsLockRef {
   ref: string;
 }
 
-/** A pin as `actions.lock` keys it: owner and repository in any case, then the ref, without a path. */
+/**
+ * A pin as `actions.lock` keys it: owner and repository in any case, then the ref, without a path. A full commit SHA
+ * ref is in any case too (`gh actions-lock` writes it in lower case).
+ */
 export const actionsLockKey = (owner: string, repo: string, ref: string) =>
-  `${owner.toLowerCase()}/${repo.toLowerCase()}@${ref}`;
+  `${owner.toLowerCase()}/${repo.toLowerCase()}@${/^[0-9a-f]{40}$/i.test(ref) ? ref.toLowerCase() : ref}`;
 
 /**
  * A pin's key from the file. `gh actions-lock` writes `owner/repo@ref`; an `owner/repo/path@ref` is keyed by its
- * repository too, because the commit belongs to the repository. Undefined for anything else.
+ * repository too, because the commit belongs to the repository. The `:sha1-<hex>` (or `:sha256-`) suffix of a v0.0.1
+ * key is dropped. Undefined for anything else.
  */
 function keyOf(pin: string): string | undefined {
-  const m = /^([^/@:]+)\/([^/@:]+)(?:\/[^@:]*)?@([^:]+)$/.exec(pin);
+  const m = /^([^/@:]+)\/([^/@:]+)(?:\/[^@:]*)?@([^:]+)(?::sha(?:1|256)-[0-9a-f]+)?$/i.exec(pin);
   return m ? actionsLockKey(m[1]!, m[2]!, m[3]!) : undefined;
 }
 
