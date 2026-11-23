@@ -83,6 +83,33 @@ describe('readActionsLock', () => {
     expect(lock.commits.get('octo/cache@v4')).toBe(A);
   });
 
+  it('reads v0.0.1, whose keys end with the commit (`:sha1-<hex>` or `:sha256-<hex>`) and whose entries have a tag', () => {
+    const F = 'f'.repeat(64);
+    const text = yaml`
+      version: 'v0.0.1'
+      workflows:
+        '.github/workflows/ci.yml':
+          - 'octo/setup@v2:sha1-${A}'
+          - 'octo/cache/restore@v4:sha256-${F}'
+      dependencies:
+        'octo/setup@v2:sha1-${A}':
+          tag: 'v2'
+          commit: 'sha1-${A}'
+          owner_id: 1
+          repo_id: 2
+        'octo/cache/restore@v4:sha256-${F}':
+          tag: 'v4'
+          commit: 'sha256-${F}'
+          owner_id: 1
+          repo_id: 3
+    `;
+    const lock = lockOf(text);
+    expect(lock.workflows).toEqual(new Map([[CI, new Set(['octo/setup@v2', 'octo/cache@v4'])]]));
+    expect(lock.commits).toEqual(new Map([['octo/setup@v2', A]]));
+    expect(actionsLockCommit(lock, CI, action('octo', 'setup', 'v2'))).toBe(A);
+    expect(actionsLockCommit(lock, CI, action('octo', 'cache', 'v4'))).toBeUndefined();
+  });
+
   it('leaves out a pin whose commit is in another form, and a key that is no owner/repo@ref', () => {
     const lock = lockOf(
       lockText({ 'octo/setup@v2': A, 'docker://alpine:3': B }).replace(
@@ -135,6 +162,14 @@ describe('actionsLockCommit', () => {
     expect(actionsLockCommit(lock, CI, action('octo', 'ship', 'v1'))).toBe(B);
     expect(actionsLockCommit(lock, CI, action('octo', 'setup', 'v3'))).toBeUndefined();
     expect(actionsLockCommit(lock, CI, action('octo', 'setup', 'V2'))).toBeUndefined();
+  });
+
+  it('is the pinned commit of an action used at a full commit SHA, in any case', () => {
+    const pinned = lockOf(lockText({ [`octo/setup@${B}`]: B, [`octo/ship@${A.toUpperCase()}`]: A }));
+    expect(pinned.workflows.get(CI)).toEqual(new Set([`octo/setup@${B}`, `octo/ship@${A}`]));
+    expect(actionsLockCommit(pinned, CI, action('octo', 'setup', B.toUpperCase()))).toBe(B);
+    expect(actionsLockCommit(pinned, CI, action('Octo', 'Ship', A))).toBe(A);
+    expect(actionsLockKey('octo', 'setup', `V${'A'.repeat(39)}`)).toBe(`octo/setup@V${'A'.repeat(39)}`);
   });
 
   // UNVERIFIED until simulci's lab case R9: that GitHub runs a pin only in a covered workflow whose list names it.
