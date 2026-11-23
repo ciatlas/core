@@ -68,7 +68,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ciatlas/flowpact@d8b6afa9d25b9cf97a5ee56def896f8f9669a1df # v0.29.1
+      - uses: ciatlas/flowpact@ba8da0230576ac246b387193588d5cdaef9361dc # v0.29.2
         with:
           mode: lint
           fail-on: warning
